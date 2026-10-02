@@ -57,9 +57,10 @@ def make_library_router(library: Library, admin_dep, in_use: Callable[[str], boo
         return item.model_dump()
 
     @r.delete("/api/library/{name}")
-    def delete_library(name: str):
+    async def delete_library(name: str):
+        # async: Library.delete cancels asyncio tasks, which must happen on the event loop.
         try:
-            library.delete(name, in_use)
+            await library.delete(name, in_use)
         except LibraryError as e:
             raise _http(e) from e
         return {"ok": True}

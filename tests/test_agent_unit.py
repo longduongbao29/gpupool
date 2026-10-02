@@ -161,7 +161,8 @@ def test_lifecycle(pm, monkeypatch):
     st = pm.start(spec)
     assert st.state in ("starting", "running") and st.pid
     st = wait_state(pm, "e1", "running")
-    assert len(st.log_tail) == 50 and st.log_tail[-1] == "line 99"
+    assert len(st.log_tail) == 50 and st.log_tail[-1] == "line 99"  # get() keeps the tail
+    assert [s.log_tail for s in pm.list() if s.state == "running"] == [[]]  # list() drops it
     with pytest.raises(EngineExists):
         pm.start(spec)
     with pytest.raises(PortInUse):  # another engine id, same (now busy) port
@@ -183,6 +184,25 @@ def test_failed_exit_code_and_replace(pm, monkeypatch):
     pm.start(spec)  # replaces the dead entry
     st = wait_state(pm, "e1", "exited")
     assert st.exit_code == 0 and st.log_tail == ["ok"]
+
+
+def test_list_keeps_tail_of_failed_engine(pm, monkeypatch):
+    patch_cmd(monkeypatch, "import sys; print('boom'); sys.exit(3)")
+    pm.start(EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"]))
+    wait_state(pm, "e1", "failed")
+    (st,) = pm.list()
+    assert st.state == "failed" and st.log_tail == ["boom"]  # crash events read this
+
+
+def test_list_keeps_tail_of_starting_engine(pm, monkeypatch):
+    port = free_port()
+    patch_cmd(monkeypatch, "import time; print('loading', flush=True); time.sleep(60)")
+    pm.start(EngineSpec(engine_id="e1", kind="rpc", port=port, devices=["CPU"]))
+    end = time.time() + 10
+    while time.time() < end and pm.list()[0].log_tail != ["loading"]:
+        time.sleep(0.05)
+    (st,) = pm.list()
+    assert st.state == "starting" and st.log_tail == ["loading"]  # launch diagnostics
 
 
 def test_crashed_engine_stays_listed_until_stopped(pm, monkeypatch):
@@ -277,7 +297,8 @@ def test_ensure_http_download_and_cache(tmp_path, http_server):
     assert p == cache / "model.gguf" and n == 4100 and p.read_bytes()[:4] == b"GGUF"
     assert not list(cache.glob("*.part"))
     ensure_model("m", f"{http_server}/dir/model.gguf", cache, "x", "t")
-    assert len(_Handler.hits) == 1  # cache hit
+    # download + one size probe on the cache hit
+    assert _Handler.hits == ["/dir/model.gguf"] * 2
     assert list_models(cache) == ["model.gguf"]
 
 
@@ -302,7 +323,9 @@ def test_ensure_concurrent_downloads_once(tmp_path, http_server):
         ensure_model("m", f"{http_server}/z.gguf", tmp_path / "cache", "x", "t"))) for _ in range(4)]
     [t.start() for t in ts]
     [t.join() for t in ts]
-    assert len(res) == 4 and len(_Handler.hits) == 1
+    # one download; the three waiters find the file and only probe its size
+    assert len(res) == 4 and len(_Handler.hits) == 4
+    assert {r[1] for r in res} == {4100}
 
 
 def _split_names(stem, total):
@@ -320,7 +343,8 @@ def test_ensure_split_downloads_all_parts(tmp_path, http_server):
     assert _Handler.hits[-1] == f"/files/{names[0]}"  # part 1 last
     _Handler.hits.clear()
     p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
-    assert (p, n) == (cache / names[0], 3 * 4100) and _Handler.hits == []
+    assert (p, n) == (cache / names[0], 3 * 4100)
+    assert sorted(_Handler.hits) == sorted(f"/files/{x}" for x in names)  # probes only
 
 
 def test_ensure_split_fetches_only_missing_part(tmp_path, http_server):
@@ -330,7 +354,10 @@ def test_ensure_split_fetches_only_missing_part(tmp_path, http_server):
     (cache / names[1]).unlink()
     _Handler.hits.clear()
     p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
-    assert n == 3 * 4100 and _Handler.hits == [f"/files/{names[1]}"]
+    assert n == 3 * 4100
+    # part 2 downloaded; parts 3 and 1 only probed (part 1 last)
+    assert _Handler.hits == [f"/files/{names[1]}", f"/files/{names[2]}", f"/files/{names[0]}"]
+    assert (cache / names[1]).read_bytes()[:4] == b"GGUF"
 
 
 def test_ensure_split_http_source_swaps_last_segment(tmp_path, http_server):
@@ -353,6 +380,61 @@ def test_ensure_non_first_part_is_a_plain_file(tmp_path, http_server):
     name = _split_names("model", 3)[1]
     p, n = ensure_model("m", f"coordinator://{name}", tmp_path / "cache", http_server, "tok")
     assert n == 4100 and _Handler.hits == [f"/files/{name}"]
+
+
+def test_ensure_same_size_cache_is_not_redownloaded(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.gguf").write_bytes(b"S" * 4100)  # same size as the server's file
+    p, n = ensure_model("m", f"{http_server}/model.gguf", cache, "x", "t")
+    assert n == 4100 and p.read_bytes() == b"S" * 4100  # sentinel survived: body not fetched
+
+
+def test_ensure_different_size_cache_is_replaced(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.gguf").write_bytes(b"old quant")
+    p, n = ensure_model("m", f"{http_server}/model.gguf", cache, "x", "t")
+    assert n == 4100 and p.read_bytes()[:4] == b"GGUF"
+    assert not list(cache.glob("*.part"))
+
+
+def test_ensure_stale_cache_in_use_fails_instead_of_serving_it(tmp_path, http_server, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "model.gguf").write_bytes(b"old quant")
+    real_unlink = Path.unlink
+
+    def locked(self, *a, **kw):
+        if self.name == "model.gguf":
+            raise PermissionError("in use")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", locked)
+    with pytest.raises(OSError, match="stale"):
+        ensure_model("m", f"{http_server}/model.gguf", cache, "x", "t")
+
+
+def test_ensure_split_stale_part_is_replaced(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    names = _split_names("model", 2)
+    (cache / names[1]).write_bytes(b"x" * 10)  # stale part 2 from another file
+    p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    assert n == 2 * 4100 and (cache / names[1]).stat().st_size == 4100
+
+
+def test_ensure_probe_failure_keeps_cached_file(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "c.gguf").write_bytes(b"cached")
+    # wrong token -> 401 on the probe; the node must still start with what it has
+    p, n = ensure_model("m", "coordinator://c.gguf", cache, http_server, "wrong")
+    assert n == 6 and p.read_bytes() == b"cached"
+    # unreachable source: same
+    (cache / "d.gguf").write_bytes(b"cached")
+    p, n = ensure_model("m", "http://127.0.0.1:1/d.gguf", cache, "x", "t")
+    assert n == 6
 
 
 def test_ensure_missing_local(tmp_path):
@@ -391,6 +473,14 @@ def test_stale_pid_file_of_a_reused_pid_is_ignored(tmp_path):
 
 class _NvmlErr(Exception):
     pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_nvml_state():
+    from gpupool.agent import gpu
+    gpu._nvml_mod = None
+    yield
+    gpu._nvml_mod = None
 
 
 def _stub_nvml(monkeypatch, fail=(), procs_compute=(), procs_graphics=()):
@@ -551,3 +641,75 @@ def test_lost_gpu_in_memory_query_blocks_node(tmp_path, monkeypatch):
     m.nvmlDeviceGetMemoryInfo = mem
     devs = g._cuda_devices(make_cfg(tmp_path))
     assert len(devs) == 2 and all(d.usable_mb == 0 for d in devs)
+
+
+def _count_init(m):
+    calls = {"init": 0, "shutdown": 0}
+
+    def init():
+        calls["init"] += 1
+
+    def shutdown():
+        calls["shutdown"] += 1
+    m.nvmlInit, m.nvmlShutdown = init, shutdown
+    return calls
+
+
+def test_nvml_initialised_once_across_probes(tmp_path, monkeypatch):
+    m = _stub_nvml(monkeypatch)
+    calls = _count_init(m)
+    cfg = make_cfg(tmp_path)
+    for _ in range(3):
+        assert [d.device_id for d in probe_devices(cfg) if d.kind == "cuda"] == ["CUDA0"]
+    assert calls == {"init": 1, "shutdown": 0}
+
+
+def test_nvml_init_failure_retried_next_probe(tmp_path, monkeypatch):
+    m = _stub_nvml(monkeypatch)
+    state = {"n": 0}
+
+    def init():
+        state["n"] += 1
+        if state["n"] == 1:
+            raise _NvmlErr("DRIVER_NOT_LOADED")
+    m.nvmlInit = init
+    cfg = make_cfg(tmp_path)
+    assert [d for d in probe_devices(cfg) if d.kind == "cuda"] == []  # never raises
+    assert [d.device_id for d in probe_devices(cfg) if d.kind == "cuda"] == ["CUDA0"]
+    assert [d.device_id for d in probe_devices(cfg) if d.kind == "cuda"] == ["CUDA0"]
+    assert state["n"] == 2  # re-init only after the failure
+
+
+def test_nvml_uninitialized_error_triggers_reinit(tmp_path, monkeypatch):
+    m = _stub_nvml(monkeypatch)
+    calls = _count_init(m)
+
+    class NVMLError_Uninitialized(Exception):
+        pass
+    count = {"fail": True}
+
+    def get_count():
+        if count["fail"]:
+            count["fail"] = False
+            raise NVMLError_Uninitialized("Uninitialized")
+        return 1
+    m.nvmlDeviceGetCount = get_count
+    cfg = make_cfg(tmp_path)
+    assert [d for d in probe_devices(cfg) if d.kind == "cuda"] == []
+    assert [d.device_id for d in probe_devices(cfg) if d.kind == "cuda"] == ["CUDA0"]
+    assert calls["init"] == 2
+
+
+def test_nvml_lost_gpu_does_not_reinit(tmp_path, monkeypatch):
+    # GPU_IS_LOST is a per-device fault, not a library fault.
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+    calls = _count_init(m)
+
+    def mem(h):
+        raise _NvmlErr("GPU_IS_LOST")
+    m.nvmlDeviceGetMemoryInfo = mem
+    cfg = make_cfg(tmp_path)
+    g._cuda_devices(cfg)
+    g._cuda_devices(cfg)
+    assert calls["init"] == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
 import psutil
 
@@ -91,10 +92,47 @@ def _gpu_processes(pynvml, h) -> list[GpuProcess]:
     return list(by_pid.values())
 
 
+_nvml_lock = threading.Lock()
+_nvml_mod = None  # the pynvml module we initialised; None = not initialised
+
+
+def _nvml_init(pynvml) -> None:
+    """Init NVML once and keep it: init/shutdown on every 2 s probe is pure overhead."""
+    global _nvml_mod
+    with _nvml_lock:
+        if _nvml_mod is not pynvml:
+            pynvml.nvmlInit()  # raises when unusable; the flag stays unset so we retry
+            _nvml_mod = pynvml
+
+
+def _nvml_reset(pynvml) -> None:
+    global _nvml_mod
+    with _nvml_lock:
+        if _nvml_mod is pynvml:
+            _nvml_mod = None
+            try:
+                pynvml.nvmlShutdown()
+            except Exception:
+                pass
+
+
+# NVML_ERROR_UNINITIALIZED, DRIVER_NOT_LOADED, LIB_RM_VERSION_MISMATCH: the library (or the
+# driver under it) changed or went away, so a fresh nvmlInit is needed. Per-device errors
+# (GPU_IS_LOST, NOT_SUPPORTED) say nothing about the library and must not trigger it.
+_NVML_LIBRARY_ERRORS = {1, 9, 18}
+
+
+def _note_nvml_error(pynvml, e: Exception) -> None:
+    if (type(e).__name__ == "NVMLError_Uninitialized"
+            or getattr(e, "value", None) in _NVML_LIBRARY_ERRORS):
+        log.warning("NVML needs re-initialisation (%s)", e)
+        _nvml_reset(pynvml)
+
+
 def _cuda_devices(cfg: AgentConfig) -> list[Device]:
     import pynvml
 
-    pynvml.nvmlInit()
+    _nvml_init(pynvml)
     try:
         driver = _text(_best_effort(pynvml.nvmlSystemGetDriverVersion))
         cuda = _cuda_version(_best_effort(pynvml.nvmlSystemGetCudaDriverVersion_v2))
@@ -109,6 +147,7 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
                 # Skip only that GPU: raising here would report the node with no GPUs at all
                 # and fail replicas on its healthy GPUs too.
                 log.warning("NVML device %d unavailable, not reported: %s", i, e)
+                _note_nvml_error(pynvml, e)
                 lost = True
                 continue
             if isinstance(pci, bytes):
@@ -124,6 +163,7 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(h)
             except Exception as e:  # lost between enumeration and query: skip it alone
                 log.warning("NVML device %s unavailable, not reported: %s", pci, e)
+                _note_nvml_error(pynvml, e)
                 lost = True
                 continue
             if isinstance(name, bytes):
@@ -152,11 +192,9 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
             for d in out:
                 d.usable_mb = 0
         return out
-    finally:
-        try:
-            pynvml.nvmlShutdown()
-        except Exception:
-            pass
+    except Exception as e:
+        _note_nvml_error(pynvml, e)
+        raise
 
 
 def _cpu_device(cfg: AgentConfig) -> Device:

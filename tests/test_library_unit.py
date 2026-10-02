@@ -165,7 +165,7 @@ async def test_split_download_all_parts(lib):
     assert sorted(p.name for p in lib.models_dir.iterdir()) == [
         f"m-0000{i}-of-00003.gguf" for i in (1, 2, 3)]
     # Deleting the item removes every part.
-    lib.delete(item.name, lambda n: False)
+    await lib.delete(item.name, lambda n: False)
     assert not list(lib.models_dir.iterdir())
 
 
@@ -215,7 +215,7 @@ async def test_delete_while_downloading_cancels_and_removes_part(lib):
     await lib.add_hf(REPO, "m.gguf")
     await asyncio.wait_for(started.wait(), 5)
     task = lib._tasks["m.gguf"]
-    lib.delete("m.gguf", lambda n: False)
+    await lib.delete("m.gguf", lambda n: False)
     await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled() or task.done()
     assert lib.get("m.gguf") is None
@@ -295,11 +295,11 @@ def test_add_path_collision(lib, tmp_path):
     assert ei.value.status == 409
 
 
-def test_delete_path_item_keeps_user_file(lib, tmp_path):
+async def test_delete_path_item_keeps_user_file(lib, tmp_path):
     f = tmp_path / "keep.gguf"
     f.write_bytes(b"x")
     lib.add_path(str(f))
-    lib.delete("keep.gguf", lambda n: False)
+    await lib.delete("keep.gguf", lambda n: False)
     assert f.exists() and lib.get("keep.gguf") is None
 
 
@@ -308,19 +308,19 @@ async def test_delete_hf_item_removes_file(lib):
     respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(content=b"abc")
     await lib.add_hf(REPO, "m.gguf")
     await wait_status(lib, "m.gguf", "ready")
-    lib.delete("m.gguf", lambda n: False)
+    await lib.delete("m.gguf", lambda n: False)
     assert not (lib.models_dir / "m.gguf").exists()
 
 
-def test_delete_in_use_guard_and_unknown(lib, tmp_path):
+async def test_delete_in_use_guard_and_unknown(lib, tmp_path):
     f = tmp_path / "m.gguf"
     f.write_bytes(b"x")
     lib.add_path(str(f))
     with pytest.raises(LibraryError, match="uses this file") as ei:
-        lib.delete("m.gguf", lambda n: n == "m.gguf")
+        await lib.delete("m.gguf", lambda n: n == "m.gguf")
     assert ei.value.status == 409 and lib.get("m.gguf")
     with pytest.raises(LibraryError) as ei:
-        lib.delete("nope.gguf", lambda n: False)
+        await lib.delete("nope.gguf", lambda n: False)
     assert ei.value.status == 404
 
 
@@ -482,3 +482,34 @@ async def test_real_hf_listing(tmp_path):
     finally:
         await lb.shutdown()
     assert any(f["file"].endswith("q4_k_m.gguf") and f["bytes"] > 0 for f in files)
+
+
+@respx.mock
+async def test_delete_then_readd_same_name_keeps_new_download_intact(lib):
+    # The cancelled task cleans up its .part files; delete must wait for that, or the old task
+    # unlinks the NEW download's .part and the new download dies with FileNotFoundError.
+    started = asyncio.Event()
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            async def slow():
+                yield b"a" * 1000
+                started.set()
+                await asyncio.sleep(60)
+                yield b"b"
+            return httpx.Response(200, stream=slow())
+        return httpx.Response(200, content=b"new" * 100)
+
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").mock(side_effect=handler)
+    await lib.add_hf(REPO, "m.gguf")
+    await asyncio.wait_for(started.wait(), 5)
+    await lib.delete("m.gguf", lambda n: False)
+    assert "m.gguf" not in lib._tasks
+    await lib.add_hf(REPO, "m.gguf")
+    done = await wait_status(lib, "m.gguf", "ready")
+    assert done.downloaded == 300
+    assert (lib.models_dir / "m.gguf").read_bytes() == b"new" * 100
+    assert not list(lib.models_dir.glob("*.part"))

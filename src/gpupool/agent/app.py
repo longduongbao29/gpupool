@@ -83,6 +83,17 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host)
     version_cache: dict[str, str] = {}
+    # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
+    ensured: set[str] = set()
+    cache_root = Path(cfg.cache_dir).resolve()
+
+    def model_path_allowed(model_path: str) -> bool:
+        if model_path in ensured:
+            return True
+        try:
+            return Path(model_path).resolve().is_relative_to(cache_root)
+        except (OSError, ValueError):
+            return False
     # Default follows cfg.push_heartbeat: the coordinator pulls /report, and a server
     # removed from the UI must not re-register itself by pushing.
     if start_heartbeat is None:
@@ -163,9 +174,16 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
 
     @app.post("/engines", response_model=EngineStatus, dependencies=[auth])
     def start_engine(spec: EngineSpec):
+        # The cluster token must not become arbitrary llama-server flags or arbitrary files:
+        # the coordinator never sends extra_args and always ensures the model first.
+        if spec.extra_args:
+            raise HTTPException(422, "extra_args is not accepted by this agent")
         if spec.kind == "server":
             if not spec.model_path:
                 raise HTTPException(422, "server engine requires model_path")
+            if not model_path_allowed(spec.model_path):
+                raise HTTPException(
+                    422, "model_path must be inside the model cache or returned by /models/ensure")
             if not Path(spec.model_path).is_file():
                 raise HTTPException(422, f"model file not found: {spec.model_path}")
         elif len(spec.devices) != 1:
@@ -203,6 +221,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             raise HTTPException(422, str(e))
         except (httpx.HTTPError, OSError, ValueError) as e:
             raise HTTPException(502, f"model download failed: {e}")
+        ensured.add(str(path))
         return {"path": str(path), "bytes": size}
 
     return app

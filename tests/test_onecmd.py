@@ -58,6 +58,16 @@ def test_banner_contains_join_and_key():
     assert "http://pub:1#t'" in pub and "not reachable" not in pub
 
 
+def test_banner_warns_when_v1_is_open():
+    open_cfg = CoordinatorConfig(admin_key="a", cluster_token="t")
+    text = "\n".join(startup_banner(open_cfg, lan_ip="10.0.0.1"))
+    assert "/v1" in text and "WITHOUT a key" in text
+    assert "GPUPOOL_API_KEYS" in text and "api_keys" in text
+    keyed = "\n".join(startup_banner(
+        CoordinatorConfig(admin_key="a", cluster_token="t", api_keys=["k"]), lan_ip="10.0.0.1"))
+    assert "WITHOUT a key" not in keyed
+
+
 # ---------------------------------------------------------------- join string / identity
 
 def test_parse_join():

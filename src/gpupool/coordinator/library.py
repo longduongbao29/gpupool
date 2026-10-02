@@ -222,16 +222,23 @@ class Library:
             raise LibraryError(f"library already has a model named {name}", 409) from e
         return self.get(name)  # type: ignore[return-value]
 
-    def delete(self, name: str, in_use: Callable[[str], bool]) -> None:
+    async def delete(self, name: str, in_use: Callable[[str], bool]) -> None:
+        """Must run on the event loop that owns the download tasks (task.cancel is not
+        thread-safe), hence async."""
         item = self.get(name)
         if item is None:
             raise LibraryError(f"no library item {name}", 404)
         if in_use(name):
             raise LibraryError(f"model {name} uses this file; stop and delete it first", 409)
-        task = self._tasks.pop(name, None)
+        task = self._tasks.get(name)
         if task:
             task.cancel()
-        # Row first: a cancelled download must not resurrect it as "failed".
+            # Wait for the task's own cleanup. While the row still exists a re-add of the same
+            # name gets 409, so the old task can never unlink the NEW download's .part file.
+            await asyncio.gather(task, return_exceptions=True)
+            if self._tasks.get(name) is task:
+                self._tasks.pop(name, None)
+        # The task is gone, so nothing can resurrect the row as "failed" after this.
         self._exec("DELETE FROM library WHERE name=?", (name,))
         if item.source == "hf":
             for fname in self._part_names(item):

@@ -55,15 +55,24 @@ class Store:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._lock = threading.Lock()
+        self._version = 0
         with self._lock:
             if not memory:
                 self._conn.execute("PRAGMA journal_mode=WAL")
             with self._conn:
                 self._conn.executescript(_SCHEMA)
 
-    def _write(self, sql: str, params: tuple = ()) -> None:
+    @property
+    def version(self) -> int:
+        """Bumped (under the lock) by every write to nodes, models, replicas or servers, so
+        readers can cache derived data and rebuild only when this changes."""
+        return self._version
+
+    def _write(self, sql: str, params: tuple = (), bump: bool = True) -> None:
         with self._lock, self._conn:
             self._conn.execute(sql, params)
+            if bump:
+                self._version += 1
 
     def _read(self, sql: str, params: tuple = ()) -> list[tuple]:
         with self._lock:
@@ -104,16 +113,17 @@ class Store:
             self._conn.execute("DELETE FROM servers WHERE node_id=?", (node_id,))
             self._conn.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
             self._conn.execute("DELETE FROM gpu_flags WHERE node_id=?", (node_id,))
+            self._version += 1
 
     # servers removed by the operator: auto-join must not bring them back
     def mark_removed(self, node_id: str, now: float | None = None) -> None:
         self._write(
             "INSERT INTO removed_servers(node_id, removed_at) VALUES(?,?) "
             "ON CONFLICT(node_id) DO UPDATE SET removed_at=excluded.removed_at",
-            (node_id, time.time() if now is None else now))
+            (node_id, time.time() if now is None else now), bump=False)
 
     def clear_removed(self, node_id: str) -> None:
-        self._write("DELETE FROM removed_servers WHERE node_id=?", (node_id,))
+        self._write("DELETE FROM removed_servers WHERE node_id=?", (node_id,), bump=False)
 
     def is_removed(self, node_id: str) -> bool:
         return bool(self._read("SELECT 1 FROM removed_servers WHERE node_id=?", (node_id,)))
@@ -123,7 +133,7 @@ class Store:
         self._write(
             "INSERT INTO gpu_flags(node_id, device_id, enabled) VALUES(?,?,?) "
             "ON CONFLICT(node_id, device_id) DO UPDATE SET enabled=excluded.enabled",
-            (node_id, device_id, int(enabled)),
+            (node_id, device_id, int(enabled)), bump=False,
         )
 
     def gpu_flags(self) -> dict[tuple[str, str], bool]:
@@ -158,7 +168,7 @@ class Store:
         return self._read("SELECT COUNT(*) FROM events WHERE read=0")[0][0]
 
     def mark_read(self, up_to_id: int) -> None:
-        self._write("UPDATE events SET read=1 WHERE id<=?", (up_to_id,))
+        self._write("UPDATE events SET read=1 WHERE id<=?", (up_to_id,), bump=False)
 
     # models
     def put_model(self, spec: ModelSpec) -> None:
@@ -221,6 +231,7 @@ class Store:
                 "UPDATE replicas SET state=?, updated_at=?, data=? WHERE replica_id=?",
                 (rec.state, rec.updated_at, rec.model_dump_json(), replica_id),
             )
+            self._version += 1
 
     def prune_replicas(self, keep_per_model: int) -> int:
         """Delete terminal replicas (state 'stopped' or 'failed') of each model beyond the
@@ -233,6 +244,8 @@ class Store:
                 "   PARTITION BY model ORDER BY created_at DESC, replica_id DESC) AS rn"
                 "  FROM replicas WHERE state IN ('stopped', 'failed')) WHERE rn > ?)",
                 (max(0, keep_per_model),))
+            if cur.rowcount:
+                self._version += 1
             return cur.rowcount
 
     def close(self) -> None:

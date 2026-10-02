@@ -267,22 +267,41 @@ def create_app(
         }
 
     # ---- router
+    # The per-request path must not parse every node report and model spec. The snapshot holds
+    # only what routing needs and is rebuilt when the store version moved. Liveness is NOT in
+    # it: a node that just went silent triggers no write, so it is judged on every call.
+    snap: tuple = (-1, [], {}, {})  # (version, model names, ready replicas per model, nodes)
+
+    def _snapshot() -> tuple:
+        nonlocal snap
+        cur = snap
+        v = store.version  # read BEFORE building: a racing write only causes one extra rebuild
+        if cur[0] == v:
+            return cur
+        names = [m.name for m in store.list_models()]
+        ready: dict[str, list[tuple[str, str, int]]] = {}
+        for r in store.list_replicas(states={"ready"}):
+            ready.setdefault(r.model, []).append(
+                (r.replica_id, r.placement.head_node, r.placement.head_port))
+        nodes = {n.report.node_id: (n.report.host, n.last_seen) for n in store.list_nodes()}
+        snap = cur = (v, names, ready, nodes)
+        return cur
+
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
-        nodes = {n.report.node_id: n for n in store.list_nodes()}
+        _, _, ready, nodes = _snapshot()
         out = []
-        for r in store.list_replicas(model=model, states={"ready"}):
-            n = nodes.get(r.placement.head_node)
-            if n is None or now - n.last_seen > cfg.heartbeat_timeout_s:
+        for replica_id, head_node, head_port in ready.get(model, ()):
+            n = nodes.get(head_node)
+            if n is None or now - n[1] > cfg.heartbeat_timeout_s:
                 continue
             out.append(ReplicaEndpoint(
-                replica_id=r.replica_id, model=model,
-                base_url=f"http://{n.report.host}:{r.placement.head_port}"))
+                replica_id=replica_id, model=model, base_url=f"http://{n[0]}:{head_port}"))
         return out
 
     app.include_router(make_router(
         get_candidates=get_candidates,
-        list_models=lambda: [m.name for m in store.list_models()],
+        list_models=lambda: list(_snapshot()[1]),
         balancer=balancer, metrics=metrics, api_keys=cfg.api_keys,
         on_replica_error=reconciler.note_error,
     ))
@@ -339,6 +358,10 @@ def startup_banner(cfg: CoordinatorConfig, lan_ip: str | None = None) -> list[st
         "Without Docker:",
         f"  uv run gpupool agent --join '{join}' --llama-dir /path/to/llama.cpp/bin",
     ]
+    if not cfg.api_keys:
+        lines += ["",
+                  "WARNING: the OpenAI-compatible API at /v1 accepts requests WITHOUT a key.",
+                  "Set one with GPUPOOL_API_KEYS (comma-separated) or api_keys in the TOML."]
     if not cfg.public_url:
         lines += ["",
                   "If this IP is not reachable from your servers (e.g. the coordinator runs in",

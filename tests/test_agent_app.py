@@ -95,6 +95,80 @@ async def test_server_validation(cfg):
         assert r.status_code == 422
 
 
+class _FakePM:
+    """Records start() calls; the API gate is what is under test, not the process."""
+
+    def __init__(self):
+        self.started = []
+
+    def start(self, spec, model_path):
+        from gpupool.common.models import EngineStatus
+        self.started.append((spec, model_path))
+        return EngineStatus(engine_id=spec.engine_id, kind=spec.kind, state="starting",
+                            port=spec.port)
+
+    def list(self):
+        return []
+
+    def stop_all(self):
+        pass
+
+
+SERVER = {"engine_id": "h", "kind": "server", "port": 1, "devices": ["CUDA0"], "model": "m"}
+
+
+async def test_extra_args_rejected(cfg):
+    pm = _FakePM()
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    async with client(app) as c:
+        r = await c.post("/engines", json={"engine_id": "r", "kind": "rpc", "port": 1,
+                                           "devices": ["CPU"], "extra_args": ["--evil"]},
+                         headers=H)
+        assert r.status_code == 422 and "extra_args" in r.json()["detail"]
+    assert pm.started == []
+
+
+async def test_server_model_path_inside_cache_accepted(cfg):
+    cfg.cache_dir.mkdir()
+    f = cfg.cache_dir / "m.gguf"
+    f.write_bytes(b"x")
+    pm = _FakePM()
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    async with client(app) as c:
+        r = await c.post("/engines", json={**SERVER, "model_path": str(f)}, headers=H)
+    assert r.status_code == 200 and pm.started[0][1] == str(f)
+
+
+async def test_server_model_path_outside_cache_rejected(cfg, tmp_path):
+    cfg.cache_dir.mkdir()
+    outside = tmp_path / "secret.gguf"
+    outside.write_bytes(b"x")
+    pm = _FakePM()
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    async with client(app) as c:
+        r = await c.post("/engines", json={**SERVER, "model_path": str(outside)}, headers=H)
+        assert r.status_code == 422
+        # a ../ escape out of the cache must not pass as "inside"
+        sneaky = str(cfg.cache_dir / ".." / "secret.gguf")
+        r = await c.post("/engines", json={**SERVER, "model_path": sneaky}, headers=H)
+        assert r.status_code == 422
+    assert pm.started == []
+
+
+async def test_server_model_path_from_ensure_accepted(cfg, tmp_path):
+    local = tmp_path / "local.gguf"  # absolute-file source: outside the cache
+    local.write_bytes(b"12345")
+    pm = _FakePM()
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    async with client(app) as c:
+        r = await c.post("/engines", json={**SERVER, "model_path": str(local)}, headers=H)
+        assert r.status_code == 422  # not ensured yet
+        await c.post("/models/ensure", json={"name": "m", "source": str(local)}, headers=H)
+        r = await c.post("/engines", json={**SERVER, "model_path": str(local)}, headers=H)
+        assert r.status_code == 200
+    assert len(pm.started) == 1
+
+
 async def test_models_ensure(cfg, tmp_path):
     f = tmp_path / "m.gguf"
     f.write_bytes(b"12345")

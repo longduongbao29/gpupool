@@ -156,3 +156,63 @@ async def test_meta_provider_sums_split_parts(tmp_path):
     from gpupool.scheduler.gguf_meta import read_meta
     assert meta.layer_bytes == read_meta(whole).layer_bytes and sum(meta.layer_bytes) > 0
     lib._db.close()
+
+
+@pytest.fixture
+def routing(tmp_path, monkeypatch):
+    """App built with start_background=False; captures the router's callables."""
+    from gpupool.router import proxy
+    from tests.test_coordinator_helpers import Clock
+
+    captured = {}
+    real = proxy.make_router
+    monkeypatch.setattr(proxy, "make_router", lambda **kw: captured.update(kw) or real(**kw))
+    store = Store(":memory:")
+    calls = {"nodes": 0, "models": 0}
+    for name in ("list_nodes", "list_models"):
+        orig = getattr(store, name)
+
+        def wrap(orig=orig, key=name.split("_")[1]):
+            calls[key] += 1
+            return orig()
+        monkeypatch.setattr(store, name, wrap)
+    cfg = make_cfg(tmp_path)
+    app = create_app(cfg, store=store, client=FakeClient(), start_background=False,
+                     library=Library(":memory:", cfg.models_dir))
+    clock = Clock(1000.0)
+    app.state.reconciler.clock = clock
+    return captured, store, calls, clock, cfg
+
+
+def test_candidates_cached_until_a_write(routing):
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    store.put_model(SPEC)
+    put_replica(store, "m-1", now=clock())
+    first = cap["get_candidates"]("m")
+    assert [e.base_url for e in first] == ["http://10.0.0.1:9000"]
+    n = dict(calls)
+    assert cap["get_candidates"]("m") == first and cap["list_models"]() == ["m"]
+    assert calls == n  # no second trip to the store
+    put_replica(store, "m-2", now=clock(), head_port=9100)
+    assert [e.base_url for e in cap["get_candidates"]("m")] == [
+        "http://10.0.0.1:9000", "http://10.0.0.1:9100"]
+    assert calls["nodes"] == n["nodes"] + 1
+    store.set_replica_state("m-1", "draining")
+    assert [e.replica_id for e in cap["get_candidates"]("m")] == ["m-2"]
+    store.delete_model("m")
+    assert cap["list_models"]() == []
+    assert cap["get_candidates"]("other") == []
+
+
+def test_stale_node_drops_out_without_any_write(routing):
+    cap, store, calls, clock, cfg = routing
+    store.upsert_node(node("a"), clock())
+    put_replica(store, "m-1", now=clock())
+    assert len(cap["get_candidates"]("m")) == 1
+    n = dict(calls)
+    clock.t += cfg.heartbeat_timeout_s + 1  # node died: no heartbeat, no store write
+    assert cap["get_candidates"]("m") == []
+    assert calls == n  # judged from the cached snapshot, liveness evaluated per call
+    store.upsert_node(node("a"), clock())  # heartbeat resumes
+    assert len(cap["get_candidates"]("m")) == 1

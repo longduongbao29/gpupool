@@ -123,3 +123,31 @@ def test_prune_replicas_tie_breaks_on_replica_id(store):
         put_replica(store, rid, "m", "failed", now=1000.0)
     assert store.prune_replicas(1) == 2
     assert [r.replica_id for r in store.list_replicas()] == ["m-c"]
+
+
+def test_version_bumps_on_routing_writes_only(store):
+    from gpupool.coordinator.store import ServerRecord
+
+    v = store.version
+    assert isinstance(v, int)
+    store.list_nodes(); store.list_models(); store.list_replicas(); store.list_servers()
+    assert store.version == v  # reads never bump
+
+    def bumped(fn):
+        nonlocal v
+        fn()
+        assert store.version > v, fn
+        v = store.version
+
+    bumped(lambda: store.upsert_node(node("a"), 1.0))
+    bumped(lambda: store.put_model(SPEC))
+    bumped(lambda: put_replica(store, "m-1"))
+    bumped(lambda: store.set_replica_state("m-1", "stopped"))
+    bumped(lambda: store.prune_replicas(0))
+    bumped(lambda: store.add_server(ServerRecord(node_id="a", agent_url="http://a", added_at=0.0)))
+    bumped(lambda: store.delete_server("a"))
+    bumped(lambda: store.delete_model("m"))
+    # no-ops do not bump
+    store.set_replica_state("missing", "stopped")
+    assert store.prune_replicas(5) == 0
+    assert store.version == v

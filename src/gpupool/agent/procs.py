@@ -211,7 +211,7 @@ class ProcessManager:
             self._write_pid(spec.engine_id, proc)
         return self._status(eng)
 
-    def _status(self, eng: _Engine) -> EngineStatus:
+    def _status(self, eng: _Engine, tail_when_running: bool = True) -> EngineStatus:
         with eng.lock:
             code = eng.proc.poll()
             if code is not None:
@@ -229,7 +229,8 @@ class ProcessManager:
             return EngineStatus(
                 engine_id=eng.spec.engine_id, kind=eng.spec.kind, state=state,
                 pid=eng.proc.pid, port=eng.spec.port, exit_code=code,
-                log_tail=_tail_lines(eng.log_path))
+                log_tail=_tail_lines(eng.log_path)
+                if state != "running" or tail_when_running else [])
 
     def get(self, engine_id: str) -> EngineStatus | None:
         with self._lock:
@@ -239,7 +240,10 @@ class ProcessManager:
     def list(self) -> list[EngineStatus]:
         with self._lock:
             engs = list(self._engines.values())
-        return [self._status(e) for e in engs]
+        # /report polls this every 2 s: a healthy engine's log tail is dead weight (disk read
+        # per engine per poll). Starting/exited/failed keep it: the coordinator reads crash
+        # and launch diagnostics from there. get() always returns the full tail.
+        return [self._status(e, tail_when_running=False) for e in engs]
 
     def stop(self, engine_id: str, timeout: float = 10.0) -> EngineStatus | None:
         with self._lock:
