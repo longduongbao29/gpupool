@@ -70,3 +70,17 @@ def test_real_split_command_is_accepted_by_llama_server(tmp_path):
         assert r.returncode == 0 and "RPC0" in out, out[-2000:]
     finally:
         pm.stop_all()
+
+
+def test_real_gpu_telemetry():
+    from gpupool.agent.gpu import probe_devices
+    from gpupool.common.config import AgentConfig
+    devs = probe_devices(AgentConfig(node_id="n", llama_dir=LLAMA_DIR, include_cpu=False))
+    if not devs:
+        pytest.skip("no NVML devices")
+    d = devs[0]
+    print("REAL", d.model_dump())
+    assert d.temp_c is not None and 0 < d.temp_c < 120
+    assert d.driver and d.cuda and "." in d.cuda
+    assert d.power_w is None or d.power_w >= 0  # laptops may not report power
+    assert isinstance(d.processes, list)

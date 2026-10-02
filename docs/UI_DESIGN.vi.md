@@ -125,3 +125,27 @@ Ghép `coordinator/app.py` là việc của lead sau khi các agent xong.
   màn hình UI cho báo cáo.
 - Docker: build image trên GitHub Actions (laptop này không có Docker). Chạy image agent với GPU **không**
   test được ở đây và sẽ được ghi rõ là chưa test.
+
+## 8. Phát hiện sự cố và thông báo (bổ sung 2026-10-02)
+
+Một server có thể mất điện, hoặc một GPU rớt khỏi bus, trong lúc model đang chạy trên đó.
+
+| Tình huống | Phát hiện bằng | Xử lý |
+| --- | --- | --- |
+| Server chết (mất điện, mất mạng, agent crash) | không lấy được `/report` trong `heartbeat_timeout_s` (10 giây; hỏi mỗi 2 giây) | replica dùng server đó → `failed`; engine còn sống ở server khác bị dừng; xếp lại trên các GPU còn lại |
+| Một GPU mất, server vẫn sống | GPU biến mất khỏi report của server | replica dùng GPU đó → `failed`, xếp lại |
+| Tiến trình llama.cpp crash | engine `exited`/`failed` trong report | replica → `failed`, xếp lại |
+| Không còn đủ chỗ | `plan()` báo `NoFit` | model hiện failed kèm "cần X GB, pool còn Y GB"; tự thử lại khi có chỗ |
+
+Mỗi lần chuyển trạng thái được ghi thành một **event** (`info` / `warning` / `error`): `node_offline`,
+`node_online`, `gpu_missing`, `engine_crashed`, `realloc_started`, `realloc_done`, `realloc_failed`,
+`launch_failed`, cùng các thao tác với server/model. Mỗi lần chuyển trạng thái chỉ sinh một event, không
+lặp lại mỗi vòng reconcile.
+
+Người dùng được báo qua: chuông có số chưa đọc và toast trên UI, trang Events, thông báo desktop tuỳ
+chọn (Notification API của trình duyệt), và webhook tuỳ chọn (`webhook_url`, tương thích Slack hoặc
+Discord) cho mức warning và error, để vẫn nhận báo động khi không mở UI.
+
+Request đang chạy trên replica bị chết sẽ mất, trừ khi chưa nhận byte nào (router thử lại trên replica
+khác). Request mới đi ngay sang các replica còn lại; nếu model chỉ có một replica thì sẽ gián đoạn cho tới
+khi cấp phát lại xong (vài giây với model nhỏ, lâu hơn khi weights phải truyền qua RPC).

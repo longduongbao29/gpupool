@@ -8,7 +8,7 @@ import os
 import psutil
 
 from gpupool.common.config import AgentConfig
-from gpupool.common.models import Device
+from gpupool.common.models import Device, GpuProcess
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +36,59 @@ def _fake_devices(cfg: AgentConfig, raw: str) -> list[Device]:
             total_mb=total, free_mb=free,
             usable_mb=_usable(cfg, d["device_id"], kind, total, free),
             util_pct=d.get("util_pct"),
+            temp_c=d.get("temp_c"), power_w=d.get("power_w"),
+            processes=[GpuProcess(**p) for p in d.get("processes", [])],
+            driver=d.get("driver"), cuda=d.get("cuda"),
         ))
     return out
+
+
+def _best_effort(fn, default=None):
+    """Call an NVML getter; any failure (NOT_SUPPORTED on laptops/WSL, ...) yields default."""
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def _text(v) -> str | None:
+    if v is None:
+        return None
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def _cuda_version(raw) -> str | None:
+    # NVML encodes 12020 as 12.2 (major*1000 + minor*10).
+    if not isinstance(raw, int) or raw <= 0:
+        return None
+    return f"{raw // 1000}.{(raw % 1000) // 10}"
+
+
+def _proc_name(pid: int) -> str:
+    try:
+        return psutil.Process(pid).name()
+    except Exception:  # other users' processes are often hidden; also NoSuchProcess
+        return ""
+
+
+def _gpu_processes(pynvml, h) -> list[GpuProcess]:
+    na = getattr(pynvml, "NVML_VALUE_NOT_AVAILABLE", None)
+    by_pid: dict[int, GpuProcess] = {}
+    for getter in ("nvmlDeviceGetComputeRunningProcesses", "nvmlDeviceGetGraphicsRunningProcesses"):
+        fn = getattr(pynvml, getter, None)
+        if fn is None:
+            continue
+        for p in _best_effort(lambda: fn(h), []) or []:
+            try:
+                pid = int(p.pid)
+                if pid in by_pid:
+                    continue
+                used = p.usedGpuMemory
+                used_mb = None if used is None or used == na else int(used // _MB)
+                by_pid[pid] = GpuProcess(pid=pid, name=_proc_name(pid), used_mb=used_mb)
+            except Exception:
+                continue
+    return list(by_pid.values())
 
 
 def _cuda_devices(cfg: AgentConfig) -> list[Device]:
@@ -45,10 +96,19 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
 
     pynvml.nvmlInit()
     try:
+        driver = _text(_best_effort(pynvml.nvmlSystemGetDriverVersion))
+        cuda = _cuda_version(_best_effort(pynvml.nvmlSystemGetCudaDriverVersion_v2))
         found = []
         for i in range(pynvml.nvmlDeviceGetCount()):
-            h = pynvml.nvmlDeviceGetHandleByIndex(i)
-            pci = pynvml.nvmlDeviceGetPciInfo(h).busId
+            try:
+                h = pynvml.nvmlDeviceGetHandleByIndex(i)
+                pci = pynvml.nvmlDeviceGetPciInfo(h).busId
+            except Exception as e:
+                # A GPU that fell off the bus still counts but every call fails (GPU_IS_LOST).
+                # Skip only that GPU: raising here would report the node with no GPUs at all
+                # and fail replicas on its healthy GPUs too.
+                log.warning("NVML device %d unavailable, not reported: %s", i, e)
+                continue
             if isinstance(pci, bytes):
                 pci = pci.decode()
             found.append((str(pci), h))
@@ -56,19 +116,28 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
         # "CUDA<i>" in llama.cpp == i-th device in PCI order here.
         found.sort(key=lambda t: t[0])
         out = []
-        for idx, (_, h) in enumerate(found):
-            name = pynvml.nvmlDeviceGetName(h)
+        for idx, (pci, h) in enumerate(found):
+            try:
+                name = pynvml.nvmlDeviceGetName(h)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            except Exception as e:  # lost between enumeration and query: skip it alone
+                log.warning("NVML device %s unavailable, not reported: %s", pci, e)
+                continue
             if isinstance(name, bytes):
                 name = name.decode()
-            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
             total, free = int(mem.total // _MB), int(mem.free // _MB)
             try:
                 util = int(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
             except Exception:
                 util = None
+            temp = _best_effort(
+                lambda: int(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)))
+            power = _best_effort(lambda: int(round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000)))
             did = f"CUDA{idx}"
             out.append(Device(device_id=did, kind="cuda", name=name, total_mb=total, free_mb=free,
-                              usable_mb=_usable(cfg, did, "cuda", total, free), util_pct=util))
+                              usable_mb=_usable(cfg, did, "cuda", total, free), util_pct=util,
+                              temp_c=temp, power_w=power, processes=_gpu_processes(pynvml, h),
+                              driver=driver, cuda=cuda))
         return out
     finally:
         try:

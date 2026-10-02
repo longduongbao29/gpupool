@@ -306,3 +306,108 @@ def test_stale_pid_file_of_a_reused_pid_is_ignored(tmp_path):
     (logs / "old.pid").write_text(f"{os.getpid()} 12345.0\n")
     ProcessManager(tmp_path, logs, "127.0.0.1")
     assert not (logs / "old.pid").exists()  # we are still alive to assert this
+
+
+# ---------- NVML telemetry mapping (stubbed pynvml) ----------
+
+class _NvmlErr(Exception):
+    pass
+
+
+def _stub_nvml(monkeypatch, fail=(), procs_compute=(), procs_graphics=()):
+    import types
+    from types import SimpleNamespace as NS
+
+    def guard(name, value):
+        def f(*a, **k):
+            if name in fail:
+                raise _NvmlErr("NOT_SUPPORTED")
+            return value
+        return f
+
+    m = types.ModuleType("pynvml")
+    m.NVML_TEMPERATURE_GPU = 0
+    m.NVML_VALUE_NOT_AVAILABLE = 2**64 - 1
+    m.nvmlInit = lambda: None
+    m.nvmlShutdown = lambda: None
+    m.nvmlDeviceGetCount = lambda: 1
+    m.nvmlDeviceGetHandleByIndex = lambda i: "h"
+    m.nvmlDeviceGetPciInfo = lambda h: NS(busId="0000:01:00.0")
+    m.nvmlDeviceGetName = lambda h: b"GPU X"
+    m.nvmlDeviceGetMemoryInfo = lambda h: NS(total=4000 * 1024 * 1024, free=3000 * 1024 * 1024)
+    m.nvmlDeviceGetUtilizationRates = lambda h: NS(gpu=7)
+    m.nvmlDeviceGetTemperature = guard("temp", 61)
+    m.nvmlDeviceGetPowerUsage = guard("power", 25400)
+    m.nvmlSystemGetDriverVersion = guard("driver", b"535.154.05")
+    m.nvmlSystemGetCudaDriverVersion_v2 = guard("cuda", 12020)
+    m.nvmlDeviceGetComputeRunningProcesses = guard("compute", list(procs_compute))
+    m.nvmlDeviceGetGraphicsRunningProcesses = guard("graphics", list(procs_graphics))
+    monkeypatch.setitem(sys.modules, "pynvml", m)
+    monkeypatch.delenv("GPUPOOL_FAKE_DEVICES", raising=False)
+    return m
+
+
+def test_nvml_fields_mapped(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    import gpupool.agent.gpu as g
+    na = 2**64 - 1
+    monkeypatch.setattr(g.psutil, "Process", lambda pid: NS(name=lambda: f"p{pid}"))
+    _stub_nvml(monkeypatch,
+               procs_compute=[NS(pid=1, usedGpuMemory=512 * 1024 * 1024), NS(pid=2, usedGpuMemory=na)],
+               procs_graphics=[NS(pid=1, usedGpuMemory=1), NS(pid=3, usedGpuMemory=None)])
+    d = g._cuda_devices(make_cfg(tmp_path))[0]
+    assert (d.temp_c, d.power_w, d.driver, d.cuda, d.util_pct) == (61, 25, "535.154.05", "12.2", 7)
+    assert [(p.pid, p.name, p.used_mb) for p in d.processes] == [
+        (1, "p1", 512), (2, "p2", None), (3, "p3", None)]
+
+
+@pytest.mark.parametrize("fail", ["temp", "power", "driver", "cuda", "compute", "graphics"])
+def test_nvml_each_call_best_effort(tmp_path, monkeypatch, fail):
+    import gpupool.agent.gpu as g
+    _stub_nvml(monkeypatch, fail=(fail,))
+    d = g._cuda_devices(make_cfg(tmp_path))
+    assert len(d) == 1 and d[0].total_mb == 4000
+    field = {"temp": "temp_c", "power": "power_w", "driver": "driver", "cuda": "cuda"}.get(fail)
+    if field:
+        assert getattr(d[0], field) is None
+    assert d[0].processes == []
+
+
+def test_nvml_hidden_process_name_blank(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    import gpupool.agent.gpu as g
+
+    def boom(pid):
+        raise PermissionError("denied")
+    monkeypatch.setattr(g.psutil, "Process", boom)
+    _stub_nvml(monkeypatch, procs_compute=[NS(pid=9, usedGpuMemory=1024 * 1024)])
+    p = g._cuda_devices(make_cfg(tmp_path))[0].processes
+    assert [(x.pid, x.name, x.used_mb) for x in p] == [(9, "", 1)]
+
+
+def test_fake_devices_passthrough(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("GPUPOOL_FAKE_DEVICES", json.dumps([{
+        "device_id": "CUDA0", "total_mb": 100, "free_mb": 90, "temp_c": 50, "power_w": 70,
+        "driver": "1.2", "cuda": "12.4", "processes": [{"pid": 5, "name": "x", "used_mb": 3}]}]))
+    d = probe_devices(make_cfg(tmp_path))[0]
+    assert (d.temp_c, d.power_w, d.driver, d.cuda) == (50, 70, "1.2", "12.4")
+    assert d.processes[0].pid == 5
+
+
+def test_lost_gpu_is_skipped_alone(tmp_path, monkeypatch):
+    # Two GPUs; the second fell off the bus (every call raises GPU_IS_LOST). The healthy one
+    # must still be reported, otherwise the coordinator fails replicas on it too.
+    from types import SimpleNamespace as NS
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+    m.nvmlDeviceGetCount = lambda: 2
+    m.nvmlDeviceGetHandleByIndex = lambda i: f"h{i}"
+
+    def pci(h):
+        if h == "h1":
+            raise _NvmlErr("GPU_IS_LOST")
+        return NS(busId="0000:01:00.0")
+    m.nvmlDeviceGetPciInfo = pci
+    devs = g._cuda_devices(make_cfg(tmp_path))
+    assert [d.device_id for d in devs] == ["CUDA0"]

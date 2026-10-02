@@ -125,3 +125,27 @@ nothing else (no path traversal possible: names are looked up, not joined).
   server. UI screenshots for the report.
 - Docker: images built in GitHub Actions (this laptop has no Docker). Running the agent image with a GPU
   is **not** testable here and will be reported as untested.
+
+## 8. Failure detection and notifications (added 2026-10-02)
+
+A server can lose power, or a single GPU can fall off the bus, while models run on it.
+
+| Situation | Detected by | Action |
+| --- | --- | --- |
+| Server down (power, network, agent crash) | no successful `/report` for `heartbeat_timeout_s` (10 s; polled every 2 s) | replicas touching it → `failed`; surviving engines on other servers stopped; re-placed on the remaining GPUs |
+| One GPU gone, server alive | the GPU is missing from the server's report | replicas using it → `failed`, re-placed |
+| llama.cpp process crashed | engine `exited`/`failed` in the report | replica → `failed`, re-placed |
+| Not enough capacity left | `plan()` raises `NoFit` | model shown as failed with "needs X GB, pool has Y GB"; retried automatically when capacity returns |
+
+Every transition is recorded as an **event** (`info` / `warning` / `error`): `node_offline`, `node_online`,
+`gpu_missing`, `engine_crashed`, `realloc_started`, `realloc_done`, `realloc_failed`, `launch_failed`,
+plus server/model actions. Events are emitted once per transition, not every reconcile tick.
+
+Users are told through: a bell with an unread count and toasts in the UI, an Events page, optional
+desktop notifications (browser Notification API), and an optional webhook (`webhook_url`, Slack or
+Discord compatible) for warnings and errors, so alerts arrive even with the UI closed.
+
+Requests in flight on a replica that dies are lost unless they had not received a byte yet (the router
+retries those on another replica). New requests go to the remaining replicas immediately; if a model had
+a single replica, it is unavailable until the re-allocation is ready (seconds for small models, longer
+when weights must travel over RPC).

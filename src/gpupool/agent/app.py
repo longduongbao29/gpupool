@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import httpx
+import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
@@ -28,9 +29,13 @@ class EnsureBody(BaseModel):
 
 
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
-               start_heartbeat: bool = True) -> FastAPI:
+               start_heartbeat: bool | None = None) -> FastAPI:
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host)
     version_cache: dict[str, str] = {}
+    # Default follows cfg.push_heartbeat: the coordinator pulls /report, and a server
+    # removed from the UI must not re-register itself by pushing.
+    if start_heartbeat is None:
+        start_heartbeat = cfg.push_heartbeat
 
     def version() -> str:
         if "v" not in version_cache:
@@ -38,7 +43,16 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         return version_cache["v"]
 
     def build_report() -> NodeReport:
+        # Non-blocking (interval=None): /report is polled every 2 s per server.
+        try:
+            cpu_pct: float | None = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            ram_used: int | None = int((vm.total - vm.available) // (1024 * 1024))
+            ram_total: int | None = int(vm.total // (1024 * 1024))
+        except Exception:
+            cpu_pct = ram_used = ram_total = None
         return NodeReport(
+            cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
             models=list_models(cfg.cache_dir), ts=time.time())
@@ -65,6 +79,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         try:

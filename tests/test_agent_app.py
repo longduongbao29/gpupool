@@ -138,3 +138,32 @@ async def test_shutdown_stops_engines(cfg, monkeypatch, tmp_path):
         pm.start(__import__("gpupool.common.models", fromlist=["EngineSpec"]).EngineSpec(
             engine_id="e1", kind="rpc", port=port, devices=["CPU"]))
     assert pm._engines["e1"].proc.poll() is not None
+
+
+async def test_heartbeat_off_by_default_and_report_has_host_telemetry(cfg):
+    assert cfg.push_heartbeat is False
+    app = create_app(cfg)
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("http://coord:8080/internal/heartbeat").mock(
+            return_value=httpx.Response(200, json={"ok": True}))
+        async with app.router.lifespan_context(app):
+            async with client(app) as c:
+                r = await c.get("/report", headers=H)
+            await asyncio.sleep(0.3)  # several heartbeat periods (0.05 s) would have fired
+        assert route.call_count == 0
+    j = r.json()
+    assert j["ram_total_mb"] > 0 and 0 <= j["ram_used_mb"] <= j["ram_total_mb"]
+    assert j["cpu_pct"] is not None
+
+
+async def test_heartbeat_starts_when_push_enabled(cfg):
+    app = create_app(cfg.model_copy(update={"push_heartbeat": True}))
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("http://coord:8080/internal/heartbeat").mock(
+            return_value=httpx.Response(200, json={"ok": True}))
+        async with app.router.lifespan_context(app):
+            for _ in range(100):
+                if route.call_count:
+                    break
+                await asyncio.sleep(0.05)
+        assert route.call_count >= 1
