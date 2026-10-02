@@ -253,3 +253,41 @@ def test_multi_node_tiny_gpu_scorer_decides():
     assert len(tps) == 2
     assert ranked[0].est_decode_tps == max(tps.values())
     assert where(go(nodes=nodes)) == where(ranked[0])
+
+
+def _three_node_pool():
+    # no node fits the model alone, any pair does (each holds ~60% of NEED)
+    each = int(NEED * 0.6) + 100
+    return [node("a", dev("CUDA0", each, 160)), node("b", dev("CUDA0", each, 320)),
+            node("c", dev("CUDA0", each, 1555))]
+
+
+def test_multi_node_offers_all_pairs_and_picks_fastest():
+    nodes = _three_node_pool()
+    ranked = rank(META, SPEC, nodes, limit=20)
+    pairs = {frozenset(n for n, _ in where(p)) for p in ranked}
+    assert all(p.tier == "multi_node" for p in ranked)
+    assert {frozenset("ab"), frozenset("ac"), frozenset("bc")} <= pairs
+    best = ranked[0]
+    assert frozenset(n for n, _ in where(best)) == frozenset("bc")
+    assert best.est_decode_tps == max(p.est_decode_tps for p in ranked)
+    assert where(go(nodes=nodes)) == where(best)
+
+
+def test_multi_node_candidates_bounded_with_many_nodes():
+    import time
+
+    from gpupool.scheduler.placement import MAX_MULTI_NODE_CANDIDATES, _all_candidates, _Dev
+
+    for n in (6, 12):
+        each = int(NEED * 0.6) + 100
+        nodes = [node(f"n{i:02d}", dev("CUDA0", each, 100 + 40 * i)) for i in range(n)]
+        pool = [_Dev(nd, d) for nd in nodes for d in nd.devices]
+        t0 = time.perf_counter()
+        cands, _ = _all_candidates(META, 512, pool)
+        assert time.perf_counter() - t0 < 2.0
+        assert 1 < len(cands) <= MAX_MULTI_NODE_CANDIDATES
+        assert len({tuple((d.node.node_id, d.dev.device_id) for d in c.order) for c in cands}) == len(cands)
+        best = rank(META, SPEC, nodes)[0]
+        # the two fastest nodes are the best pair, also when the pool is above the exhaustive limit
+        assert {nid for nid, _ in where(best)} == {f"n{n - 1:02d}", f"n{n - 2:02d}"}

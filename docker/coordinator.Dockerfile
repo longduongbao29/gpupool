@@ -47,7 +47,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md .python-version ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
@@ -55,7 +55,8 @@ RUN uv sync --frozen --no-dev --no-editable
 ENV GPUPOOL_HOST=0.0.0.0 \
     GPUPOOL_PORT=8080 \
     GPUPOOL_DB_PATH=/data/coordinator.db \
-    GPUPOOL_MODELS_DIR=/data/models \n    GPUPOOL_MODEL_ROOTS=/models
+    GPUPOOL_MODELS_DIR=/data/models \
+    GPUPOOL_MODEL_ROOTS=/models
 VOLUME /data
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

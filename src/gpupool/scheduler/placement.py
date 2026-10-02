@@ -7,6 +7,7 @@ Ports are allocated only for the final plan.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from itertools import combinations
 from typing import NamedTuple
 
 from gpupool.common.models import (
@@ -134,6 +135,8 @@ W_SAME_NODE = 20.0  # per replica of the same model on a chosen node (spread nod
 W_WASTE = 15.0  # x mean(usable / biggest usable): keeps big GPUs free (best-fit among equals)
 W_DEVICE = 5.0  # per extra device
 W_RPC = 10.0  # per network hop
+MAX_MULTI_NODE_CANDIDATES = 12  # bounds scoring work when many node subsets are feasible
+_EXHAUSTIVE_NODES = 8  # up to this many nodes: enumerate subsets; above: bandwidth-ordered heuristics
 _TIER_ORDER = {"single_gpu": 0, "single_node": 1, "multi_node": 2}
 
 
@@ -381,8 +384,8 @@ def _sig(solved) -> tuple:
     return (tuple((d.node.node_id, d.dev.device_id) for d in order), tuple(counts), head)
 
 
-def _tier_multi_node(meta, ctx, pool):
-    """Feasible multi-node solutions: usually one, two when the pool mixes CUDA and CPU.
+def _multi_node_greedy(meta, ctx, pool):
+    """Greedy multi-node solutions: usually one, two when the pool mixes CUDA and CPU.
     The fewest-nodes pass can pick a big CPU node alone (or trimming can drop a small GPU),
     leaving host RAM only, 10x+ slower than VRAM. So a second variant starts from every CUDA
     device, adds CPU nodes only as needed and sheds only CPU devices (the GPUs stay); the scorer then picks
@@ -415,6 +418,83 @@ def _tier_multi_node(meta, ctx, pool):
             if _sig(alt) not in {_sig(o) for o in out}:
                 out.append(alt)
     return out
+
+
+def _node_bw(pool: list[_Dev], node_id: str) -> float:
+    """Best device bandwidth on a node (0 when unknown): the speed it can contribute."""
+    return max((d.dev.bandwidth_gbps or 0.0 for d in pool if d.node.node_id == node_id), default=0.0)
+
+
+def _multi_node_by_bandwidth(meta, ctx, pool):
+    """Heuristic for big pools: add nodes fastest-first until feasible. Variants: untrimmed,
+    trimmed dropping the slowest devices, trimmed dropping the smallest; plus one node more."""
+    totals: dict[str, int] = {}
+    for d in pool:
+        totals[d.node.node_id] = totals.get(d.node.node_id, 0) + d.dev.usable_mb
+    ranked = sorted(totals, key=lambda k: (-_node_bw(pool, k), -totals[k], k))
+    chosen: list[_Dev] = []
+    out = []
+    for i, node_id in enumerate(ranked):
+        chosen += [d for d in pool if d.node.node_id == node_id]
+        solved = _solve(meta, ctx, chosen)
+        if not solved:
+            continue
+        out.append(solved)
+        out.append(_trim(meta, ctx, chosen, solved, lambda d: d.dev.bandwidth_gbps or 0.0))
+        out.append(_trim(meta, ctx, chosen, solved, lambda d: d.dev.usable_mb))
+        if i + 1 < len(ranked):
+            more = chosen + [d for d in pool if d.node.node_id == ranked[i + 1]]
+            s = _solve(meta, ctx, more)
+            if s:
+                out.append(s)
+        break
+    return out
+
+
+def _multi_node_subsets(meta, ctx, pool, node_ids: list[str]):
+    """Every feasible node subset of the smallest feasible size and one larger, fastest
+    estimated first. Whole nodes: the scorer, not the generator, decides what is best."""
+    cuda_bw = min((d.dev.bandwidth_gbps for d in pool
+                   if d.dev.kind == "cuda" and d.dev.bandwidth_gbps), default=100.0)
+    found: list[tuple[float, tuple, tuple]] = []
+    min_size = None
+    for size in range(2, len(node_ids) + 1):
+        if min_size is not None and size > min_size + 1:
+            break
+        for subset in combinations(node_ids, size):
+            solved = _solve(meta, ctx, [d for d in pool if d.node.node_id in subset])
+            if solved is None:
+                continue
+            min_size = min_size or size
+            order, counts, head = solved
+            n_rpc = sum(1 for d in order if not (d.node.node_id == head and d.dev.kind == "cuda"))
+            tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw)
+            found.append((tps, subset, solved))
+    found.sort(key=lambda f: (-f[0], f[1]))
+    return [f[2] for f in found]
+
+
+def _tier_multi_node(meta, ctx, pool):
+    """Feasible multi-node solutions for the scorer: the greedy variants first (fewest nodes;
+    GPUs kept when CUDA and CPU mix), then other node subsets / bandwidth-ordered fill, so a
+    pair of fast nodes is not hidden behind a pair that includes a slow one. At most
+    MAX_MULTI_NODE_CANDIDATES, deduplicated."""
+    out = _multi_node_greedy(meta, ctx, pool)
+    if not out:
+        return []
+    node_ids = sorted({d.node.node_id for d in pool})
+    if len(node_ids) <= _EXHAUSTIVE_NODES:
+        extra = _multi_node_subsets(meta, ctx, pool, node_ids)
+    else:
+        extra = _multi_node_by_bandwidth(meta, ctx, pool)
+    seen = {_sig(o) for o in out}
+    for s in extra:
+        if len(out) >= MAX_MULTI_NODE_CANDIDATES:
+            break
+        if _sig(s) not in seen:
+            seen.add(_sig(s))
+            out.append(s)
+    return out[:MAX_MULTI_NODE_CANDIDATES]
 
 
 def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id) -> Placement:
