@@ -45,6 +45,9 @@ class CoordinatorConfig(BaseModel):
     hf_token: str = ""  # Hugging Face token for gated/private repos (env HF_TOKEN)
     # URL agents use to reach this coordinator; shown in the UI's agent install command.
     public_url: str = ""
+    # Optional webhook (Slack/Discord/generic JSON POST) for warning and error events, so an
+    # operator hears about a dead server even with the UI closed.
+    webhook_url: str = ""
 
 
 def load_toml(path: Path) -> dict:

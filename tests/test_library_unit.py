@@ -1,0 +1,416 @@
+"""Model library: HF listing/download (respx-mocked), path registration, delete, /files."""
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+import respx
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from gpupool.common.auth import require_bearer
+from gpupool.coordinator import library as library_mod
+from gpupool.coordinator.library import Library, LibraryError
+from gpupool.coordinator.library_api import make_files_router, make_library_router
+
+HF = "https://huggingface.co"
+REPO = "acme/model-GGUF"
+
+
+def tree(*entries):
+    return [{"type": t, "path": p, "size": s} for t, p, s in entries]
+
+
+@pytest.fixture
+def lib(tmp_path):
+    http = httpx.AsyncClient(follow_redirects=True)
+    lb = Library(":memory:", tmp_path / "models", hf_token="", http=http)
+    yield lb
+    lb._db.close()
+
+
+async def wait_status(lib, name, status, timeout=5.0):
+    for _ in range(int(timeout / 0.01)):
+        it = lib.get(name)
+        if it and it.status == status:
+            return it
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{name} never reached {status}: {lib.get(name)}")
+
+
+# ---- listing -----------------------------------------------------------------------
+
+@respx.mock
+async def test_hf_files_filters_and_sorts(lib):
+    route = respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(json=tree(
+        ("file", "b.gguf", 20), ("file", "README.md", 1), ("directory", "x.gguf", 0),
+        ("file", "sub/a.gguf", 10)))
+    assert await lib.hf_files(REPO) == [{"file": "b.gguf", "bytes": 20},
+                                        {"file": "sub/a.gguf", "bytes": 10}]
+    assert route.calls[0].request.url.params["recursive"] == "true"
+
+
+@respx.mock
+async def test_hf_files_sends_token(tmp_path):
+    lb = Library(":memory:", tmp_path, hf_token="tok", http=httpx.AsyncClient())
+    route = respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(json=[])
+    await lb.hf_files(REPO)
+    assert route.calls[0].request.headers["authorization"] == "Bearer tok"
+
+
+@respx.mock
+@pytest.mark.parametrize("code,msg,status", [
+    (401, "gated or private: set HF_TOKEN", 403), (403, "gated or private: set HF_TOKEN", 403),
+    (404, "repo not found", 404)])
+async def test_hf_files_errors(lib, code, msg, status):
+    respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(code)
+    with pytest.raises(LibraryError, match=msg) as ei:
+        await lib.hf_files(REPO)
+    assert ei.value.status == status
+
+
+@pytest.mark.parametrize("repo", ["noslash", "a/b/c", "../x", "a/..", "a b/c", ""])
+async def test_hf_repo_validation(lib, repo):
+    with pytest.raises(LibraryError):
+        await lib.hf_files(repo)
+
+
+# ---- downloads ---------------------------------------------------------------------
+
+@respx.mock
+async def test_download_happy_path(lib, monkeypatch):
+    monkeypatch.setattr(library_mod, "_PROGRESS_INTERVAL_S", 0.0)
+    body = b"x" * (3 * 1024 * 1024)
+    respx.get(f"{HF}/{REPO}/resolve/main/sub/m.gguf").respond(content=body)
+    item = await lib.add_hf(REPO, "sub/m.gguf")
+    assert item.name == "m.gguf" and item.status == "downloading" and item.source == "hf"
+    done = await wait_status(lib, "m.gguf", "ready")
+    assert done.downloaded == len(body) == done.bytes
+    assert (lib.models_dir / "m.gguf").read_bytes() == body
+    assert not list(lib.models_dir.glob("*.part"))
+    assert lib.resolve("m.gguf") == (lib.models_dir / "m.gguf").resolve()
+
+
+@respx.mock
+async def test_progress_is_written_while_streaming(lib, monkeypatch):
+    monkeypatch.setattr(library_mod, "_PROGRESS_INTERVAL_S", 0.0)
+    release = asyncio.Event()
+
+    async def stream():
+        yield b"a" * (1024 * 1024)
+        yield b"b" * (1024 * 1024)
+        await release.wait()
+        yield b"c"
+
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").mock(
+        return_value=httpx.Response(200, stream=stream()))
+    await lib.add_hf(REPO, "m.gguf")
+    for _ in range(500):
+        if lib.get("m.gguf").downloaded >= 1024 * 1024:
+            break
+        await asyncio.sleep(0.01)
+    assert lib.get("m.gguf").downloaded >= 1024 * 1024
+    assert lib.get("m.gguf").status == "downloading"
+    assert lib.resolve("m.gguf") is None  # not ready yet
+    release.set()
+    await wait_status(lib, "m.gguf", "ready")
+
+
+@respx.mock
+async def test_size_mismatch_fails_and_leaves_no_part(lib):
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(
+        content=b"abc", headers={"content-length": "10"})
+    # httpx may refuse the short body itself; either way the item must end failed.
+    await lib.add_hf(REPO, "m.gguf")
+    it = await wait_status(lib, "m.gguf", "failed")
+    assert it.error
+    assert not list(lib.models_dir.iterdir())
+    assert lib.resolve("m.gguf") is None
+
+
+@respx.mock
+async def test_listing_size_mismatch_for_split_fails(lib):
+    respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(json=tree(
+        ("file", "m-00001-of-00002.gguf", 5), ("file", "m-00002-of-00002.gguf", 5)))
+    respx.get(f"{HF}/{REPO}/resolve/main/m-00001-of-00002.gguf").respond(
+        content=b"12345", headers={"content-length": "5"})
+    respx.get(f"{HF}/{REPO}/resolve/main/m-00002-of-00002.gguf").respond(content=b"123")
+    await lib.add_hf(REPO, "m-00001-of-00002.gguf")
+    it = await wait_status(lib, "m-00001-of-00002.gguf", "failed")
+    assert "truncated" in it.error
+    # Even the part that completed must not stay behind for a failed item.
+    assert not list(lib.models_dir.iterdir())
+
+
+@respx.mock
+async def test_http_error_marks_failed(lib):
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(403)
+    await lib.add_hf(REPO, "m.gguf")
+    it = await wait_status(lib, "m.gguf", "failed")
+    assert "HF_TOKEN" in it.error
+
+
+@respx.mock
+async def test_split_download_all_parts(lib):
+    respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(json=tree(
+        ("file", "q/m-00001-of-00003.gguf", 4), ("file", "q/m-00002-of-00003.gguf", 5),
+        ("file", "q/m-00003-of-00003.gguf", 6), ("file", "q/other.gguf", 99)))
+    for i, n in enumerate((4, 5, 6), start=1):
+        respx.get(f"{HF}/{REPO}/resolve/main/q/m-0000{i}-of-00003.gguf").respond(content=b"z" * n)
+    item = await lib.add_hf(REPO, "q/m-00001-of-00003.gguf")
+    assert item.name == "m-00001-of-00003.gguf" and item.bytes == 15
+    done = await wait_status(lib, item.name, "ready")
+    assert done.downloaded == 15 and done.bytes == 15
+    assert sorted(p.name for p in lib.models_dir.iterdir()) == [
+        f"m-0000{i}-of-00003.gguf" for i in (1, 2, 3)]
+    # Deleting the item removes every part.
+    lib.delete(item.name, lambda n: False)
+    assert not list(lib.models_dir.iterdir())
+
+
+async def test_non_first_split_part_rejected(lib):
+    with pytest.raises(LibraryError, match="first part"):
+        await lib.add_hf(REPO, "m-00002-of-00003.gguf")
+    assert lib.list() == []
+
+
+@respx.mock
+async def test_incomplete_split_rejected(lib):
+    respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(json=tree(
+        ("file", "m-00001-of-00002.gguf", 4)))
+    with pytest.raises(LibraryError, match="incomplete"):
+        await lib.add_hf(REPO, "m-00001-of-00002.gguf")
+    assert lib.list() == []
+
+
+@pytest.mark.parametrize("file", ["notgguf.bin", "/abs.gguf", "../x.gguf", "a/../../x.gguf"])
+async def test_add_hf_rejects_bad_file(lib, file):
+    with pytest.raises(LibraryError):
+        await lib.add_hf(REPO, file)
+
+
+@respx.mock
+async def test_name_collision_409(lib):
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(content=b"abc")
+    await lib.add_hf(REPO, "m.gguf")
+    with pytest.raises(LibraryError) as ei:
+        await lib.add_hf(REPO, "m.gguf")
+    assert ei.value.status == 409
+    await wait_status(lib, "m.gguf", "ready")
+
+
+@respx.mock
+async def test_delete_while_downloading_cancels_and_removes_part(lib):
+    started = asyncio.Event()
+
+    async def stream():
+        yield b"a" * 1000
+        started.set()
+        await asyncio.sleep(60)
+        yield b"b"
+
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").mock(
+        return_value=httpx.Response(200, stream=stream()))
+    await lib.add_hf(REPO, "m.gguf")
+    await asyncio.wait_for(started.wait(), 5)
+    task = lib._tasks["m.gguf"]
+    lib.delete("m.gguf", lambda n: False)
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled() or task.done()
+    assert lib.get("m.gguf") is None
+    assert not list(lib.models_dir.iterdir())
+
+
+@respx.mock
+async def test_resume_restarts_downloading_items(tmp_path):
+    db = tmp_path / "db.sqlite"
+    models = tmp_path / "models"
+    models.mkdir()
+    lb1 = Library(db, models, http=httpx.AsyncClient())
+    # Simulate a crashed process: row says downloading, a stale .part exists, no task runs.
+    lb1._exec("INSERT INTO library(name,path,source,hf_repo,hf_file,bytes,downloaded,status,"
+              "created_at) VALUES('m.gguf',?, 'hf', ?, 'm.gguf', NULL, 7, 'downloading', 1.0)",
+              (str(models / "m.gguf"), REPO))
+    (models / "m.gguf.part").write_bytes(b"stale")
+    lb1._db.close()
+
+    lb2 = Library(db, models, http=httpx.AsyncClient())
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(content=b"fresh-data")
+    lb2.resume()
+    it = await wait_status(lb2, "m.gguf", "ready")
+    assert (models / "m.gguf").read_bytes() == b"fresh-data" and it.downloaded == 10
+    assert not list(models.glob("*.part"))
+    await lb2.shutdown()
+
+
+async def test_shutdown_cancels_tasks_and_closes_own_client(tmp_path):
+    lb = Library(":memory:", tmp_path)
+    with respx.mock:
+        async def stream():
+            await asyncio.sleep(60)
+            yield b"x"
+
+        respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").mock(
+            return_value=httpx.Response(200, stream=stream()))
+        await lb.add_hf(REPO, "m.gguf")
+        await asyncio.sleep(0.05)
+        await lb.shutdown()
+    assert lb._http.is_closed
+    assert not list(tmp_path.glob("*.part"))
+
+
+# ---- paths -------------------------------------------------------------------------
+
+def test_add_path_ok_and_not_copied(lib, tmp_path):
+    f = tmp_path / "ext" / "big.gguf"
+    f.parent.mkdir()
+    f.write_bytes(b"12345")
+    item = lib.add_path(str(f))
+    assert (item.name, item.status, item.bytes, item.source) == ("big.gguf", "ready", 5, "path")
+    assert not lib.models_dir.exists() or not list(lib.models_dir.iterdir())
+    assert lib.resolve("big.gguf") == f
+
+
+def test_add_path_validations(lib, tmp_path):
+    d = tmp_path / "dir.gguf"
+    d.mkdir()
+    txt = tmp_path / "a.txt"
+    txt.write_bytes(b"x")
+    for bad in ("rel/x.gguf", str(tmp_path / "missing.gguf"), str(txt), str(d), ""):
+        with pytest.raises(LibraryError):
+            lib.add_path(bad)
+    assert lib.list() == []
+
+
+def test_add_path_collision(lib, tmp_path):
+    a = tmp_path / "a" / "m.gguf"
+    b = tmp_path / "b" / "m.gguf"
+    for p in (a, b):
+        p.parent.mkdir()
+        p.write_bytes(b"x")
+    lib.add_path(str(a))
+    with pytest.raises(LibraryError) as ei:
+        lib.add_path(str(b))
+    assert ei.value.status == 409
+
+
+def test_delete_path_item_keeps_user_file(lib, tmp_path):
+    f = tmp_path / "keep.gguf"
+    f.write_bytes(b"x")
+    lib.add_path(str(f))
+    lib.delete("keep.gguf", lambda n: False)
+    assert f.exists() and lib.get("keep.gguf") is None
+
+
+@respx.mock
+async def test_delete_hf_item_removes_file(lib):
+    respx.get(f"{HF}/{REPO}/resolve/main/m.gguf").respond(content=b"abc")
+    await lib.add_hf(REPO, "m.gguf")
+    await wait_status(lib, "m.gguf", "ready")
+    lib.delete("m.gguf", lambda n: False)
+    assert not (lib.models_dir / "m.gguf").exists()
+
+
+def test_delete_in_use_guard_and_unknown(lib, tmp_path):
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x")
+    lib.add_path(str(f))
+    with pytest.raises(LibraryError, match="uses this file") as ei:
+        lib.delete("m.gguf", lambda n: n == "m.gguf")
+    assert ei.value.status == 409 and lib.get("m.gguf")
+    with pytest.raises(LibraryError) as ei:
+        lib.delete("nope.gguf", lambda n: False)
+    assert ei.value.status == 404
+
+
+def test_resolve_requires_ready_and_existing_file(lib, tmp_path):
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x")
+    lib.add_path(str(f))
+    assert lib.resolve("m.gguf") == f
+    f.unlink()
+    assert lib.resolve("m.gguf") is None
+    assert lib.resolve("../m.gguf") is None
+    lib._exec("UPDATE library SET status='failed'")
+    f.write_bytes(b"x")
+    assert lib.resolve("m.gguf") is None
+
+
+# ---- HTTP --------------------------------------------------------------------------
+
+@pytest.fixture
+def client(lib):
+    app = FastAPI()
+    used = set()
+    app.include_router(make_library_router(lib, require_bearer("admin"), lambda n: n in used))
+    app.include_router(make_files_router(lib, require_bearer("cluster")))
+    c = TestClient(app)
+    c.used = used
+    return c
+
+
+ADMIN = {"Authorization": "Bearer admin"}
+CLUSTER = {"Authorization": "Bearer cluster"}
+
+
+def test_api_auth_required(client):
+    assert client.get("/api/library").status_code == 401
+    assert client.get("/api/library", headers=CLUSTER).status_code == 401
+    assert client.get("/files/x.gguf").status_code == 401
+
+
+def test_api_add_path_list_delete(client, tmp_path):
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"hello")
+    r = client.post("/api/library", json={"path": str(f)}, headers=ADMIN)
+    assert r.status_code == 200 and r.json()["name"] == "m.gguf" and r.json()["bytes"] == 5
+    assert client.post("/api/library", json={"path": str(f)}, headers=ADMIN).status_code == 409
+    assert [i["name"] for i in client.get("/api/library", headers=ADMIN).json()] == ["m.gguf"]
+    client.used.add("m.gguf")
+    r = client.delete("/api/library/m.gguf", headers=ADMIN)
+    assert r.status_code == 409 and "uses this file" in r.json()["detail"]
+    client.used.clear()
+    assert client.delete("/api/library/m.gguf", headers=ADMIN).status_code == 200
+    assert client.delete("/api/library/m.gguf", headers=ADMIN).status_code == 404
+
+
+def test_api_body_must_have_exactly_one_form(client):
+    for body in ({}, {"hf_repo": "a/b"}, {"hf_file": "x.gguf"}, {"path": "/x.gguf", "hf_repo": "a/b",
+                                                                  "hf_file": "x.gguf"}):
+        assert client.post("/api/library", json=body, headers=ADMIN).status_code == 422
+    assert client.post("/api/library", json={"path": "rel.gguf"}, headers=ADMIN).status_code == 400
+
+
+def test_api_hf_files_maps_errors(client):
+    with respx.mock:
+        respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(
+            json=tree(("file", "a.gguf", 1)))
+        r = client.get("/api/hf/files", params={"repo": REPO}, headers=ADMIN)
+        assert r.json() == [{"file": "a.gguf", "bytes": 1}]
+        respx.get(f"{HF}/api/models/{REPO}/tree/main").respond(404)
+        r = client.get("/api/hf/files", params={"repo": REPO}, headers=ADMIN)
+        assert r.status_code == 404 and r.json() == {"detail": "repo not found"}
+    assert client.get("/api/hf/files", params={"repo": "bad"}, headers=ADMIN).status_code == 400
+
+
+def test_files_serves_known_rejects_unknown(client, tmp_path):
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"hello")
+    client.post("/api/library", json={"path": str(f)}, headers=ADMIN)
+    r = client.get("/files/m.gguf", headers=CLUSTER)
+    assert r.status_code == 200 and r.content == b"hello"
+    assert client.get("/files/unknown.gguf", headers=CLUSTER).status_code == 404
+    assert client.get("/files/..%2Fm.gguf", headers=CLUSTER).status_code == 404
+
+
+# ---- real --------------------------------------------------------------------------
+
+@pytest.mark.real
+async def test_real_hf_listing(tmp_path):
+    lb = Library(":memory:", tmp_path)
+    try:
+        files = await lb.hf_files("Qwen/Qwen2.5-0.5B-Instruct-GGUF")
+    finally:
+        await lb.shutdown()
+    assert any(f["file"].endswith("q4_k_m.gguf") and f["bytes"] > 0 for f in files)
