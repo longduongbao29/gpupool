@@ -281,6 +281,8 @@ gì trên cụm.
 
 **Trạng thái giai đoạn 3:** đã triển khai. Chạy thật trên GTX 1650 (budget 2500 MB): `/api/simulate` báo trước đúng việc sẽ gỡ `q05` (priority 20) để chạy `q3b` (priority 80), `/api/recommend` trả phương án `fits_now: false` kèm replica cần gỡ, và khi `q05` không cho giành chỗ thì báo `q3b` không đặt được. Giành chỗ thật: `q3b` chạy 23.5 s sau lệnh start, `q05` không giành lại được. Lần chạy đầu lộ ra một lỗi: replica bị gỡ chuyển sang draining nên model của nó launch lại ngay vào phần bộ nhớ đang giải phóng. Đã sửa bằng một khoảng giữ chỗ: trong lúc model giành chỗ chưa có replica (tối đa `drain_timeout_s` + 120 s), model ưu tiên thấp hơn không được launch.
 
+**Trạng thái giai đoạn 4:** đã triển khai. Chạy thật với hai agent trên một máy (a: GPU giới hạn 1000 MB, b: chỉ CPU): replica `y` đang chạy trên b/CPU (~30 tok/s ước lượng) được chuyển sang a/CUDA0 (~204 tok/s) khi GPU rảnh, điểm +100, mất khoảng 9.5 s. Trong lúc chuyển, một client gửi liên tục 23 request và không request nào lỗi. Sau khi chuyển, kiểm tra lại không còn đề xuất nào. Chạy định kỳ theo `rebalance_s` (mặc định 600 s, 0 = tắt).
+
 Mỗi giai đoạn được kiểm trên cụm thật, ít nhất 2 server và 2 model, trước khi sang giai đoạn sau.
 
 ## 9. Câu hỏi mở

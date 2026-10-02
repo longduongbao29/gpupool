@@ -284,6 +284,8 @@ cluster.
 
 **Phase 3 status:** implemented. Real run on a GTX 1650 (budget 2500 MB): `/api/simulate` predicted exactly that `q05` (priority 20) would be stopped to run `q3b` (priority 80), `/api/recommend` returned a `fits_now: false` option naming the replica to stop, and with `q05` non-preemptible it reported `q3b` as unplaceable. Real preemption: `q3b` ran 23.5 s after start, and `q05` could not evict it back. The first run exposed a bug: the evicted replica turns draining, so its model relaunched straight into the memory being freed. Fixed with a claim: while the preempting model has no replica yet (at most `drain_timeout_s` + 120 s), lower priorities do not launch.
 
+**Phase 4 status:** implemented. Real run with two agents on one machine (a: GPU capped at 1000 MB, b: CPU only): replica `y` running on b/CPU (~30 tok/s estimated) was moved to a/CUDA0 (~204 tok/s) once the GPU freed up, score +100, in about 9.5 s. During the move a client sent 23 requests back to back and none failed. Afterwards a new check proposed nothing. The periodic run follows `rebalance_s` (default 600 s, 0 = off).
+
 Each phase is checked on a real cluster, with at least 2 servers and 2 models, before the next one starts.
 
 ## 9. Open questions

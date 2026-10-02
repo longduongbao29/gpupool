@@ -93,6 +93,10 @@ class StartBody(BaseModel):
     replicas: int = Field(default=1, ge=1)
 
 
+class RebalanceBody(BaseModel):
+    dry_run: bool = True
+
+
 class ReadBody(BaseModel):
     up_to_id: int
 
@@ -240,6 +244,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                          "api_keys_set": bool(cfg.api_keys)},
             "events": [e.model_dump(mode="json") for e in store.list_events(limit=50)],
             "unread_events": store.unread_count(),
+            "rebalance": reconciler.rebalance_state(),
         }
 
     # ------------------------------------------------------------------ servers
@@ -452,6 +457,23 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             raise
         except Exception as e:
             raise plan_http_error(e) from e
+
+    # ------------------------------------------------------------------ rebalance
+    @router.post("/rebalance")
+    async def rebalance(body: RebalanceBody | None = Body(default=None)) -> dict:
+        """Replica moves that would clearly improve placement; with dry_run false, starts the best
+        one (make-before-break) when the cluster is quiet. One move at a time."""
+        dry_run = True if body is None else body.dry_run
+        try:
+            moves = await reconciler.rebalance_candidates()
+        except Exception as e:
+            raise plan_http_error(e) from e
+        started = None
+        if not dry_run and moves and await reconciler.start_move(moves[0]):
+            started = {"replica_id": moves[0]["replica_id"], "model": moves[0]["model"]}
+            reconciler.wake()
+        mv = reconciler.rebalance_state()["in_progress"]
+        return {"moves": moves, "started": started, "in_progress": mv}
 
     # ------------------------------------------------------------------ recommend
     @router.post("/recommend")

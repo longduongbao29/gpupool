@@ -19,6 +19,10 @@ fits_now false + requires_preemption when the request priority is 80 or more. PO
   also shows `stop` (an autoscaled model shrinks) and `unplaced` (not enough GPUs);
 - an edit that changes nothing, or only lowers replicas, -> empty / `stop`.
 A `preempted` warning event is seeded.
+Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-auto" replica onto CTG-Server-1/CUDA0). With
+dry_run false it starts the move: a replacement replica appears (state starting), GET /api/state carries
+`rebalance.in_progress`, and ~20 s later the old replica is dropped (events rebalance_started, rebalanced). Afterwards the
+dry run answers with no moves ("all replicas are well placed"). `rebalance.next_run_ts` is 10 min after start.
 """
 from __future__ import annotations
 
@@ -36,6 +40,8 @@ T0 = time.time()
 LAST_TICK = [T0]
 EVENTS: list[dict] = []
 SCHEDULED: list[tuple[float, object]] = []  # (absolute time, callable)
+REBAL: dict = {"in_progress": None, "done": False, "next_run_ts": None}
+REBAL_SECONDS = 20.0
 
 
 BANDWIDTH_GBPS = {"NVIDIA H100 80GB": 3350.0, "NVIDIA RTX 4090": 1008.0, "NVIDIA A100 40GB": 1555.0, "NVIDIA RTX 3090": 936.2}
@@ -64,6 +70,7 @@ def reset() -> None:
     T0 = time.time()
     EVENTS.clear()
     SCHEDULED.clear()
+    REBAL.update(in_progress=None, done=False, next_run_ts=T0 + 600)
     SERVERS.clear()
     MODELS.clear()
     LIBRARY.clear()
@@ -98,6 +105,7 @@ def reset() -> None:
     add_event("info", "cold_start", "chat-demand was unloaded; a request loaded it (cold start)", None, "chat-demand")
     add_event("info", "scaled_up", "chat-auto scaled up to 2 replicas (busy 0.82 above target 0.70 for 30 s)", None, "chat-auto")
     add_event("warning", "preempted", "chat-batch-1a2b3c stopped to make room for chat-auto (priority 20 < 70)", None, "chat-batch")
+    add_event("warning", "rebalance_failed", "Rebalance of chat-batch aborted: replacement replica did not become ready in time", None, "chat-batch")
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
 
@@ -161,6 +169,36 @@ def _placement(name: str, chosen: list[tuple[str, str]]) -> dict:
             "reasons": ["fastest GPUs with room (about 1008 GB/s)", "spread: replicas on different GPUs"],
             "assignments": [{"node_id": n, "device_id": d, "llama_device": d, "rpc_endpoint": None, "layers": 18 // len(chosen),
                              "est_mb": 5000} for n, d in chosen]}
+
+
+def _rebalance_moves() -> list[dict]:
+    """The one qualifying move of the mock: a chat-auto replica that would run better on CTG-Server-1/CUDA0."""
+    m = MODELS.get("chat-auto")
+    if REBAL["done"] or REBAL["in_progress"] or not m:
+        return []
+    ready = [r for r in m["replicas"] if r["state"] == "ready"]
+    if not ready:
+        return []
+    r = ready[-1]
+    frm = [{"node_id": a["node_id"], "device_id": a["device_id"]} for a in r["placement"]["assignments"]]
+    to = [{"node_id": "CTG-Server-1", "device_id": "CUDA0"}]
+    if frm == to:
+        return []
+    return [{"replica_id": r["replica_id"], "model": m["spec"]["name"], "from": frm, "to": to, "current_score": 48.0,
+             "new_score": 91.5, "gain": 43.5, "reasons": ["fits on 1 GPU instead of %d" % len(frm), "fastest GPU with room (about 3350 GB/s)"]}]
+
+
+def _finish_rebalance(model: str, old: str, new: str) -> None:
+    REBAL["in_progress"] = None
+    m = MODELS.get(model)
+    reps = {r["replica_id"]: r for r in (m["replicas"] if m else [])}
+    if old not in reps or new not in reps:
+        add_event("warning", "rebalance_failed", f"Rebalance of {model} aborted: replica {old if old not in reps else new} is gone", None, model)
+        return
+    reps[new]["state"] = "ready"
+    m["replicas"] = [r for r in m["replicas"] if r["replica_id"] != old]
+    REBAL["done"] = True
+    add_event("info", "rebalanced", f"{model}: replica {old} replaced by {new} on better GPUs", None, model)
 
 
 def tick() -> None:
@@ -260,6 +298,7 @@ def state() -> dict:
         "models": [_state_model(m) for m in MODELS.values()],
         "library": [_clean(i) for i in LIBRARY.values()],
         "settings": dict(SETTINGS),
+        "rebalance": {"in_progress": dict(REBAL["in_progress"]) if REBAL["in_progress"] else None, "next_run_ts": REBAL["next_run_ts"]},
         "events": EVENTS[:50],
         "unread_events": sum(1 for e in EVENTS if not e["read"]),
     }
@@ -641,6 +680,28 @@ def read_events(body: dict) -> dict:
         if e["id"] <= up:
             e["read"] = True
     return {"unread": sum(1 for e in EVENTS if not e["read"])}
+
+
+@app.post("/api/rebalance", dependencies=[api])
+def rebalance(body: dict) -> dict:
+    tick()
+    dry = _bool(body.get("dry_run", True), "dry_run")
+    moves = _rebalance_moves()
+    started = None
+    if not dry and moves:
+        mv = moves[0]
+        m = MODELS[mv["model"]]
+        now = time.time()
+        new_id = f"{mv['model']}-{int(now) % 100000:05d}"
+        m["replicas"].append({"replica_id": new_id, "model": mv["model"], "state": "starting", "error": None, "outstanding": 0,
+                              "created_at": now, "updated_at": now,
+                              "placement": _placement(mv["model"], [(t["node_id"], t["device_id"]) for t in mv["to"]])})
+        REBAL["in_progress"] = {"model": mv["model"], "old": mv["replica_id"], "new": new_id, "since": now}
+        started = {"replica_id": mv["replica_id"], "model": mv["model"]}
+        add_event("info", "rebalance_started", f"Moving {mv['replica_id']} of {mv['model']}: starting {new_id} on better GPUs", None, mv["model"])
+        SCHEDULED.append((now + REBAL_SECONDS, lambda: _finish_rebalance(mv["model"], mv["replica_id"], new_id)))
+    ip = REBAL["in_progress"]
+    return {"moves": moves, "started": started, "in_progress": dict(ip) if ip else None}
 
 
 @app.post("/api/_mock/kill/{node_id}")

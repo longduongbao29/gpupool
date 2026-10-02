@@ -249,7 +249,8 @@ def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupant
     return out
 
 
-def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset()) -> list[_Scored]:
+def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset(),
+            extra_cands: Sequence[_Cand] = ()) -> list[_Scored]:
     pool = [
         _Dev(n, d)
         for n in nodes
@@ -258,9 +259,29 @@ def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset()) -> list[_Sc
         if d.usable_mb > 0
     ]
     cands, used = _all_candidates(meta, spec.ctx_size, pool)
+    if extra_cands:
+        # extras are scored in the same pass (scores are relative); their devices also
+        # count for the waste normaliser so a lone extra does not divide by a tiny pool
+        keys = {_cand_key(c) for c in extra_cands}
+        cands = [c for c in cands if _cand_key(c) not in keys]
+        used = used + [d for c in extra_cands for d in c.order]
+        cands = cands + list(extra_cands)
     if not cands:
         return []
     return _score_all(meta, spec, cands, used, nodes, occupants)
+
+
+def _cand_key(c: _Cand) -> tuple:
+    return tuple((d.node.node_id, d.dev.device_id) for d in c.order), tuple(c.counts)
+
+
+def _extra_cand(pl: Placement, nodes) -> _Cand | None:
+    """Rebuild an existing placement as a candidate; None if a device is gone."""
+    by = {(n.node_id, d.device_id): _Dev(n, d) for n in nodes for d in n.devices}
+    order = [by.get((a.node_id, a.device_id)) for a in pl.assignments]
+    if not order or any(d is None for d in order):
+        return None
+    return _Cand(pl.tier, order, [a.layers for a in pl.assignments], pl.head_node)
 
 
 def _finish(meta, spec, s: _Scored, replica_id, port_alloc) -> Placement:
@@ -301,10 +322,34 @@ def rank(
     nodes: list[NodeReport],
     occupants: Sequence[Occupant] = (),
     limit: int = 5,
+    extra: Sequence[Placement] = (),
 ) -> list[Placement]:
-    """Feasible candidates, best first. Ports are dummies: these are for display/simulation."""
+    """Feasible candidates, best first. Ports are dummies: these are for display/simulation.
+
+    `extra` are existing placements (e.g. a running replica's) scored in the same pass so
+    their score is comparable with the alternatives. They are not feasibility-checked (their
+    memory is already in use), keep their replica_id/ports, and are always returned; `limit`
+    counts candidates only. A candidate equal to an extra is dropped. The caller must leave
+    the extra's own replica out of `occupants`, or it would be penalised for sharing with itself.
+    """
     dummy = lambda _nid: 0  # noqa: E731
-    return [_finish(meta, spec, s, "", dummy) for s in _ranked(meta, spec, nodes, occupants)[:limit]]
+    if not extra:
+        return [_finish(meta, spec, s, "", dummy)
+                for s in _ranked(meta, spec, nodes, occupants)[:limit]]
+    pairs = [(pl, _extra_cand(pl, nodes)) for pl in extra]
+    pairs = [(pl, c) for pl, c in pairs if c is not None]
+    owner = {id(c): pl for pl, c in pairs}
+    out, n_cand = [], 0
+    for s in _ranked(meta, spec, nodes, occupants, extra_cands=[c for _, c in pairs]):
+        pl = owner.get(id(s.cand))
+        if pl is not None:
+            out.append(pl.model_copy(update={
+                "score": round(s.score, 1), "est_decode_tps": round(s.tps, 1),
+                "reasons": s.reasons}, deep=True))
+        elif n_cand < limit:
+            n_cand += 1
+            out.append(_finish(meta, spec, s, "", dummy))
+    return out
 
 
 def _tier_single_node(meta, ctx, pool):

@@ -201,3 +201,33 @@ def make_ranker(est_mb=1000):
         return out[:limit]
 
     return ranker
+
+
+def make_scored_ranker(scores: dict[tuple[str, str], float], est_mb=1000):
+    """Fake scheduler.rank with controlled scores: a placement scores `scores[(node, device)]` of
+    its first assignment. Candidates (replica_id "") exist for every device with enough usable_mb
+    and a score entry; `extra` placements are always returned with their own id and a fresh score;
+    a candidate identical to an extra is dropped. `.calls` records every call's kwargs."""
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, extra=()):
+        key = lambda p: tuple((a.node_id, a.device_id) for a in p.assignments)  # noqa: E731
+        out = [p.model_copy(update={"score": scores[key(p)[0]]}) for p in extra]
+        taken = {key(p) for p in extra}
+        cands = []
+        for n in nodes:
+            for d in n.devices:
+                k = ((n.node_id, d.device_id),)
+                if d.usable_mb < est_mb or k[0] not in scores or k in taken:
+                    continue
+                asg = [DeviceAssignment(node_id=n.node_id, device_id=d.device_id, llama_device=d.device_id,
+                                        layers=2, est_mb=est_mb)]
+                cands.append(Placement(model=spec.name, replica_id="", tier="single_gpu", head_node=n.node_id,
+                                       head_port=0, assignments=asg, tensor_split=[1.0], est_total_mb=est_mb,
+                                       score=scores[k[0]], reasons=[f"fits {n.node_id}/{d.device_id}"]))
+        cands.sort(key=lambda p: -p.score)
+        ranker.calls.append({"spec": spec, "nodes": nodes, "occupants": list(occupants), "limit": limit,
+                             "extra": list(extra)})
+        return out + cands[:limit]
+
+    ranker.calls = []
+    return ranker

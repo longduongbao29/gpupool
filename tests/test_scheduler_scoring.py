@@ -165,3 +165,63 @@ def test_gpu_first_still_holds():
     # a GPU fits: CPU devices never appear in any candidate
     nodes = [node("a", dev("CUDA0", NEED + 100, 100), dev("CPU", 99999, kind="cpu"))]
     assert all(a.device_id == "CUDA0" for p in rank(META, SPEC, nodes) for a in p.assignments)
+
+
+def _on(*nodes_):
+    """A placement for the model on exactly these nodes (stands in for a running replica)."""
+    return plan(META, SPEC, list(nodes_), "run-1", lambda n: 9100)
+
+
+def test_extra_on_slow_gpu_ranks_below_fast_candidate():
+    slow, fast = node("a", dev("CUDA0", NEED + 100, 100)), node("b", dev("CUDA0", NEED + 100, 400))
+    cur = _on(slow)
+    out = rank(META, SPEC, [slow, fast], extra=[cur])
+    assert [where(p) for p in out] == [[("b", "CUDA0")], [("a", "CUDA0")]]
+    got = out[1]
+    # kept identity, re-scored in this pass (perf term is relative to the fast GPU)
+    assert got.replica_id == "run-1" and got.head_port == 9100
+    assert got.est_decode_tps < out[0].est_decode_tps and got.score < out[0].score
+    assert out[0].replica_id == ""
+
+
+def test_extra_ties_with_equal_alternative():
+    a, b = node("a", dev("CUDA0", NEED + 100, 100)), node("b", dev("CUDA0", NEED + 100, 100))
+    out = rank(META, SPEC, [a, b], extra=[_on(a)])
+    # same speed, same waste, same devices: scores tie; the candidate on "a" is dropped as a
+    # duplicate of the extra, so only the alternative on "b" remains next to it
+    assert sorted(where(p)[0] for p in out) == [("a", "CUDA0"), ("b", "CUDA0")]
+    assert out[0].score == out[1].score
+
+
+def test_extra_colocation_excludes_itself_only_if_caller_omits_it():
+    a = node("a", dev("CUDA0", NEED + 100, 100))
+    cur = _on(a)
+    own = occ("a", "CUDA0", model="m")
+    # the caller is responsible for leaving the extra's own replica out of occupants
+    clean = rank(META, SPEC, [a], extra=[cur])[0]
+    dirty = rank(META, SPEC, [a], occupants=[own], extra=[cur])[0]
+    assert not any("shares" in r for r in clean.reasons)
+    assert any("shares" in r for r in dirty.reasons) and dirty.score < clean.score
+
+
+def test_extra_limit_counts_candidates_only_and_duplicate_dropped():
+    nodes = [node(f"n{i}", dev("CUDA0", NEED + 100 + 50 * i, 100 + 50 * i)) for i in range(4)]
+    cur = _on(nodes[0])
+    out = rank(META, SPEC, nodes, limit=2, extra=[cur])
+    assert len(out) == 3
+    assert sum(p.replica_id == "run-1" for p in out) == 1
+    assert [p for p in out if p.replica_id == ""] and all(
+        where(p) != [("n0", "CUDA0")] for p in out if p.replica_id == "")
+    # limit 0: the extra is still returned
+    only = rank(META, SPEC, nodes, limit=0, extra=[cur])
+    assert [p.replica_id for p in only] == ["run-1"]
+
+
+def test_extra_on_missing_device_is_skipped_and_no_extra_unchanged():
+    nodes = [node("a", dev("CUDA0", NEED + 100, 100)), node("b", dev("CUDA0", NEED + 100, 200))]
+    gone = _on(node("z", dev("CUDA0", NEED + 100, 100)))
+    out = rank(META, SPEC, nodes, extra=[gone])
+    assert all(p.replica_id == "" for p in out)
+    assert [p.model_dump() for p in out] == [p.model_dump() for p in rank(META, SPEC, nodes)]
+    assert [p.model_dump() for p in rank(META, SPEC, nodes, extra=())] == \
+        [p.model_dump() for p in rank(META, SPEC, nodes)]

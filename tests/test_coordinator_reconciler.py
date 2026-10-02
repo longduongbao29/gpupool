@@ -7,8 +7,8 @@ from gpupool.coordinator import preemption
 from gpupool.coordinator.reconciler import _Realloc
 from gpupool.coordinator.store import ServerRecord
 from tests.test_coordinator_helpers import (
-    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_ranker, make_reconciler, node,
-    put_replica, settle,
+    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_ranker, make_reconciler,
+    make_scored_ranker, node, put_replica, settle,
 )
 
 HEALTH = r"http://10\.0\.0\.\d+:\d+/health"
@@ -1024,3 +1024,200 @@ async def test_simulate_autoscale_extra_does_not_preempt_and_new_model_starts_at
     out = await rec.simulate([hi, store.get_model("lo"), added])
     assert [s["model"] for s in out["start"]].count("new") == 2
     await rec.shutdown()
+
+
+# ---------------------------------------------------------------- rebalancing
+def _rb_rig(a=40.0, b=80.0, cfg=None, **kw):
+    """m-1 ready on a/CUDA0 (score a); b/CUDA0 is free and scores b."""
+    rec, store, clock = make_reconciler(cfg=cfg or make_cfg(rebalance_s=0), **kw)
+    rec.ranker = make_scored_ranker({("a", "CUDA0"): a, ("b", "CUDA0"): b})
+    _rb_beat(store, clock)
+    store.put_model(SPEC)
+    put_replica(store, "m-1", now=clock())
+    return rec, store, clock
+
+
+def _rb_beat(store, clock):
+    # m-1's engine is reported, or later ticks would see it vanish and fail the old replica
+    head = EngineStatus(engine_id="m-1-head", kind="server", state="running", port=9000)
+    beat(store, clock, node("a", devices=[dev(usable=9000)], engines=[head]), node("b", devices=[dev(usable=9000)]))
+
+
+def _events(store, kind):
+    return [e for e in store.list_events() if e.kind == kind]
+
+
+async def _mv(rec):
+    return (await rec.rebalance_candidates())[0]
+
+
+async def test_rebalance_candidates_threshold_and_shape():
+    rec, store, _ = _rb_rig(a=40, b=64)  # gain 24: below the threshold
+    assert await rec.rebalance_candidates() == []
+    rec.ranker = make_scored_ranker({("a", "CUDA0"): 40, ("b", "CUDA0"): 65})
+    [mv] = await rec.rebalance_candidates()
+    assert mv == {"replica_id": "m-1", "model": "m", "from": [{"node_id": "a", "device_id": "CUDA0"}],
+                  "to": [{"node_id": "b", "device_id": "CUDA0"}], "current_score": 40, "new_score": 65,
+                  "gain": 25, "reasons": ["fits b/CUDA0"]}
+    assert store.get_replica("m-1").state == "ready" and len(store.list_replicas()) == 1  # no side effects
+
+
+async def test_rebalance_candidates_pass_current_as_extra_without_its_own_occupancy_and_sort():
+    rec, store, clock = _rb_rig()
+    store.put_model(SPEC.model_copy(update={"name": "n"}))
+    put_replica(store, "n-1", model="n", now=clock(), head_port=9100)
+    mvs = await rec.rebalance_candidates()
+    assert {m["replica_id"] for m in mvs} == {"m-1", "n-1"}
+    first = next(c for c in rec.ranker.calls if c["extra"][0].replica_id == "m-1")
+    assert [p.replica_id for p in first["extra"]] == ["m-1"] and first["limit"] == 5
+    assert [o.replica_id for o in first["occupants"]] == ["n-1"]  # itself removed, the other stays
+    # real reports: the old replica's reservation is still subtracted (both must fit at once)
+    assert next(d.usable_mb for n in first["nodes"] if n.node_id == "a" for d in n.devices) == 9000 - 2000
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, extra=()):
+        gain = 30 if spec.name == "m" else 50
+        return [extra[0].model_copy(update={"score": 10.0}),
+                extra[0].model_copy(update={"replica_id": "", "score": 10.0 + gain})]
+
+    rec.ranker = ranker
+    assert [m["replica_id"] for m in await rec.rebalance_candidates()] == ["n-1", "m-1"]
+
+
+async def test_rebalance_candidates_apply_pins_and_skip_unready_and_unknown_models():
+    rec, store, clock = _rb_rig()
+    store.put_model(SPEC.model_copy(update={"pin_devices": ["a/CUDA0"]}))
+    assert await rec.rebalance_candidates() == []  # b is pinned out, so nothing better exists
+    store.put_model(SPEC)
+    put_replica(store, "z-1", model="gone", now=clock(), head_port=9200)
+    put_replica(store, "m-2", state="launching", now=clock(), head_port=9300)
+    assert [m["replica_id"] for m in await rec.rebalance_candidates()] == ["m-1"]
+
+
+async def test_start_move_refusals(mock_health):
+    rec, store, clock = _rb_rig()
+    mv = await _mv(rec)
+    rec._move = {"model": "m", "old": "m-1", "new": "x", "since": clock()}
+    assert await rec.start_move(mv) is False
+    rec._move = None
+    put_replica(store, "m-2", state="launching", now=clock(), head_port=9300)
+    assert await rec.start_move(mv) is False
+    store.set_replica_state("m-2", "stopped", None, now=clock())
+    # an active claim: a high-priority model preempted and has not been placed yet
+    store.put_model(SPEC.model_copy(update={"name": "hi", "priority": 80}))
+    rec._preempted["hi"] = (clock(), {"v"})
+    assert await rec.start_move(mv) is False
+    rec._preempted.clear()
+    store.set_replica_state("m-1", "draining", None, now=clock())
+    assert await rec.start_move(mv) is False  # old no longer ready
+    assert store.list_replicas(states={"launching", "pending"}) == []
+    assert rec._move is None and not _events(store, "rebalance_started")
+    await rec.shutdown()
+
+
+async def test_make_before_break_flow(mock_health):
+    rec, store, clock = _rb_rig()
+    mock_health.mock(return_value=httpx.Response(503))  # the new replica stays launching
+    assert await rec.start_move(await _mv(rec)) is True
+    [new] = store.list_replicas(states={"launching"})
+    assert [(a.node_id, a.device_id) for a in new.placement.assignments] == [("b", "CUDA0")]
+    assert rec._move == {"model": "m", "old": "m-1", "new": new.replica_id, "since": clock()}
+    assert store.get_model("m").pin_devices == []  # the pins were for planning only
+    [ev] = _events(store, "rebalance_started")
+    assert ev.level == "info" and ev.model == "m"
+    assert ev.message == "Moving replica m-1 of m from a/CUDA0 to b/CUDA0 (score +40)"
+    for _ in range(3):  # while launching, the extra replica is not surplus
+        await rec.tick()
+    assert store.get_replica("m-1").state == "ready" and store.get_replica(new.replica_id).state == "launching"
+    assert rec._move is not None
+    # new becomes ready: old is drained, move cleared
+    mock_health.mock(return_value=httpx.Response(200))
+    await settle(rec)
+    assert store.get_replica(new.replica_id).state == "ready"
+    await rec.tick()
+    assert store.get_replica("m-1").state in ("draining", "stopped") and rec._move is None
+    assert store.get_replica(new.replica_id).state == "ready"
+    [done] = _events(store, "rebalanced")
+    assert done.level == "info" and done.message == "Moved replica m-1 of m to b/CUDA0 (score +40)"
+    assert not _events(store, "rebalance_failed")
+    await rec.tick()
+    assert store.get_replica("m-1").state == "stopped"
+    await rec.shutdown()
+
+
+async def test_move_failure_keeps_old_and_clears_move(mock_health):
+    client = FakeClient()
+    client.fail_start_on = "-head"
+    rec, store, clock = _rb_rig(client=client)
+    assert await rec.start_move(await _mv(rec))
+    new_id = rec._move["new"]
+    await settle(rec)
+    assert store.get_replica(new_id).state == "failed"
+    await rec.tick()
+    assert rec._move is None and store.get_replica("m-1").state == "ready"
+    [ev] = _events(store, "rebalance_failed")
+    assert ev.level == "warning" and "failed" in ev.message and "boom" in ev.message and "m-1" in ev.message
+    assert not _events(store, "rebalanced")
+    await rec.shutdown()
+
+
+async def test_move_abandoned_when_old_disappears(mock_health):
+    mock_health.mock(return_value=httpx.Response(503))
+    rec, store, clock = _rb_rig()
+    assert await rec.start_move(await _mv(rec))
+    store.set_replica_state("m-1", "failed", "gpu lost", now=clock())
+    await rec.tick()
+    assert rec._move is None
+    [ev] = _events(store, "rebalance_failed")
+    assert "old replica is failed" in ev.message
+    await rec.shutdown()
+
+
+async def test_move_times_out_and_leftover_new_replica_is_drained(mock_health):
+    mock_health.mock(return_value=httpx.Response(503))
+    rec, store, clock = _rb_rig()  # launch_timeout_s is 5, so the limit is 65 s
+    store.put_replica(store.get_replica("m-1").model_copy(update={"created_at": 1.0}))  # older: not the surplus
+    assert await rec.start_move(await _mv(rec))
+    new_id = rec._move["new"]
+    clock.t += 64
+    _rb_beat(store, clock)
+    await rec.tick()
+    assert rec._move is not None
+    clock.t += 2
+    _rb_beat(store, clock)
+    await rec.tick()
+    assert rec._move is None and "in time" in _events(store, "rebalance_failed")[0].message
+    assert store.get_replica("m-1").state == "ready"
+    # the new replica is surplus now and goes through the normal drain
+    assert store.get_replica(new_id).state in ("draining", "stopped", "failed")
+    await rec.shutdown()
+
+
+async def test_periodic_run_respects_interval_and_quiet(mock_health):
+    rec, store, clock = _rb_rig(cfg=make_cfg(rebalance_s=100))
+    await rec.tick()
+    assert rec._move is None  # not due yet: boot counts as the last run
+    clock.t += 100
+    _rb_beat(store, clock)
+    store.put_model(SPEC.model_copy(update={"name": "o"}))
+    put_replica(store, "o-1", model="o", state="launching", now=clock(), head_port=9300)
+    await rec.tick()
+    assert rec._move is None and not _events(store, "rebalance_started")  # busy: stays due
+    store.set_replica_state("o-1", "ready", None, now=clock())
+    await rec.tick()
+    assert rec._move is not None and rec._move["old"] in ("m-1", "o-1")
+    assert rec.rebalance_state()["next_run_ts"] == clock() + 100
+    await rec.shutdown()
+
+
+async def test_periodic_run_records_last_run_when_nothing_qualifies_and_zero_disables():
+    rec, store, clock = _rb_rig(a=40, b=50, cfg=make_cfg(rebalance_s=100))
+    t0 = clock()
+    clock.t += 100
+    _rb_beat(store, clock)
+    await rec.tick()
+    assert rec._move is None and rec._last_rebalance == t0 + 100
+    off, store2, clock2 = _rb_rig(cfg=make_cfg(rebalance_s=0))
+    clock2.t += 10_000
+    _rb_beat(store2, clock2)
+    await off.tick()
+    assert off._move is None and off.ranker.calls == [] and off.rebalance_state()["next_run_ts"] is None

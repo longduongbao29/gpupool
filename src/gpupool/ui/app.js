@@ -30,6 +30,7 @@ var ICONS = {
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  swap: '<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'
 };
 
@@ -39,7 +40,10 @@ var EV_KIND = {
   scaled_down: { cls: "blue", icon: "down" },
   unloaded_idle: { cls: "blue", icon: "moon" },
   cold_start: { cls: "amber", icon: "bolt" },
-  preempted: { cls: "amber", icon: "alert" }
+  preempted: { cls: "amber", icon: "alert" },
+  rebalance_started: { cls: "blue", icon: "swap" },
+  rebalanced: { cls: "green", icon: "swap" },
+  rebalance_failed: { cls: "amber", icon: "alert" }
 };
 
 // Scaling part of the deploy form, derived from a model spec (defaults match the server's).
@@ -96,6 +100,7 @@ function app() {
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false },
     // deploy (new / edit) modal
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null)),
+    rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
 
     // ================= lifecycle =================
@@ -552,9 +557,43 @@ function app() {
           return a.node_id + "/" + a.device_id + ": " + a.layers + " layers";
         });
         out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
-          note: self.replicaNote(r) });
+          note: self.replicaNote(r), mark: self.replicaMark(m, r) });
       });
       return out;
+    },
+    // ----- rebalancing -----
+    rebalance: function () { return (this.st && this.st.rebalance) || { in_progress: null, next_run_ts: null }; },
+    rbMove: function () { return this.rebalance().in_progress || null; },
+    // "being replaced" / "replacement" for the two replicas of the move in progress, else "".
+    replicaMark: function (m, r) {
+      var mv = this.rbMove();
+      if (!mv || mv.model !== m.spec.name) return "";
+      return r.replica_id === mv.old ? "being replaced" : (r.replica_id === mv.new ? "replacement" : "");
+    },
+    rbDevices: function (list) {
+      return (list || []).map(function (a) { return a.node_id + "/" + a.device_id; }).join(", ");
+    },
+    rbNextText: function () {
+      var ts = this.rebalance().next_run_ts;
+      return ts == null ? "Automatic rebalancing is off" : "Next automatic check at " + new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    },
+    runRebalance: async function (dry) {
+      if (this.rb.busy) return;
+      if (!dry && !confirm("Rebalance now?\n\nThis starts a new replica on the better GPUs, then stops the old one once it is ready. Only one replica moves at a time.")) return;
+      this.rb.busy = true;
+      try {
+        var r = await this.api("POST", "/api/rebalance", { dry_run: !!dry });
+        this.rb.moves = (r && r.moves) || [];
+        this.rb.checked = true;
+        if (!dry) {
+          if (r && r.started) { this.rb.checked = false; this.toast("Rebalance started: moving a replica of " + r.started.model, "ok"); }
+          else if (r && r.in_progress) this.toast("Nothing started: a replica of " + r.in_progress.model + " is already being moved", "warning");
+          else if (!this.rb.moves.length) this.toast("Nothing to do: all replicas are well placed", "ok");
+          else this.toast("Nothing started: no better placement could be launched right now", "warning");
+          await this.refresh();
+        }
+      } catch (e) { this.fail(e); }
+      this.rb.busy = false;
     },
     replicasOf: function (m) { var v = this.rep[m.spec.name]; return v == null || v === "" ? 1 : v; },
     startModel: async function (m) {

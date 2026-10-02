@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -265,3 +267,54 @@ def test_ui_has_preemption_and_preview():
                    "Will be preempted", "Cannot be placed", "No change", "Needs room: would stop", "requires_preemption"):
         assert needle in html, needle
     assert ".warn" in css
+
+
+def test_mock_rebalance_flow(client, mock):
+    st = client.get("/api/state", headers=HEAD).json()
+    assert st["rebalance"]["in_progress"] is None and st["rebalance"]["next_run_ts"] > st["events"][0]["ts"]
+    assert {"rebalance_failed"} <= {e["kind"] for e in st["events"]}
+    r = client.post("/api/rebalance", json={"dry_run": True}, headers=HEAD).json()
+    assert r["started"] is None and r["in_progress"] is None and len(r["moves"]) == 1
+    mv = r["moves"][0]
+    assert {"replica_id", "model", "from", "to", "current_score", "new_score", "gain", "reasons"} <= mv.keys()
+    assert {"node_id", "device_id"} <= mv["to"][0].keys() and mv["gain"] >= 25
+    assert client.get("/api/state", headers=HEAD).json()["rebalance"]["in_progress"] is None  # dry run changes nothing
+    assert client.post("/api/rebalance", json={"dry_run": "yes"}, headers=HEAD).status_code == 422
+    r = client.post("/api/rebalance", json={"dry_run": False}, headers=HEAD).json()
+    assert r["started"] == {"replica_id": mv["replica_id"], "model": mv["model"]}
+    ip = r["in_progress"]
+    assert {"model", "old", "new", "since"} <= ip.keys() and ip["old"] == mv["replica_id"]
+    st = client.get("/api/state", headers=HEAD).json()
+    assert st["rebalance"]["in_progress"] == ip
+    reps = {x["replica_id"]: x["state"] for m in st["models"] if m["spec"]["name"] == ip["model"] for x in m["replicas"]}
+    assert reps[ip["old"]] == "ready" and reps[ip["new"]] == "starting"
+    again = client.post("/api/rebalance", json={"dry_run": False}, headers=HEAD).json()
+    assert again["started"] is None and again["moves"] == [] and again["in_progress"] == ip  # one move at a time
+    mock.SCHEDULED[-1] = (0.0, mock.SCHEDULED[-1][1])  # the completion is queued last; let the pending completion fire on the next tick
+    st = client.get("/api/state", headers=HEAD).json()
+    assert st["rebalance"]["in_progress"] is None
+    reps = {x["replica_id"]: x["state"] for m in st["models"] if m["spec"]["name"] == ip["model"] for x in m["replicas"]}
+    assert ip["old"] not in reps and reps[ip["new"]] == "ready"
+    kinds = [e["kind"] for e in st["events"]]
+    assert "rebalance_started" in kinds and "rebalanced" in kinds
+    assert client.post("/api/rebalance", json={"dry_run": True}, headers=HEAD).json()["moves"] == []
+
+
+def test_ui_has_rebalance_panel():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for needle in ("/api/rebalance", "dry_run", "rebalance_started", "rebalanced", "rebalance_failed", "next_run_ts",
+                   "being replaced", "replacement", "starts a new replica on the better GPUs, then stops the old one"):
+        assert needle in js, needle
+    for needle in ("Placement health", "Check placement", "Rebalance now", "All replicas are well placed", "rbMove()"):
+        assert needle in html, needle
+
+
+def test_app_js_parses():
+    # The text checks above pass on a script that does not parse (it happened: a broken string
+    # rendered a blank page). Node is only a dev tool here, so skip when it is absent.
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    r = subprocess.run([node, "--check", str(UI / "app.js")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

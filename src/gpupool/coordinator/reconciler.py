@@ -87,6 +87,9 @@ class Reconciler:
     # overlap cannot keep stopping each other's replicas.
     PREEMPT_COOLDOWN_S = 600.0
     PREEMPT_CLAIM_GRACE_S = 120.0  # after the drain timeout, time for the preemptor to be placed
+    # A move reloads a whole model, so it must be clearly better, not just better (score points).
+    REBALANCE_MIN_GAIN = 25.0
+    REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
 
     def __init__(
         self,
@@ -119,6 +122,11 @@ class Reconciler:
         self._realloc: dict[str, _Realloc] = {}
         self._preempted: dict[str, tuple[float, set[str]]] = {}  # model -> (when, victim replica ids)
         self._wake = asyncio.Event()
+        # The one replica move in flight: {model, old, new, since}. Cluster-wide, so at most one.
+        self._move: dict | None = None
+        self._move_text: tuple[str, str, float] = ("", "", 0.0)  # (from, to, gain) for the events
+        # Starts at boot, not 0: right after a restart the reports are stale and a move would be a guess.
+        self._last_rebalance = clock()
 
     # ------------------------------------------------------------------ helpers
     def _http_client(self) -> httpx.AsyncClient:
@@ -480,6 +488,144 @@ class Reconciler:
             return f"{type(e).__name__}: {e}"
         return "no placement found"
 
+    # ------------------------------------------------------------------ rebalancing
+    @staticmethod
+    def _where(assignments) -> list[dict]:
+        return [{"node_id": a.node_id, "device_id": a.device_id} for a in assignments]
+
+    @staticmethod
+    def _where_text(where: list[dict]) -> str:
+        return ", ".join(f"{w['node_id']}/{w['device_id']}" for w in where)
+
+    async def rebalance_candidates(self) -> list[dict]:
+        """Ready replicas that would score REBALANCE_MIN_GAIN or more somewhere else, best first.
+        No side effects.
+
+        Each replica is scored in the same pass as its alternatives (`extra`), with its own memory
+        removed from the occupants but still subtracted from the reports: make-before-break needs
+        the new place to fit while the old replica is still running."""
+        specs = {s.name: s for s in self.store.list_models()}
+        occ_all = self.occupants()
+        out: list[dict] = []
+        for r in self.store.list_replicas(states={"ready"}):
+            spec = specs.get(r.model)
+            if spec is None:
+                continue
+            try:
+                meta = await self.meta_for(spec)
+                reports = self.available_reports()
+                self._apply_pins(spec, reports)  # a move stays within the model's pins
+                ranked = self._ranker()(meta, spec, reports, limit=5, extra=[r.placement],
+                                        occupants=[o for o in occ_all if o.replica_id != r.replica_id])
+            except Exception:
+                log.exception("scoring a rebalance for %s failed", r.replica_id)
+                continue
+            cur = next((p for p in ranked if p.replica_id == r.replica_id), None)
+            cands = [p for p in ranked if p.replica_id == "" and p.score is not None]
+            if cur is None or cur.score is None or not cands:
+                continue
+            best = max(cands, key=lambda p: p.score)
+            gain = best.score - cur.score
+            if gain < self.REBALANCE_MIN_GAIN:
+                continue
+            out.append({"replica_id": r.replica_id, "model": r.model,
+                        "from": self._where(r.placement.assignments), "to": self._where(best.assignments),
+                        "current_score": cur.score, "new_score": best.score, "gain": gain,
+                        "reasons": list(best.reasons)})
+        out.sort(key=lambda m: m["gain"], reverse=True)
+        return out
+
+    def _not_quiet(self, now: float) -> str | None:
+        """Why the cluster is not in a state to start a move, or None."""
+        if self._move is not None:
+            return "a move is already in progress"
+        if self.store.list_replicas(states={"pending", "launching"}):
+            return "a replica is launching"
+        specs = {s.name: s for s in self.store.list_models()}
+        if self._claim_priority(specs, {n: self._wanted(s) for n, s in specs.items()}, now) >= 0:
+            return "a preemption is waiting for its memory"
+        return None
+
+    async def start_move(self, move: dict) -> bool:
+        """Start the make-before-break move `move` (an entry of rebalance_candidates()). False when
+        refused: nothing was changed. Takes the tick lock so it cannot interleave with a tick."""
+        async with self._tick_lock:
+            return await self._start_move(move, self.clock())
+
+    async def _start_move(self, move: dict, now: float) -> bool:
+        why = self._not_quiet(now)
+        old = self.store.get_replica(move["replica_id"])
+        spec = next((s for s in self.store.list_models() if s.name == move["model"]), None)
+        if why is None and (old is None or old.state != "ready" or spec is None):
+            why = "the replica is no longer ready"
+        if why is not None:
+            log.info("rebalance of %s refused: %s", move["replica_id"], why)
+            return False
+        pins = [f"{w['node_id']}/{w['device_id']}" for w in move["to"]]
+        try:
+            # Pinned to the move's target so the planner (real ports) cannot choose elsewhere.
+            placement = await self.plan_for(spec.model_copy(update={"pin_devices": pins}))
+        except Exception as e:
+            log.warning("rebalance of %s: cannot plan the new replica: %s", old.replica_id, e)
+            return False
+        rec = self._spawn_launch(spec, placement, now)  # real spec: the pins were for planning only
+        self._move = {"model": spec.name, "old": old.replica_id, "new": rec.replica_id, "since": now}
+        self._move_text = (self._where_text(move["from"]), self._where_text(move["to"]), float(move["gain"]))
+        self._emit("info", "rebalance_started",
+                   f"Moving replica {old.replica_id} of {spec.name} from {self._move_text[0]} to "
+                   f"{self._move_text[1]} (score {move['gain']:+.0f})",
+                   node_id=old.placement.head_node, model=spec.name)
+        return True
+
+    async def _advance_move(self, now: float) -> None:
+        """Finish or abandon the move in flight. Runs before _enforce_counts every tick."""
+        mv = self._move
+        if mv is None:
+            return
+        old, new = self.store.get_replica(mv["old"]), self.store.get_replica(mv["new"])
+        frm, to, gain = self._move_text
+        if new is not None and new.state == "ready" and old is not None and old.state == "ready":
+            await self.drain(old.replica_id)
+            self._move = None
+            self._emit("info", "rebalanced",
+                       f"Moved replica {old.replica_id} of {mv['model']} to {to} (score {gain:+.0f})",
+                       node_id=new.placement.head_node, model=mv["model"])
+            return
+        reason = None
+        if new is None or new.state not in ("pending", "launching", "ready"):
+            reason = f"the new replica {'vanished' if new is None else new.state}"
+            if new is not None and new.error:
+                reason += f": {new.error[:200]}"
+        elif old is None or old.state != "ready":
+            reason = f"the old replica is {'gone' if old is None else old.state}"
+        elif now - mv["since"] > self.cfg.launch_timeout_s + self.REBALANCE_EXTRA_TIMEOUT_S:
+            reason = "the new replica did not become ready in time"
+        if reason is None:
+            return
+        # The old replica keeps serving; a new one still alive is surplus and drains normally.
+        self._move = None
+        self._emit("warning", "rebalance_failed",
+                   f"Move of replica {mv['old']} of {mv['model']} from {frm} to {to} abandoned: {reason}",
+                   model=mv["model"])
+
+    async def _rebalance_if_due(self, now: float) -> None:
+        every = self.cfg.rebalance_s
+        if every <= 0 or now - self._last_rebalance < every or self._not_quiet(now) is not None:
+            return  # not quiet: stay due and try again next tick
+        self._last_rebalance = now
+        try:
+            moves = await self.rebalance_candidates()
+        except Exception:
+            log.exception("looking for rebalance moves failed")
+            return
+        if moves:
+            await self._start_move(moves[0], now)
+
+    def rebalance_state(self) -> dict:
+        """For /api/state: the move in flight and when the periodic run is next due."""
+        due = self._last_rebalance + self.cfg.rebalance_s if self.cfg.rebalance_s > 0 else None
+        return {"in_progress": dict(self._move) if self._move else None, "next_run_ts": due}
+
     # ------------------------------------------------------------------ server removal
     async def remove_node(self, node_id: str) -> None:
         """Stop every replica touching `node_id`, then forget the server.
@@ -512,7 +658,9 @@ class Reconciler:
             await self._check_suspects(nodes)
             await self._process_drains(nodes, now)
             self._clear_stable_backoff(now)
+            await self._advance_move(now)
             await self._enforce_counts(nodes, now)
+            await self._rebalance_if_due(now)
             self.store.prune_replicas(self.KEEP_TERMINAL_PER_MODEL)
 
     async def run(self) -> None:
@@ -736,6 +884,10 @@ class Reconciler:
             moving_ids = {r.replica_id for r in moving}
             normal = [r for r in active if r.replica_id not in moving_ids]
             need = wanted[spec.name]
+            if (need > 0 and self._move is not None and self._move["model"] == spec.name
+                    and any(r.replica_id == self._move["new"] and r.state in ("pending", "launching")
+                            for r in active)):
+                need += 1  # make-before-break: the old replica serves until the new one is ready
 
             if len(normal) < need:
                 await self._maybe_launch(spec, now, need)
@@ -769,9 +921,7 @@ class Reconciler:
                 await self._preempt_for(spec, now, self._wanted(spec) if wanted is None else wanted)
             return
         self._nofit.pop(spec.name, None)
-        rec = ReplicaRecord(replica_id=placement.replica_id, model=spec.name, placement=placement,
-                            state="launching", created_at=now, updated_at=now)
-        self.store.put_replica(rec)
+        rec = self._spawn_launch(spec, placement, now)
         entry = self._realloc.get(spec.name)
         if entry is not None and entry.lost is not None and not entry.started:
             entry.started = True
@@ -780,7 +930,14 @@ class Reconciler:
             self._emit("warning", "realloc_started",
                        f"Re-allocating {spec.name}: replica {lost_id} lost ({why}); new placement: {where}",
                        model=spec.name)
+
+    def _spawn_launch(self, spec: ModelSpec, placement: Placement, now: float) -> ReplicaRecord:
+        """Record `placement` as a launching replica and start its launch task."""
+        rec = ReplicaRecord(replica_id=placement.replica_id, model=spec.name, placement=placement,
+                            state="launching", created_at=now, updated_at=now)
+        self.store.put_replica(rec)
         self._launches[rec.replica_id] = asyncio.create_task(self._launch(rec, spec), name=f"launch-{rec.replica_id}")
+        return rec
 
     # ------------------------------------------------------------------ launch
     def _model_source(self, spec: ModelSpec) -> tuple[str, str]:

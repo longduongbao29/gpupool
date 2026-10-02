@@ -9,7 +9,8 @@ from gpupool.coordinator.api import make_api_router
 from gpupool.coordinator.store import ServerRecord
 from gpupool.router.balancer import Balancer
 from tests.test_coordinator_helpers import (
-    SPEC, FakeAutoscaler, dev, make_cfg, make_planner, make_ranker, make_reconciler, node, put_replica,
+    SPEC, FakeAutoscaler, dev, make_cfg, make_planner, make_ranker, make_reconciler, make_scored_ranker, node,
+    put_replica,
 )
 
 AD = {"Authorization": "Bearer adm"}
@@ -69,7 +70,7 @@ async def test_auth_required_on_every_route(env):
                          ("DELETE", "/api/models/m"), ("POST", "/api/models/m/plan"),
                          ("GET", "/api/events"), ("POST", "/api/events/read"),
                          ("GET", "/api/capacity"), ("POST", "/api/recommend"),
-                         ("POST", "/api/simulate")]:
+                         ("POST", "/api/simulate"), ("POST", "/api/rebalance")]:
         r = await c.request(method, path, headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 401, (method, path)
 
@@ -159,7 +160,8 @@ async def test_state_shape_and_summary(env):
     clock.t += 11  # everybody ages out...
     store.upsert_node(node("a", devices=[dev("CUDA0"), dev("CUDA1")]), clock())  # ...except a
     st = (await c.get("/api/state")).json()
-    assert set(st) == {"summary", "servers", "models", "library", "settings", "events", "unread_events"}
+    assert set(st) == {"summary", "servers", "models", "library", "settings", "events", "unread_events",
+                      "rebalance"}
     assert [s["node_id"] for s in st["servers"]] == ["a", "b", "c", "never"]
     never = st["servers"][3]
     assert never["alive"] is False and never["report"] is None and never["last_seen"] == 0.0
@@ -628,3 +630,47 @@ async def test_recommend_fitting_option_has_no_preemption_key(env):
     register(store, clock, node("a"))
     o = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()["options"][0]
     assert o["fits_now"] is True and "requires_preemption" not in o
+
+
+# ---------------------------------------------------------------- rebalance
+def rebalance_rig(env):
+    c, store, rec, poller, clock, lib = env
+    register(store, clock, node("a", devices=[dev(usable=9000)]), node("b", devices=[dev(usable=9000)]))
+    rec.ranker = make_scored_ranker({("a", "CUDA0"): 40, ("b", "CUDA0"): 80})
+    store.put_model(SPEC)
+    put_replica(store, "m-1", now=clock())
+    return c, store, rec, clock
+
+
+async def test_rebalance_dry_run_lists_moves_and_changes_nothing(env):
+    c, store, rec, clock = rebalance_rig(env)
+    for body in ({}, {"dry_run": True}):
+        r = await c.post("/api/rebalance", json=body)
+        assert r.status_code == 200
+        j = r.json()
+        assert j["started"] is None and j["in_progress"] is None
+        [mv] = j["moves"]
+        assert mv["replica_id"] == "m-1" and mv["gain"] == 40 and mv["to"] == [{"node_id": "b", "device_id": "CUDA0"}]
+    assert [r.replica_id for r in store.list_replicas()] == ["m-1"] and rec._move is None
+
+
+async def test_rebalance_run_starts_top_move_once(env):
+    c, store, rec, clock = rebalance_rig(env)
+    r = await c.post("/api/rebalance", json={"dry_run": False})
+    j = r.json()
+    assert j["started"] == {"replica_id": "m-1", "model": "m"}
+    assert j["in_progress"]["old"] == "m-1" and j["in_progress"]["model"] == "m"
+    assert len(store.list_replicas(states={"launching", "ready", "failed"})) == 2
+    again = (await c.post("/api/rebalance", json={"dry_run": False})).json()
+    assert again["started"] is None and again["in_progress"] == j["in_progress"]  # one move at a time
+    assert (await c.get("/api/state")).json()["rebalance"]["in_progress"] == j["in_progress"]
+
+
+async def test_state_rebalance_block_and_auth(env):
+    c, store, rec, clock = rebalance_rig(env)
+    st = (await c.get("/api/state")).json()["rebalance"]
+    assert st == {"in_progress": None, "next_run_ts": clock() + rec.cfg.rebalance_s}
+    rec.cfg.rebalance_s = 0
+    assert (await c.get("/api/state")).json()["rebalance"] == {"in_progress": None, "next_run_ts": None}
+    r = await c.post("/api/rebalance", json={}, headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401

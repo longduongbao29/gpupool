@@ -259,6 +259,11 @@
 
     <!-- ============ Models ============ -->
     <div x-show="view==='models'">
+      <div class="rb-banner" x-show="rbMove()" style="margin:0 0 14px">
+        <span x-html="icon('swap')"></span>
+        <div class="grow" x-show="rbMove()">Moving replica <b x-text="rbMove() && rbMove().old"></b> of <b x-text="rbMove() && rbMove().model"></b>
+          &rarr; <b x-text="rbMove() && rbMove().new"></b>, started <span x-text="rbMove() && ago(rbMove().since)"></span></div>
+      </div>
       <div class="panel">
         <div class="panel-head"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
           <button class="btn primary right" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div>
@@ -286,6 +291,27 @@
             </template>
           </tbody>
         </table>
+        </div>
+      </div>
+
+      <div class="panel mt">
+        <div class="panel-head"><h2>Placement health</h2><span class="muted small" x-text="rbNextText()"></span>
+          <div class="row right">
+            <button class="btn" @click="runRebalance(true)" :disabled="rb.busy"><span x-html="icon('search')"></span> Check placement</button>
+            <button class="btn primary" @click="runRebalance(false)" :disabled="rb.busy || !!rbMove()" :title="rbMove() ? 'A replica is already being moved' : 'Start moving the replica with the biggest gain'"><span x-html="icon('swap')"></span> Rebalance now</button>
+          </div></div>
+        <div class="empty" x-show="!rb.checked">Check whether any replica would run clearly better on other GPUs. Nothing changes until you press <b>Rebalance now</b>.</div>
+        <div class="empty" x-show="rb.checked && rb.moves.length === 0">All replicas are well placed</div>
+        <div class="rb-moves" x-show="rb.checked && rb.moves.length > 0">
+          <template x-for="mv in rb.moves" :key="mv.replica_id">
+            <div class="rb-move">
+              <div class="row wrap" style="gap:8px">
+                <b x-text="mv.model"></b><span class="muted small">replica <span x-text="mv.replica_id"></span></span>
+                <span class="right small"><span x-text="Math.round(mv.current_score)"></span> &rarr; <span x-text="Math.round(mv.new_score)"></span> <span class="gain">+<span x-text="Math.round(mv.gain)"></span></span></span></div>
+              <div class="small" style="margin-top:4px"><span x-text="rbDevices(mv.from)"></span> &rarr; <b x-text="rbDevices(mv.to)"></b></div>
+              <div class="rnote" x-show="(mv.reasons || []).length" x-text="(mv.reasons || []).join('; ')"></div>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -354,6 +380,7 @@
               <div class="place" x-show="placementLines(m).length">
                 <template x-for="p in placementLines(m)" :key="p.id">
                   <div>Replica <b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
+                    <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
                     <div class="rnote" x-show="p.note" :title="p.note" x-text="p.note"></div></div>
                 </template>
               </div>
