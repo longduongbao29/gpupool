@@ -79,6 +79,13 @@ class Cluster:
         log.close()
 
     def start(self) -> None:
+        # A leftover run (driver or cluster) on these ports would silently drive the new
+        # cluster too; refuse instead of interleaving two runs.
+        try:
+            httpx.get(f"{COORD}/v1/models", timeout=2)
+            raise RuntimeError(f"something already listens on {COORD}; stop the previous run")
+        except httpx.ConnectError:
+            pass
         if WORK.exists():
             shutil.rmtree(WORK)
         WORK.mkdir(parents=True)

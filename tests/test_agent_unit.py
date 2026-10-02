@@ -279,3 +279,30 @@ def test_ensure_concurrent_downloads_once(tmp_path, http_server):
 def test_ensure_missing_local(tmp_path):
     with pytest.raises(FileNotFoundError):
         ensure_model("m", str(tmp_path / "nope.gguf"), tmp_path / "c", "x", "t")
+
+
+def test_new_manager_reaps_orphans_of_a_crashed_agent(tmp_path, monkeypatch):
+    # Agent 1 starts an engine and dies without stopping it (no stop_all, like kill -9).
+    port = free_port()
+    patch_cmd(monkeypatch, LISTENER.format(port=port))
+    crashed = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
+    pid = crashed.start(EngineSpec(engine_id="orphan", kind="rpc", port=port, devices=["CPU"])).pid
+    wait_state(crashed, "orphan", "running")
+    import psutil
+    assert psutil.pid_exists(pid)
+    # Agent 2 on the same log_dir stops it on construction and frees the port.
+    fresh = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
+    assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    assert not (tmp_path / "logs" / "orphan.pid").exists()
+    assert fresh._port_free(port)
+
+
+def test_stale_pid_file_of_a_reused_pid_is_ignored(tmp_path):
+    # A pid file whose pid now belongs to an unrelated process (different create_time)
+    # must not kill that process.
+    import os
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "old.pid").write_text(f"{os.getpid()} 12345.0\n")
+    ProcessManager(tmp_path, logs, "127.0.0.1")
+    assert not (logs / "old.pid").exists()  # we are still alive to assert this

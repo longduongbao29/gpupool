@@ -10,6 +10,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psutil
+
 from gpupool.common.models import EngineSpec, EngineStatus
 
 log = logging.getLogger(__name__)
@@ -115,6 +117,53 @@ class ProcessManager:
         self._lock = threading.RLock()
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
+        self.reap_orphans()
+
+    # A hard-killed agent (OOM killer, kill -9, server reboot of the agent only) leaves its
+    # llama.cpp children running: they keep holding VRAM on a shared GPU and no coordinator
+    # knows about them. Each engine therefore gets a pid file; a new ProcessManager on the
+    # same log_dir stops whatever is left. create_time guards against PID reuse.
+    def _pid_path(self, engine_id: str) -> Path:
+        return self.log_dir / f"{engine_id}.pid"
+
+    def _write_pid(self, engine_id: str, proc: subprocess.Popen) -> None:
+        try:
+            created = psutil.Process(proc.pid).create_time()
+        except psutil.Error:
+            return  # already gone; nothing to reap later
+        tmp = self._pid_path(engine_id).with_suffix(".pid.tmp")
+        tmp.write_text(f"{proc.pid} {created}\n")
+        os.replace(tmp, self._pid_path(engine_id))
+
+    def _clear_pid(self, engine_id: str) -> None:
+        try:
+            self._pid_path(engine_id).unlink()
+        except FileNotFoundError:
+            pass
+
+    def reap_orphans(self) -> list[str]:
+        """Stop engines left running by a previous agent on this log_dir. Returns their ids."""
+        reaped: list[str] = []
+        if not self.log_dir.is_dir():
+            return reaped
+        for pid_file in self.log_dir.glob("*.pid"):
+            engine_id = pid_file.stem
+            try:
+                pid_s, created_s = pid_file.read_text().split()
+                proc = psutil.Process(int(pid_s))
+                if abs(proc.create_time() - float(created_s)) < 1.0:
+                    log.warning("stopping orphan engine %s (pid %s) from a previous agent",
+                                engine_id, pid_s)
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+                    reaped.append(engine_id)
+            except (ValueError, OSError, psutil.Error):
+                pass  # malformed file or process already gone
+            pid_file.unlink(missing_ok=True)
+        return reaped
 
     def _binaries(self) -> dict[str, Path]:
         if self._bins is None:
@@ -159,6 +208,7 @@ class ProcessManager:
                                         stderr=subprocess.STDOUT, env=env, **kwargs)
             eng = _Engine(spec=spec, proc=proc, log_path=log_path)
             self._engines[spec.engine_id] = eng
+            self._write_pid(spec.engine_id, proc)
         return self._status(eng)
 
     def _status(self, eng: _Engine) -> EngineStatus:
@@ -205,6 +255,7 @@ class ProcessManager:
                 log.warning("engine %s ignored terminate; killing", engine_id)
                 eng.proc.kill()
                 eng.proc.wait()  # reap: no zombie
+        self._clear_pid(engine_id)
         return self._status(eng)
 
     def stop_all(self) -> None:
