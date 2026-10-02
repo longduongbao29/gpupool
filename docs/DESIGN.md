@@ -216,7 +216,11 @@ Máy dev chỉ có 1 GTX 1650 4 GB → giả lập 3 server bằng 3 agent trên
 | Split thật | Qwen2.5-3B Q4_K_M, A giới hạn ~1.2 GB → split qua B, C | trả lời đúng qua `/v1/chat/completions`, có số tokens/s |
 | Failover | 2 replica, kill agent + engine của 1 replica | request sau vẫn thành công, replica được re-place |
 
-## 11. Câu hỏi mở
+## 11. Trả lời câu hỏi mở (2026-10-02)
 
-- Server thật (Linux) có internet để tải bản prebuilt không, hay phải build tại chỗ? Ảnh hưởng `agent/bootstrap`.
-- Model thật muốn serve là gì (kích thước) — để chọn margin và ctx mặc định.
+- Các server gọi được nhau; internet không đảm bảo → `ModelSpec.source` nhận thêm
+  `coordinator://<file>`: agent tải GGUF từ `GET /files/<file>` của coordinator (đọc từ `models_dir`).
+  Binary llama.cpp do agent nhận qua `--llama-dir` (prebuilt hoặc tự build), không bắt buộc tải GitHub.
+- Không giới hạn kích thước model; mục tiêu là dùng hết tổng VRAM khả dụng của pool → split nhiều node
+  là đường chính, margin cấu hình được theo node (`margin_pct`, `margin_min_mb`, `budget_mb` theo device).
+- Coordinator đọc metadata GGUF bằng parser tự viết đọc tuần tự (file local hoặc HTTP Range), không cần tải cả file.

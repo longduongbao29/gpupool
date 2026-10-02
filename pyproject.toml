@@ -1,17 +1,38 @@
 [project]
 name = "gpupool"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pool scattered GPU memory across servers to serve LLMs via llama.cpp"
 readme = "README.md"
 authors = [
     { name = "Long Duong", email = "longduongbao29@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.142.2",
+    "gguf>=0.19.0",
+    "httpx>=0.28.1",
+    "nvidia-ml-py>=13.615.71",
+    "psutil>=7.2.2",
+    "pydantic>=2.13.5",
+    "uvicorn[standard]>=0.54.0",
+]
 
 [project.scripts]
-gpupool = "gpupool:main"
+gpupool = "gpupool.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.8,<0.11.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["real: needs llama.cpp binaries, a GGUF file and a GPU (run with -m real)"]
+addopts = "-m 'not real'"
