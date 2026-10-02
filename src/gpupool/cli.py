@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -113,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
     st.set_defaults(fn=lambda x: _admin("GET", "/admin/status"))
 
     args = p.parse_args(argv)
+    logging.basicConfig(level=os.environ.get("GPUPOOL_LOG", "INFO"),
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     return args.fn(args)
 
 
