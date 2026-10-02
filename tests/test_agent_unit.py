@@ -69,6 +69,55 @@ def test_build_server_requires_model_path():
         build_command(spec, BINS, "h", None)
 
 
+_BASE = ["llama-server", "-m", "/m.gguf", "--host", "h", "--port", "1", "--alias", "m",
+         "-c", "4096", "-np", "1", "-ngl", "999", "--device", "CUDA0", "--split-mode", "layer",
+         "--cache-reuse", "256", "--metrics", "--fit", "off"]
+
+
+def _srv(**kw):
+    return EngineSpec(engine_id="x", kind="server", port=1, devices=["CUDA0"], model="m", **kw)
+
+
+def test_build_default_has_no_kv_or_spec_flags():
+    assert build_command(_srv(), BINS, "h", "/m.gguf") == _BASE
+
+
+def test_build_cache_type():
+    cmd = build_command(_srv(cache_type="q8_0", extra_args=["--foo"]), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["-ctk", "q8_0", "-ctv", "q8_0", "--foo"]
+
+
+def test_build_ngram():
+    cmd = build_command(_srv(spec_type="ngram"), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["--spec-type", "ngram-mod"]
+
+
+def test_build_draft():
+    cmd = build_command(_srv(spec_type="draft", draft_model_path="/d.gguf",
+                             draft_device="CUDA0", draft_n_max=6), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["--spec-type", "draft-simple", "-md", "/d.gguf", "-devd", "CUDA0",
+                           "-ngld", "999", "--spec-draft-n-max", "6"]
+
+
+def test_build_draft_with_quantized_cache():
+    cmd = build_command(_srv(spec_type="draft", draft_model_path="/d.gguf", draft_device="CUDA0",
+                             cache_type="q4_0", extra_args=["--foo"]), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["-ctk", "q4_0", "-ctv", "q4_0", "--spec-type", "draft-simple",
+                           "-md", "/d.gguf", "-devd", "CUDA0", "-ngld", "999",
+                           "--spec-draft-n-max", "4", "-ctkd", "q4_0", "-ctvd", "q4_0", "--foo"]
+
+
+@pytest.mark.parametrize("kw", [{"draft_device": "CUDA0"}, {"draft_model_path": "/d.gguf"}, {}])
+def test_build_draft_requires_model_and_device(kw):
+    with pytest.raises(ValueError):
+        build_command(_srv(spec_type="draft", **kw), BINS, "h", "/m.gguf")
+
+
+def test_build_rpc_ignores_kv_and_spec():
+    spec = EngineSpec(engine_id="r", kind="rpc", port=9001, devices=["CUDA0"], cache_type="q8_0")
+    assert "-ctk" not in build_command(spec, BINS, "h", None)
+
+
 def test_find_binaries_fallback_and_missing(tmp_path):
     with pytest.raises(FileNotFoundError, match="not found in llama dir"):
         procs.find_binaries(tmp_path)

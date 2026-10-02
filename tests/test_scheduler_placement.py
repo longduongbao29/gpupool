@@ -200,3 +200,176 @@ def test_plan_carries_device_uuid():
     n = [node("a", d0)]
     assert plan(meta, SPEC, n, "r1", Ports()).assignments[0].device_uuid == "GPU-aaaa"
     assert plan(meta, SPEC, [node("b", d1)], "r2", Ports()).assignments[0].device_uuid is None
+
+
+# ---- KV-cache quantisation and speculative draft reservation
+
+from gpupool.scheduler.estimate import draft_need_mb, kv_bytes_per_layer  # noqa: E402
+from gpupool.scheduler.placement import rank  # noqa: E402
+
+DRAFT = make_meta(4, layer_mb=10, out_mb=10)
+DSPEC = SPEC.model_copy(update={"speculative": "draft"})
+
+
+def test_kv_cache_type_factors():
+    m = make_meta(32)
+    f16 = kv_bytes_per_layer(m, 4096)
+    assert kv_bytes_per_layer(m, 4096, "f16") == f16 == 2 * 4096 * 8 * 128 * 2
+    assert kv_bytes_per_layer(m, 4096, "q8_0") == f16 * 34 // 64
+    assert kv_bytes_per_layer(m, 4096, "q4_0") == f16 * 18 // 64
+    # Qwen2.5-3B-like: 36 layers, 2 kv heads x 128, ctx 8192 -> theory -135 / -207 MB
+    q = ModelMeta(arch="qwen2", n_layers=36, n_embd=2048, n_head=16, n_head_kv=2, head_dim=128,
+                  layer_bytes=[40 * MB] * 36, other_bytes=0, output_bytes=0)
+    base = total_need_mb(q, 8192)
+    assert base - total_need_mb(q, 8192, "q8_0") in (134, 135, 136)
+    assert base - total_need_mb(q, 8192, "q4_0") in (206, 207, 208)
+
+
+def test_cache_type_default_unchanged():
+    m = make_meta(8)
+    assert total_need_mb(m, 512) == total_need_mb(m, 512, "f16")
+    assert device_need_mb(m, range(8), 512, "cuda", True) == total_need_mb(m, 512)
+    nodes = [node("a", dev("CUDA0", 5000))]
+    pl = plan(m, SPEC, nodes, "r", Ports())
+    assert pl.draft_est_mb is None and pl.est_total_mb == total_need_mb(m, 512)
+
+
+def test_plan_uses_spec_cache_type():
+    m = make_meta(8)
+    spec = SPEC.model_copy(update={"ctx_size": 8192, "kv_cache_type": "q4_0"})
+    pl = plan(m, spec, [node("a", dev("CUDA0", 5000))], "r", Ports())
+    assert pl.est_total_mb == total_need_mb(m, 8192, "q4_0") < total_need_mb(m, 8192)
+
+
+def test_cache_type_lets_model_fit():
+    m = make_meta(8)
+    ctx = 16384
+    cap = total_need_mb(m, ctx, "q4_0") + 5
+    nodes = [node("a", dev("CUDA0", cap))]
+    with pytest.raises(NoFit):
+        plan(m, SPEC.model_copy(update={"ctx_size": ctx}), nodes, "r", Ports())
+    pl = plan(m, SPEC.model_copy(update={"ctx_size": ctx, "kv_cache_type": "q4_0"}), nodes, "r", Ports())
+    assert pl.tier == "single_gpu"
+
+
+def test_draft_need_is_whole_model_on_cuda():
+    assert draft_need_mb(DRAFT, 512) == device_need_mb(DRAFT, range(4), 512, "cuda", True)
+    assert draft_need_mb(DRAFT, 512, "q8_0") < draft_need_mb(DRAFT, 512)
+
+
+def test_draft_reserved_on_first_device():
+    m = make_meta(8)
+    dn = draft_need_mb(DRAFT, 512)
+    nodes = [node("a", dev("CUDA0", total_need_mb(m, 512) + dn + 10))]
+    base = plan(m, SPEC, nodes, "r", Ports())
+    pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    assert pl.draft_est_mb == dn
+    assert pl.assignments[0].est_mb == base.assignments[0].est_mb + dn
+    assert pl.est_total_mb == base.est_total_mb + dn
+    assert pl.assignments[0].est_mb <= nodes[0].devices[0].usable_mb
+    # without draft_meta, or with speculative != draft, nothing changes
+    assert plan(m, DSPEC, nodes, "r", Ports()).draft_est_mb is None
+    assert plan(m, SPEC, nodes, "r", Ports(), draft_meta=DRAFT).draft_est_mb is None
+    assert rank(m, DSPEC, nodes, draft_meta=DRAFT)[0].draft_est_mb == dn
+
+
+def test_draft_forces_different_head():
+    m = make_meta(8)
+    need, dn = total_need_mb(m, 512), draft_need_mb(DRAFT, 512)
+    # best fit is "b" (tight) but only 10 MB of slack: the draft goes to "a"
+    nodes = [node("a", dev("CUDA0", need + 5000)), node("b", dev("CUDA0", need + 10))]
+    assert plan(m, SPEC, nodes, "r", Ports()).head_node == "b"
+    pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    assert pl.head_node == "a" and pl.draft_est_mb == dn
+    assert all(p.head_node == "a" for p in rank(m, DSPEC, nodes, draft_meta=DRAFT))
+
+
+def test_draft_spills_layers_to_another_node_when_the_head_cannot_hold_both():
+    m = make_meta(8)
+    need, dn = total_need_mb(m, 512), draft_need_mb(DRAFT, 512)
+    # a alone fits the model but not model + draft: with a's room reduced by the draft (only a,
+    # the head), the model spreads over a and b.
+    nodes = [node("a", dev("CUDA0", need + 50)), node("b", dev("CUDA0", 700))]
+    assert plan(m, SPEC, nodes, "r", Ports()).tier == "single_gpu"
+    pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    assert pl.tier == "multi_node" and pl.head_node == "a"
+    assert pl.assignments[0].est_mb <= need + 50  # draft included
+    assert pl.draft_est_mb == dn
+
+
+def test_draft_head_without_local_cuda_dropped():
+    m = make_meta(8)
+    nodes = [node("a", dev("CPU", 5000, kind="cpu")), node("b", dev("CUDA0", total_need_mb(m, 512) + 5000))]
+    pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    assert pl.head_node == "b" and pl.assignments[0].llama_device == "CUDA0"
+
+
+def test_draft_nofit_message():
+    m = make_meta(8)
+    dn = draft_need_mb(DRAFT, 512)
+    nodes = [node("a", dev("CUDA0", total_need_mb(m, 512) + dn - 20))]
+    assert plan(m, SPEC, nodes, "r", Ports()).tier == "single_gpu"
+    with pytest.raises(NoFit, match="draft"):
+        plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    with pytest.raises(NoFit, match="draft"):
+        plan(m, DSPEC, [node("a", dev("CPU", 99999, kind="cpu"))], "r", Ports(), draft_meta=DRAFT)
+
+
+def _qwen_like(n, layer_mb, out_mb, kv_heads=2):
+    return ModelMeta(arch="qwen2", n_layers=n, n_embd=2048, n_head=16, n_head_kv=kv_heads,
+                     head_dim=128, layer_bytes=[layer_mb * MB] * n,
+                     other_bytes=out_mb * 2 * MB, output_bytes=out_mb * MB)
+
+
+def test_draft_three_server_cluster_reduces_only_the_head():
+    # Real defect: a=1300 (GTX 1650), b=c=1100; 3B-like model ~2.1 GB + 0.5B-like draft ~0.56 GB
+    # at ctx 2048. Reducing every GPU by the draft (3 x 563 MB) made this NoFit, although
+    # charging the draft to a alone leaves 737 + 1100 + 1100 for the model.
+    m, dm = _qwen_like(36, 46, 150), _qwen_like(24, 10, 61)
+    spec = SPEC.model_copy(update={"ctx_size": 2048, "speculative": "draft"})
+    dn = draft_need_mb(dm, 2048)
+    assert 550 <= dn <= 575 and 2080 <= total_need_mb(m, 2048) <= 2160
+    nodes = [node("a", dev("CUDA0", 1300)), node("b", dev("CUDA0", 1100)),
+             node("c", dev("CUDA0", 1100))]
+    assert total_need_mb(m, 2048) + dn <= 3500  # the pool holds it only if the draft is charged once
+    pl = plan(m, spec, nodes, "r", Ports(), draft_meta=dm)
+    assert pl.draft_est_mb == dn and pl.head_node == "a"
+    a0 = pl.assignments[0]
+    assert (a0.node_id, a0.device_id, a0.llama_device) == ("a", "CUDA0", "CUDA0")
+    usable = {n.node_id: n.devices[0].usable_mb for n in nodes}
+    assert sum(a.layers for a in pl.assignments) == 36
+    for i, a in enumerate(pl.assignments):
+        assert a.est_mb <= usable[a.node_id]
+    # the head's est_mb is its layer share plus the draft
+    own = device_need_mb(m, range(a0.layers), 2048, "cuda", len(pl.assignments) == 1)
+    assert a0.est_mb == own + dn and a0.est_mb <= 1300
+    assert pl.est_total_mb == sum(a.est_mb for a in pl.assignments)
+    for p in rank(m, spec, nodes, draft_meta=dm):
+        assert p.assignments[0].llama_device == p.assignments[0].device_id
+        assert p.assignments[0].est_mb <= usable[p.assignments[0].node_id]
+
+
+def test_draft_goes_on_the_head_device_even_if_a_sibling_has_more_room():
+    # Two GPUs on a: after D=small gives up the draft, the roomier sibling would sort first;
+    # the draft must still sit on assignments[0], which has to be the intended head device.
+    m = make_meta(8)
+    need, dn = total_need_mb(m, 512), draft_need_mb(DRAFT, 512)
+    nodes = [node("a", dev("CUDA0", need + dn + 10), dev("CUDA1", need + dn + 20))]
+    for p in rank(m, DSPEC, nodes, draft_meta=DRAFT):
+        a0 = p.assignments[0]
+        assert a0.llama_device == a0.device_id
+        assert a0.est_mb <= {"CUDA0": need + dn + 10, "CUDA1": need + dn + 20}[a0.device_id]
+    assert plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT).draft_est_mb == dn
+
+
+def test_draft_many_gpus_stays_bounded():
+    import time
+    m = make_meta(32, layer_mb=100)
+    dn = draft_need_mb(DRAFT, 512)
+    nodes = [node(f"n{i}", dev("CUDA0", 700 + i), dev("CUDA1", 650 + i)) for i in range(12)]
+    t = time.perf_counter()
+    pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    assert time.perf_counter() - t < 20
+    assert pl.draft_est_mb == dn
+    a0 = pl.assignments[0]
+    assert a0.node_id == pl.head_node and a0.llama_device == a0.device_id

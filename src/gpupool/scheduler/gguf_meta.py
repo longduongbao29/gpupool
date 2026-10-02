@@ -74,6 +74,10 @@ class _Stream:
         return self.read(n).decode("utf-8", errors="replace")
 
 
+class _Count(int):
+    """Element count of an array whose contents were skipped (not kept)."""
+
+
 def _read_value(s: _Stream, vtype: int, keep: bool):
     if vtype in _SCALARS:
         return s.unpack(_SCALARS[vtype])
@@ -89,13 +93,13 @@ def _read_value(s: _Stream, vtype: int, keep: bool):
             raw = s.read(count * size)
             if keep and count <= _MAX_KEEP_ARRAY:
                 return list(struct.unpack(f"<{count}{_SCALARS[etype][1]}", raw))
-            return None
+            return _Count(count)
         if etype in (_T_STRING, _T_ARRAY):
             if count > 1 << 28:
                 raise ValueError(f"corrupt GGUF: array of {count} elements")
             for _ in range(count):
                 _read_value(s, etype, False)
-            return None
+            return _Count(count)
         raise ValueError(f"corrupt GGUF: unknown array element type {etype}")
     raise ValueError(f"corrupt GGUF: unknown value type {vtype}")
 
@@ -172,10 +176,15 @@ def _build(kv: dict, tensors: list[tuple[str, int]], file_bytes: int | None) -> 
             other += nbytes
     out = sizes.get("output.weight", sizes.get("token_embd.weight", 0))
     out += sum(b for n, b in sizes.items() if n.startswith("output_norm."))
+    # tokens is a skipped string array: _read_value leaves only its element count
+    tokens = kv.get("tokenizer.ggml.tokens")
+    vocab = len(tokens) if isinstance(tokens, list) else int(tokens) if isinstance(tokens, _Count) else None
+    tok_model = kv.get("tokenizer.ggml.model")
     return ModelMeta(
         arch=arch, n_layers=n_layers, n_embd=n_embd, n_head=n_head, n_head_kv=n_head_kv,
         head_dim=head_dim, layer_bytes=layer_bytes, other_bytes=other, output_bytes=out,
-        file_bytes=file_bytes,
+        file_bytes=file_bytes, vocab_size=vocab,
+        tokenizer_model=tok_model if isinstance(tok_model, str) else None,
     )
 
 

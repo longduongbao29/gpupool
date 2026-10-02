@@ -22,6 +22,11 @@ A `preempted` warning event is seeded.
 Model files: GET /api/library/browse lists /models (host folder /srv/gguf) with an in-library file, a split part and a broken
 link; POST /api/library {path} accepts a listed file by its /models or /srv/gguf path and answers 400 with the long
 "No such file inside the coordinator ..." message for anything else.
+KV cache / speculative decoding: PUT /api/models/{name} takes kv_cache_type (f16|q8_0|q4_0), speculative (none|ngram|draft),
+draft_file (ready library file, required for "draft") and draft_n_max (1-16, default 4); 422 for a missing/unready draft, a draft equal to
+the model file, or a tokenizer mismatch (names starting with "llama" vs the others). Specs carry kv_cache_type, speculative, draft
+("coordinator://<file>" or null) and draft_n_max; placements of draft models carry draft_est_mb. "chat-auto" is seeded with q8_0 + n-gram.
+POST /api/recommend and /api/simulate accept the same optional fields (q8_0 / q4_0 shrink the KV estimate).
 Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-auto" replica onto CTG-Server-1/CUDA0). With
 dry_run false it starts the move: a replacement replica appears (state starting), GET /api/state carries
 `rebalance.in_progress`, and ~20 s later the old replica is dropped (events rebalance_started, rebalanced). Afterwards the
@@ -89,6 +94,12 @@ def reset() -> None:
     LIBRARY["qwen2.5-3b-q4.gguf"] = {"name": "qwen2.5-3b-q4.gguf", "path": "/data/models/qwen2.5-3b-q4.gguf", "source": "hf",
         "hf_repo": "Qwen/Qwen2.5-3B-Instruct-GGUF", "hf_file": "qwen2.5-3b-q4.gguf", "bytes": 2_000_000_000,
         "downloaded": 2_000_000_000, "status": "ready", "error": None, "created_at": T0 - 1000}
+    LIBRARY["qwen2.5-0.5b-q8.gguf"] = {"name": "qwen2.5-0.5b-q8.gguf", "path": "/data/models/qwen2.5-0.5b-q8.gguf", "source": "hf",
+        "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "hf_file": "qwen2.5-0.5b-q8.gguf", "bytes": 530_000_000,
+        "downloaded": 530_000_000, "status": "ready", "error": None, "created_at": T0 - 900}
+    LIBRARY["llama-3.2-1b-q8.gguf"] = {"name": "llama-3.2-1b-q8.gguf", "path": "/data/models/llama-3.2-1b-q8.gguf", "source": "hf",
+        "hf_repo": "bartowski/Llama-3.2-1B-GGUF", "hf_file": "llama-3.2-1b-q8.gguf", "bytes": 1_320_000_000,
+        "downloaded": 1_320_000_000, "status": "ready", "error": None, "created_at": T0 - 800}
     LIBRARY["llama-8b.gguf"] = {"name": "llama-8b.gguf", "path": "/data/models/llama-8b.gguf", "source": "hf",
         "hf_repo": "bartowski/Llama-3.1-8B-GGUF", "hf_file": "llama-8b.gguf", "bytes": 5_000_000_000,
         "downloaded": 500_000_000, "status": "downloading", "error": None, "created_at": T0, "_t": T0}
@@ -97,7 +108,8 @@ def reset() -> None:
         "replicas": [], "_t": 0.0}
     MODELS["chat-auto"] = {"spec": {"name": "chat-auto", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 8192, "parallel": 4,
         "replicas": 2, "pin_devices": [], "priority": 70, "preemptible": True, "spread": "gpu", "min_replicas": 1, "max_replicas": 4,
-        "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": None},
+        "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": None,
+        "kv_cache_type": "q8_0", "speculative": "ngram", "draft": None, "draft_n_max": 4},
         "file": "qwen2.5-3b-q4.gguf", "state": "running", "error": None, "replicas": [], "_t": 0.0}
     _place(MODELS["chat-auto"], 2)
     MODELS["chat-demand"] = {"spec": {"name": "chat-demand", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096, "parallel": 2,
@@ -161,17 +173,23 @@ def _place(m: dict, replicas: int = 1) -> None:
     chosen = cands[:2]
     m["replicas"] = [{"replica_id": f"{m['spec']['name']}-{i}a2b3c", "model": m["spec"]["name"], "state": "ready",
         "error": None, "outstanding": 0, "created_at": time.time(), "updated_at": time.time(),
-        "placement": _placement(m["spec"]["name"], chosen)} for i in range(replicas)]
+        "placement": _placement(m["spec"]["name"], chosen, m["spec"].get("draft"))} for i in range(replicas)]
     m["state"], m["error"] = "running", None
 
 
-def _placement(name: str, chosen: list[tuple[str, str]]) -> dict:
+def _placement(name: str, chosen: list[tuple[str, str]], draft: str | None = None) -> dict:
     return {"model": name, "replica_id": f"{name}-plan", "tier": "multi_node" if len({c[0] for c in chosen}) > 1 else "single_node",
             "head_node": chosen[0][0], "head_port": 9000, "tensor_split": [1.0] * len(chosen), "est_total_mb": 5000 * len(chosen),
-            "score": 82.5, "est_decode_tps": 96.4,
+            "score": 82.5, "est_decode_tps": 96.4, "draft_est_mb": _draft_mb(draft),
             "reasons": ["fastest GPUs with room (about 1008 GB/s)", "spread: replicas on different GPUs"],
             "assignments": [{"node_id": n, "device_id": d, "llama_device": d, "rpc_endpoint": None, "layers": 18 // len(chosen),
                              "est_mb": 5000} for n, d in chosen]}
+
+
+def _draft_mb(draft: str | None) -> int | None:
+    """Estimated VRAM of the draft model (its file size plus a little context), None without a draft."""
+    item = LIBRARY.get(str(draft or "").replace("coordinator://", ""))
+    return int(item["bytes"] / 1048576 * 1.1 + 120) if item else None
 
 
 def _rebalance_moves() -> list[dict]:
@@ -262,6 +280,32 @@ def _busy(m: dict) -> float | None:
     return round(0.5 + 0.4 * math.sin(time.time() / 7 + len(m["spec"]["name"])), 2)
 
 
+PERF_DEFAULTS = {"kv_cache_type": "f16", "speculative": "none", "draft": None, "draft_n_max": 4}
+KV_FACTOR = {"f16": 1.0, "q8_0": 0.53, "q4_0": 0.28}
+
+
+def _tok_family(file: str) -> str:
+    return "llama" if str(file).startswith("llama") else "other"
+
+
+def _perf_fields(body: dict, file: str) -> dict:
+    """Validate kv_cache_type / speculative / draft_file / draft_n_max (all optional) like the real API; returns the spec fields."""
+    kv = _choice(body.get("kv_cache_type", "f16"), tuple(KV_FACTOR), "kv_cache_type")
+    spec = _choice(body.get("speculative", "none"), ("none", "ngram", "draft"), "speculative")
+    n = _int_in(body.get("draft_n_max", 4), 1, 16, "draft_n_max")
+    draft = None
+    if spec == "draft":
+        df = body.get("draft_file")
+        if not df or df not in LIBRARY or LIBRARY[df]["status"] != "ready":
+            raise HTTPException(422, f"speculative 'draft' needs a ready draft_file from the library (got {df!r})")
+        if df == file:
+            raise HTTPException(422, "draft_file must differ from the model file")
+        if _tok_family(df) != _tok_family(file):
+            raise HTTPException(422, f"draft model {df} does not share the tokenizer of {file}")
+        draft = f"coordinator://{df}"
+    return {"kv_cache_type": kv, "speculative": spec, "draft": draft, "draft_n_max": n}
+
+
 def _scaling(m: dict) -> dict:
     sp = m["spec"]
     mn, mx = sp.get("min_replicas"), sp.get("max_replicas")
@@ -272,7 +316,7 @@ def _scaling(m: dict) -> dict:
 
 
 def _state_model(m: dict) -> dict:
-    return {**_clean(m), "scaling": _scaling(m)}
+    return {**_clean(m), "spec": {**PERF_DEFAULTS, **m["spec"]}, "scaling": _scaling(m)}
 
 
 def auth(authorization: str = Header(default="")) -> None:
@@ -420,6 +464,7 @@ def put_model(name: str, body: dict) -> dict:
     file = body.get("file")
     if file not in LIBRARY:
         raise HTTPException(404, f"{file} is not in the library")
+    perf = _perf_fields(body, file)  # validate before touching any state
     m = MODELS.setdefault(name, {"spec": {"name": name, "replicas": 0}, "state": "stopped", "error": None, "replicas": [], "_t": 0.0})
     m["file"] = file
     m["spec"].update(source=f"coordinator://{file}", ctx_size=int(body.get("ctx_size", 4096)), parallel=int(body.get("parallel", 1)),
@@ -427,6 +472,7 @@ def put_model(name: str, body: dict) -> dict:
                      preemptible=_bool(body.get("preemptible", True), "preemptible"),
                      spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
     m["spec"].update(_scaling_fields(body))
+    m["spec"].update(perf)
     return m["spec"]
 
 
@@ -539,8 +585,8 @@ def plan_model(name: str) -> dict:
     return _placement(name, chosen)
 
 
-def _need_mb(file_bytes: int, ctx: int, parallel: int) -> int:
-    return int(file_bytes / 1048576 * 1.1 + ctx * parallel * 3.0 + 300)
+def _need_mb(file_bytes: int, ctx: int, parallel: int, kv: str = "f16") -> int:
+    return int(file_bytes / 1048576 * 1.1 + ctx * parallel * 3.0 * KV_FACTOR[kv] + 300)
 
 
 @app.post("/api/recommend", dependencies=[api])
@@ -551,21 +597,24 @@ def recommend(body: dict) -> dict:
     ctx = _int_in(body.get("ctx_size", 4096), 256, 10_000_000, "ctx_size")
     parallel = _int_in(body.get("parallel", 1), 1, 64, "parallel")
     limit = max(1, min(10, int(body.get("limit", 3))))
+    perf = _perf_fields(body, body["file"])
+    kv_f = KV_FACTOR[perf["kv_cache_type"]]
+    draft_mb = _draft_mb(perf["draft"])
     pins = list(body.get("pin_devices") or [])
     alive = [s for s in SERVERS.values() if s["alive"]]
     gpus = [(s["node_id"], g) for s in alive for g in s["gpus"]
             if s["gpu_enabled"].get(g["device_id"], True) and (not pins or f"{s['node_id']}/{g['device_id']}" in pins)]
-    need = _need_mb(item["bytes"], ctx, parallel)
-    fixed = _need_mb(item["bytes"], 0, 1)
+    need = _need_mb(item["bytes"], ctx, parallel, perf["kv_cache_type"]) + (draft_mb or 0)
+    fixed = _need_mb(item["bytes"], 0, 1) + (draft_mb or 0)
     biggest_gpu = max((g["usable_mb"] for _, g in gpus), default=0)
     per_node: dict[str, int] = {}
     for n, g in gpus:
         per_node[n] = per_node.get(n, 0) + g["usable_mb"]
     biggest_node = max(per_node.values(), default=0)
-    max_ctx_single = max(0, int((biggest_gpu - fixed) / (3.0 * parallel)) // 256 * 256)
+    max_ctx_single = max(0, int((biggest_gpu - fixed) / (3.0 * kv_f * parallel)) // 256 * 256)
     out = {"need_mb": need, "options": [], "max_ctx_single_gpu": max_ctx_single or None, "not_possible": None}
     if need > biggest_node:
-        fits = max(0, int((biggest_node - fixed) / (3.0 * parallel)) // 256 * 256)
+        fits = max(0, int((biggest_node - fixed) / (3.0 * kv_f * parallel)) // 256 * 256)
         out["not_possible"] = {"need_mb": need, "largest_single_gpu_mb": biggest_gpu, "largest_single_node_mb": biggest_node,
                                "max_ctx_that_fits": fits or None}
         return out
@@ -576,7 +625,7 @@ def recommend(body: dict) -> dict:
         tps = round((g["bandwidth_gbps"] or 100) * 1024 / max(need, 1) * 0.5, 1)
         opts.append({"score": round(60 + tps / 10, 1), "tier": "single_gpu", "fits_now": True,
                      "assignments": [{"node_id": n, "device_id": g["device_id"], "layers": 33, "est_mb": need}],
-                     "est_decode_tps": tps, "est_total_mb": need,
+                     "est_decode_tps": tps, "est_total_mb": need, "draft_est_mb": draft_mb,
                      "reasons": [f"{g['name']}: {g['usable_mb'] // 1024} GB free", f"about {round(g['bandwidth_gbps'] or 0)} GB/s memory bandwidth"]})
     if len(opts) < limit:
         multi = [(n, g) for n, g in ranked if (n, g) not in singles][:2]
@@ -644,7 +693,9 @@ def simulate(body: dict) -> dict:
         prio = _int_in(req.get("priority", sp.get("priority", 50)), 0, 100, "priority")
         want = int(req.get("replicas") or req.get("min_replicas") or sp.get("replicas") or 1)
         running = len((cur or {}).get("replicas", []))
-        need = _need_mb(LIBRARY[file]["bytes"], ctx, parallel)
+        perf = _perf_fields({**{k: v for k, v in sp.items() if k in PERF_DEFAULTS and k != "draft"},
+                             **({"draft_file": str(sp["draft"]).replace("coordinator://", "")} if sp.get("draft") else {}), **req}, file)
+        need = _need_mb(LIBRARY[file]["bytes"], ctx, parallel, perf["kv_cache_type"]) + (_draft_mb(perf["draft"]) or 0)
         if need > biggest_node:
             out["unplaced"].append({"model": name, "missing": max(1, want - running),
                                     "why": f"needs about {need // 1024} GB on one server; the largest has {biggest_node // 1024} GB usable"})

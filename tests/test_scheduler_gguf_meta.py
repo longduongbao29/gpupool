@@ -181,3 +181,33 @@ def test_read_meta_parts_part_count_mismatch(tmp_path):
 def test_read_meta_parts_single_unsplit_file_ok(tmp_path):
     whole, _ = _split_files(tmp_path)
     assert read_meta_parts([whole]).layer_bytes == read_meta(whole).layer_bytes
+
+
+QWEN3B = MODEL.with_name("qwen2.5-3b-instruct-q4_k_m.gguf")
+
+
+@needs_model
+def test_meta_tokenizer_fields_real_files():
+    m = read_meta(str(MODEL))
+    assert m.tokenizer_model == "gpt2" and m.vocab_size == 151936
+    # a split GGUF takes its KV (tokenizer included) from part 1
+    assert read_meta_parts([str(MODEL)]).vocab_size == m.vocab_size
+    if QWEN3B.exists():  # a draft is only usable when it shares the target's tokenizer
+        t = read_meta(str(QWEN3B))
+        assert (t.vocab_size, t.tokenizer_model) == (m.vocab_size, m.tokenizer_model)
+
+
+def test_meta_tokenizer_fields_synthetic(tmp_path):
+    w = gguf.GGUFWriter(str(tmp_path / "t.gguf"), "llama")
+    w.add_block_count(1)
+    w.add_embedding_length(64)
+    w.add_head_count(2)
+    w.add_tokenizer_model("llama")
+    w.add_token_list([f"t{i}" for i in range(300)])
+    w.add_tensor("blk.0.attn_q.weight", np.zeros((64, 64), dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    m = read_meta(str(tmp_path / "t.gguf"))
+    assert (m.vocab_size, m.tokenizer_model) == (300, "llama")

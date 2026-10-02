@@ -77,6 +77,17 @@ function scalingForm(spec) {
   return f;
 }
 
+// Performance part of the deploy form (KV cache type, speculative decoding), derived from a model spec.
+function perfForm(spec) {
+  var f = { kv: "f16", spec: "none", draftFile: "", draftN: 4 };
+  if (!spec) return f;
+  if (spec.kv_cache_type) f.kv = spec.kv_cache_type;
+  if (spec.speculative) f.spec = spec.speculative;
+  if (spec.draft) f.draftFile = String(spec.draft).replace(/^coordinator:\/\//, "");
+  if (spec.draft_n_max != null) f.draftN = spec.draft_n_max;
+  return f;
+}
+
 // "Browse server folders" state of the Add model modal (GET /api/library/browse).
 function emptyBrowse() {
   return { loading: false, loaded: false, err: "", roots: [], files: [], truncated: false };
@@ -122,7 +133,7 @@ function app() {
     // add model modal
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", browse: emptyBrowse() },
     // deploy (new / edit) modal
-    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null)),
+    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
 
@@ -631,7 +642,7 @@ function app() {
         out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
           note: self.replicaNote(r), mark: self.replicaMark(m, r),
           devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }),
-          tps: self.tps(r.placement.est_decode_tps), reasons: (r.placement.reasons || []).join("; ") });
+          tps: self.tps(r.placement.est_decode_tps), draft: r.placement.draft_est_mb ? "+draft " + Math.round(r.placement.draft_est_mb) + " MB" : "", reasons: (r.placement.reasons || []).join("; ") });
       });
       return out;
     },
@@ -712,11 +723,11 @@ function app() {
       if (m) {
         this.form = Object.assign({ open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
           priority: m.spec.priority == null ? 50 : m.spec.priority, preemptible: m.spec.preemptible !== false, spread: m.spec.spread || "gpu",
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(m.spec));
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(m.spec), perfForm(m.spec));
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null));
+        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null));
       }
     },
     togglePin: function (key, on) {
@@ -752,6 +763,29 @@ function app() {
       if (r == null || r < 1) return { error: "Replicas must be at least 1" };
       return { body: { min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
     },
+    // Performance fields (KV cache type, speculative decoding) of the request body, or { error } when invalid.
+    perfBody: function (f) {
+      var kv = f.kv || "f16", sp = f.spec || "none";
+      if (sp !== "draft") return { body: { kv_cache_type: kv, speculative: sp, draft_file: null, draft_n_max: 4 } };
+      var n = parseFloat(f.draftN);
+      if (!f.draftFile) return { error: "Pick a draft model, or turn speculative decoding off" };
+      if (f.draftFile === f.file) return { error: "The draft model must be a different file than the model" };
+      if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
+      return { body: { kv_cache_type: kv, speculative: sp, draft_file: f.draftFile, draft_n_max: n } };
+    },
+    // Ready library files that can serve as the draft model (not the model's own file).
+    draftChoices: function () {
+      var file = this.form.file;
+      return this.readyLibrary().filter(function (l) { return l.name !== file; });
+    },
+    // Model card chips for non-default performance options.
+    specChips: function (m) {
+      var sp = m.spec || {}, out = [];
+      if (sp.kv_cache_type && sp.kv_cache_type !== "f16") out.push("KV " + sp.kv_cache_type);
+      if (sp.speculative === "ngram") out.push("Spec: n-gram");
+      else if (sp.speculative === "draft") out.push("Spec: draft " + (sp.draft ? String(sp.draft).replace(/^coordinator:\/\//, "") : "?"));
+      return out;
+    },
     startReplicas: function (f) {
       var n = parseInt(f.mode === "autoscale" ? f.minR : f.replicas, 10);
       return f.mode === "demand" || !(n >= 1) ? 1 : n;
@@ -761,13 +795,15 @@ function app() {
       if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return false; }
       var sb = this.scalingBody(f);
       if (sb.error) { this.toast(sb.error, "error"); return false; }
+      var pb = this.perfBody(f);
+      if (pb.error) { this.toast(pb.error, "error"); return false; }
       f.busy = true;
       try {
         await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), Object.assign({
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu",
           pin_devices: f.auto ? [] : f.pins
-        }, sb.body));
+        }, sb.body, pb.body));
         await this.refresh();
         f.busy = false;
         return true;
@@ -815,10 +851,12 @@ function app() {
       if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return; }
       var sb = this.scalingBody(f);
       if (sb.error) { this.toast(sb.error, "error"); return; }
-      var item = {
+      var pb = this.perfBody(f);
+      if (pb.error) { this.toast(pb.error, "error"); return; }
+      var item = Object.assign({}, pb.body, {
         ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
         priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins
-      };
+      });
       if (f.mode === "fixed") item.replicas = parseInt(f.replicas, 10);
       else { item.min_replicas = sb.body.min_replicas; item.max_replicas = sb.body.max_replicas; }
       var body = {};
@@ -842,13 +880,15 @@ function app() {
     recommend: async function () {
       var f = this.form;
       if (!f.file) { this.toast("Pick a file first", "error"); return; }
+      var pb = this.perfBody(f);
+      if (pb.error) { this.toast(pb.error, "error"); return; }
       f.recBusy = true;
       f.rec = null;
       try {
-        f.rec = await this.api("POST", "/api/recommend", {
+        f.rec = await this.api("POST", "/api/recommend", Object.assign({
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins, limit: 3
-        });
+        }, pb.body));
       } catch (e) { this.fail(e); }
       f.recBusy = false;
     },

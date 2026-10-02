@@ -1,0 +1,97 @@
+# Simulated cluster on ONE machine: a coordinator and three "servers" with three different GPUs,
+# connected exactly like a real install (each agent joins with GPUPOOL_JOIN). For trying gpupool,
+# demos and testing the UI/scheduler without several machines.
+#
+#   docker compose -f docker-compose.sim.yml up -d
+#   UI: http://localhost:8080   admin key: ${SIM_ADMIN_KEY:-sim-admin}
+#
+# What is real and what is simulated:
+# - All three agent containers share the machine's real GPU (--gpus all), so models really load and
+#   answer. server-a reports that GPU as NVML sees it; server-b and server-c report a different GPU
+#   (GPUPOOL_FAKE_DEVICES: name, size, bandwidth) so the pool shows three kinds of GPU.
+# - budget_mb caps what gpupool may place on each "server". Keep the sum of the three budgets below
+#   the real GPU memory (defaults fit a 4 GB card): a simulated 40 GB A100 still runs on the real card.
+# - Unlike a real install (--network host on each server), each server gets its own IP on a private
+#   Docker network, because three host-network agents on one machine would collide on ports.
+#
+# Needs the NVIDIA Container Toolkit, like the real agent image.
+
+x-agent: &agent
+  image: ${GPUPOOL_AGENT_IMAGE:-gpupool-agent:latest}
+  restart: unless-stopped
+  depends_on: [coordinator]
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu, compute, utility]
+
+services:
+  coordinator:
+    image: ${GPUPOOL_COORDINATOR_IMAGE:-gpupool-coordinator:latest}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      GPUPOOL_ADMIN_KEY: ${SIM_ADMIN_KEY:-sim-admin}
+      GPUPOOL_CLUSTER_TOKEN: ${SIM_CLUSTER_TOKEN:-sim-cluster-token}
+      GPUPOOL_PUBLIC_URL: http://172.30.0.10:8080
+      GPUPOOL_PATH_MAP: '{"${GPUPOOL_HOST_MODELS_DIR:-./models}": "/models"}'
+    volumes:
+      - sim-coordinator:/data
+      - ${GPUPOOL_HOST_MODELS_DIR:-./models}:/models:ro
+    networks:
+      sim:
+        ipv4_address: 172.30.0.10
+
+  server-a:   # the real GPU, as NVML reports it
+    <<: *agent
+    environment:
+      GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
+      GPUPOOL_NODE_ID: server-a
+      GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_A:-1300}}'
+    volumes:
+      - sim-server-a:/data
+    networks:
+      sim:
+        ipv4_address: 172.30.0.11
+
+  server-b:   # simulated NVIDIA Tesla T4 16 GB
+    <<: *agent
+    environment:
+      GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
+      GPUPOOL_NODE_ID: server-b
+      GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_B:-1100}}'
+      GPUPOOL_FAKE_DEVICES: '[{"device_id": "CUDA0", "kind": "cuda", "name": "NVIDIA Tesla T4 (simulated)", "total_mb": 16384, "free_mb": 15800, "bandwidth_gbps": 320, "uuid": "GPU-sim-t4-0001", "driver": "sim", "cuda": "12.4"}]'
+    volumes:
+      - sim-server-b:/data
+    networks:
+      sim:
+        ipv4_address: 172.30.0.12
+
+  server-c:   # simulated NVIDIA A100 40 GB
+    <<: *agent
+    environment:
+      GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
+      GPUPOOL_NODE_ID: server-c
+      GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_C:-1100}}'
+      GPUPOOL_FAKE_DEVICES: '[{"device_id": "CUDA0", "kind": "cuda", "name": "NVIDIA A100-SXM4-40GB (simulated)", "total_mb": 40960, "free_mb": 40200, "bandwidth_gbps": 1555, "uuid": "GPU-sim-a100-0001", "driver": "sim", "cuda": "12.4"}]'
+    volumes:
+      - sim-server-c:/data
+    networks:
+      sim:
+        ipv4_address: 172.30.0.13
+
+networks:
+  sim:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  sim-coordinator:
+  sim-server-a:
+  sim-server-b:
+  sim-server-c:

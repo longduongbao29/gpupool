@@ -284,7 +284,7 @@ def test_multi_node_candidates_bounded_with_many_nodes():
         nodes = [node(f"n{i:02d}", dev("CUDA0", each, 100 + 40 * i)) for i in range(n)]
         pool = [_Dev(nd, d) for nd in nodes for d in nd.devices]
         t0 = time.perf_counter()
-        cands, _ = _all_candidates(META, 512, pool)
+        cands, _ = _all_candidates(META, 512, "f16", pool)
         assert time.perf_counter() - t0 < 2.0
         assert 1 < len(cands) <= MAX_MULTI_NODE_CANDIDATES
         assert len({tuple((d.node.node_id, d.dev.device_id) for d in c.order) for c in cands}) == len(cands)

@@ -89,6 +89,32 @@ của bạn.
 
 Muốn bắt client gửi key: chạy coordinator với `-e GPUPOOL_API_KEYS=key1,key2`.
 
+## Thử trên một máy (cụm 3 server giả lập)
+
+`docker-compose.sim.yml` chạy một coordinator và ba "server", tự join đúng như cài thật (`GPUPOOL_JOIN`), để
+thử UI, việc đặt model trên nhiều server và chia qua RPC chỉ với một GPU. Build hai image trước
+(`docker compose -f docker-compose.coordinator.yml build` và file compose của agent), rồi:
+
+```bash
+GPUPOOL_HOST_MODELS_DIR=/srv/gguf docker compose -f docker-compose.sim.yml up -d
+```
+
+UI: `http://<máy chạy docker>:8080`, admin key `sim-admin`. server-a báo GPU thật; server-b và server-c báo một
+Tesla T4 và một A100 giả lập (`GPUPOOL_FAKE_DEVICES`) nhưng chạy trên cùng GPU thật. Tổng các giới hạn
+(`SIM_BUDGET_A/B/C`, mặc định 1300/1100/1100 MB) phải nhỏ hơn bộ nhớ GPU thật. Mỗi server có IP riêng trong một
+mạng Docker riêng thay cho `--network host`.
+
+## Tùy chọn hiệu năng (theo từng model, trong form deploy)
+
+| Tùy chọn | Giá trị | Tác dụng | Đo thật (GTX 1650, Qwen2.5-3B) |
+| --- | --- | --- | --- |
+| KV cache | f16, q8_0, q4_0 | KV cache nhỏ hơn nên model có thể vừa ít GPU hơn | ctx 8192: −132 / −204 MB, tốc độ gần như không đổi (51.9 / 51.2 / 50.8 tok/s) |
+| Speculative | none, ngram, draft | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+
+N-gram không tốn thêm bộ nhớ nhưng chỉ có lợi khi câu trả lời lặp lại phần văn bản trước đó. Model draft phải
+dùng chung tokenizer với model chính (được kiểm khi lưu) và chạy trên GPU của head (bộ nhớ đã được tính vào kế
+hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo.
+
 ## Không dùng Docker
 
 Coordinator:

@@ -253,7 +253,8 @@ async def test_put_model_create_update_validation(env):
     assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "ctx_size": 4096,
                         "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu",
                         "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
-                        "preemptible": True}
+                        "preemptible": True, "kv_cache_type": "f16", "speculative": "none",
+                        "draft": None, "draft_n_max": 4}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -674,3 +675,116 @@ async def test_state_rebalance_block_and_auth(env):
     assert (await c.get("/api/state")).json()["rebalance"] == {"in_progress": None, "next_run_ts": None}
     r = await c.post("/api/rebalance", json={}, headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------- KV cache type and speculative decoding
+def _metas(env, **by_file):
+    """Make rec.meta_for return a per-file ModelMeta (keyed by file name), META for the rest."""
+    from tests.test_coordinator_helpers import META
+    _, _, rec, *_ = env
+
+    async def meta_for(spec):
+        extra = by_file.get(spec.source.rsplit("/", 1)[-1], {})
+        return META.model_copy(update=extra)
+
+    rec.meta_for = meta_for
+
+
+async def test_put_model_kv_and_speculative_roundtrip_and_keep(env):
+    c, store, rec, _, clock, lib = env
+    lib.items["small.gguf"] = item("small.gguf")
+    register(store, clock, node("a"))
+    r = await c.put("/api/models/m", json={"file": "x.gguf", "kv_cache_type": "q8_0", "speculative": "ngram"})
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["kv_cache_type"], j["speculative"], j["draft"], j["draft_n_max"]) == ("q8_0", "ngram", None, 4)
+    # omitted fields keep the stored values
+    j = (await c.put("/api/models/m", json={"file": "x.gguf", "ctx_size": 2048})).json()
+    assert (j["kv_cache_type"], j["speculative"]) == ("q8_0", "ngram")
+    j = (await c.put("/api/models/m", json={"file": "x.gguf", "speculative": "draft",
+                                            "draft_file": "small.gguf", "draft_n_max": 8})).json()
+    assert (j["speculative"], j["draft"], j["draft_n_max"]) == ("draft", "coordinator://small.gguf", 8)
+    j = (await c.put("/api/models/m", json={"file": "x.gguf"})).json()
+    assert (j["speculative"], j["draft"], j["draft_n_max"], j["kv_cache_type"]) == (
+        "draft", "coordinator://small.gguf", 8, "q8_0")
+    # switching away from draft drops the draft source
+    j = (await c.put("/api/models/m", json={"file": "x.gguf", "speculative": "none"})).json()
+    assert j["draft"] is None and store.get_model("m").draft is None
+    for bad in ({"kv_cache_type": "q5"}, {"speculative": "x"}, {"draft_n_max": 0}, {"draft_n_max": 17}):
+        assert (await c.put("/api/models/m", json={"file": "x.gguf", **bad})).status_code == 422, bad
+
+
+async def test_put_model_draft_validation(env):
+    c, store, rec, _, clock, lib = env
+    lib.items.update({"small.gguf": item("small.gguf"), "wip.gguf": item("wip.gguf", "downloading")})
+    register(store, clock, node("a"))
+    put = lambda **kw: c.put("/api/models/m", json={"file": "x.gguf", "speculative": "draft", **kw})
+    assert (await put()).status_code == 422  # no draft_file
+    assert (await put(draft_file="nope.gguf")).status_code == 422
+    assert (await put(draft_file="wip.gguf")).status_code == 422  # not ready
+    r = await put(draft_file="x.gguf")
+    assert r.status_code == 422 and "differ" in r.json()["detail"]
+    assert store.get_model("m") is None  # nothing was stored by the rejected requests
+    # tokenizer mismatch / vocab too different
+    _metas(env, **{"small.gguf": {"tokenizer_model": "llama"}, "x.gguf": {"tokenizer_model": "gpt2"}})
+    r = await put(draft_file="small.gguf")
+    assert r.status_code == 422 and "tokenizer" in r.json()["detail"]
+    _metas(env, **{"small.gguf": {"vocab_size": 32000}, "x.gguf": {"vocab_size": 32129}})
+    r = await put(draft_file="small.gguf")
+    assert r.status_code == 422 and "vocabulary" in r.json()["detail"]
+    # within 128 tokens, or unknown fields on either side: accepted
+    _metas(env, **{"small.gguf": {"vocab_size": 32000, "tokenizer_model": "llama"},
+                   "x.gguf": {"vocab_size": 32128, "tokenizer_model": "llama"}})
+    assert (await put(draft_file="small.gguf")).status_code == 200
+    _metas(env, **{"x.gguf": {"vocab_size": 5, "tokenizer_model": "llama"}})
+    assert (await put(draft_file="small.gguf")).status_code == 200
+
+
+async def test_simulate_accepts_kv_and_speculative_and_validates_draft(env):
+    c, store, rec, _, clock, lib = env
+    lib.items["small.gguf"] = item("small.gguf")
+    register(store, clock, node("a"))
+    seen = []
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, **kw):
+        seen.append((spec.kv_cache_type, spec.speculative, spec.draft, kw.get("draft_meta") is not None))
+        return []
+
+    rec.ranker = ranker
+    await c.put("/api/models/m", json={"file": "x.gguf"})
+    store.put_model(store.get_model("m").model_copy(update={"replicas": 1}))
+    r = await c.post("/api/simulate", json={"changes": [{"model": "m", "kv_cache_type": "q4_0",
+                                                         "speculative": "draft", "draft_file": "small.gguf"}]})
+    assert r.status_code == 200
+    assert ("q4_0", "draft", "coordinator://small.gguf", True) in seen
+    r = await c.post("/api/simulate", json={"changes": [{"model": "m", "speculative": "draft"}]})
+    assert r.status_code == 422  # no draft file
+    r = await c.post("/api/simulate", json={"add": [{"name": "n", "file": "x.gguf", "speculative": "draft",
+                                                     "draft_file": "x.gguf"}]})
+    assert r.status_code == 422
+
+
+async def test_recommend_passes_kv_and_draft_and_adds_draft_need(env):
+    c, store, rec, _, clock, lib = env
+    lib.items["small.gguf"] = item("small.gguf")
+    register(store, clock, node("a"))
+    calls = []
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, **kw):
+        calls.append((spec.kv_cache_type, spec.speculative, spec.draft, spec.draft_n_max, kw.get("draft_meta")))
+        return [placement()]
+
+    rec.ranker = ranker
+    base = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()["need_mb"]
+    assert calls[0] == ("f16", "none", None, 4, None)
+    q8 = (await c.post("/api/recommend", json={"file": "x.gguf", "kv_cache_type": "q8_0"})).json()["need_mb"]
+    assert q8 <= base  # a quantized KV cache never needs more
+    calls.clear()
+    j = (await c.post("/api/recommend", json={"file": "x.gguf", "speculative": "draft", "draft_file": "small.gguf",
+                                              "draft_n_max": 2})).json()
+    assert calls[0][:4] == ("f16", "draft", "coordinator://small.gguf", 2) and calls[0][4] is not None
+    assert j["need_mb"] > base  # the draft's own weights and KV are included
+    assert (await c.post("/api/recommend", json={"file": "x.gguf", "speculative": "draft"})).status_code == 422
+    assert (await c.post("/api/recommend", json={"file": "x.gguf", "speculative": "draft",
+                                                 "draft_file": "x.gguf"})).status_code == 422
+    assert (await c.post("/api/recommend", json={"file": "x.gguf", "kv_cache_type": "bad"})).status_code == 422

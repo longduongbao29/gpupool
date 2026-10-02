@@ -15,6 +15,11 @@ EngineState = Literal["starting", "running", "exited", "failed"]
 ReplicaState = Literal["pending", "launching", "ready", "draining", "stopped", "failed"]
 Tier = Literal["single_gpu", "single_node", "multi_node"]
 Spread = Literal["gpu", "node", "none"]
+# KV cache element type. Bytes per element: f16 2, q8_0 34/32, q4_0 18/32 (llama.cpp block formats).
+KvCacheType = Literal["f16", "q8_0", "q4_0"]
+# Speculative decoding: "ngram" guesses from the text so far (no extra memory); "draft" runs a small
+# model with the same tokenizer on the head's GPU. Fewer target passes = fewer RPC round trips.
+SpecMode = Literal["none", "ngram", "draft"]
 
 # Replica state groups (not part of the wire format).
 ALL_REPLICA_STATES: tuple[str, ...] = ("pending", "launching", "ready", "draining", "stopped", "failed")
@@ -72,6 +77,12 @@ class EngineSpec(BaseModel):
     ctx_size: int = 4096  # total context, divided across slots
     parallel: int = 1
     extra_args: list[str] = Field(default_factory=list)
+    # Optional since 0.3; an older agent ignores them (it would run f16 / no speculation).
+    cache_type: KvCacheType = "f16"  # -ctk/-ctv for the model (and its draft)
+    spec_type: SpecMode = "none"
+    draft_model_path: str | None = None  # spec_type "draft": GGUF on the head node
+    draft_device: str | None = None  # llama device the draft runs on, e.g. "CUDA0" (local to the head)
+    draft_n_max: int = 4
 
 
 class EngineStatus(BaseModel):
@@ -125,6 +136,11 @@ class ModelSpec(BaseModel):
     idle_unload_s: float | None = Field(default=None, gt=0)
     # False: a higher-priority model may never stop this model's replicas to make room.
     preemptible: bool = True
+    kv_cache_type: KvCacheType = "f16"
+    speculative: SpecMode = "none"
+    draft: str | None = None  # speculative "draft": source of the draft model, e.g. coordinator://<file>
+    # Measured on a GTX 1650 (Qwen2.5-3B + 0.5B draft): 4 drafted tokens +5 %, 8 slower than none.
+    draft_n_max: int = Field(default=4, ge=1, le=16)
 
 
 class AutoscalePolicy(BaseModel):
@@ -164,6 +180,9 @@ class ModelMeta(BaseModel):
     # token_embd itself stays in host RAM, so it is not counted against any GPU.
     output_bytes: int
     file_bytes: int | None = None
+    # Tokenizer identity, to check a draft model matches its target (llama.cpp refuses otherwise).
+    vocab_size: int | None = None
+    tokenizer_model: str | None = None  # tokenizer.ggml.model, e.g. "gpt2", "llama"
 
 
 class DeviceAssignment(BaseModel):
@@ -189,6 +208,9 @@ class Placement(BaseModel):
     score: float | None = None
     est_decode_tps: float | None = None  # bandwidth-based estimate, None when unknown
     reasons: list[str] = Field(default_factory=list)
+    # Speculative "draft": the draft model's memory, placed on the head's first local CUDA device
+    # (assignments[0]); included in that assignment's est_mb and in est_total_mb.
+    draft_est_mb: int | None = None
 
 
 class Occupant(BaseModel):

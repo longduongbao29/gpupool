@@ -11,7 +11,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException, params
 from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
-from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, AutoscalePolicy, ModelSpec, Spread
+from gpupool.common.models import (
+    ACTIVE_STATES, LIVE_STATES, AutoscalePolicy, KvCacheType, ModelSpec, SpecMode, Spread,
+)
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.store import ServerRecord, gpu_key
@@ -23,6 +25,8 @@ log = logging.getLogger("gpupool.api")
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 PIN_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 COORD_PREFIX = "coordinator://"
+# llama.cpp accepts a draft whose vocabulary differs from the target's by up to this many tokens.
+MAX_VOCAB_DIFF = 128
 
 
 class AddServerBody(BaseModel):
@@ -46,6 +50,11 @@ class ModelBody(BaseModel):
     autoscale: AutoscalePolicy | None = None
     idle_unload_s: float | None = Field(default=None, gt=0)
     preemptible: bool | None = None  # None: keep the stored value, else True
+    # KV cache / speculative decoding: None keeps the stored value (else f16 / none / no draft / 4).
+    kv_cache_type: KvCacheType | None = None
+    speculative: SpecMode | None = None
+    draft_file: str | None = None  # library file of the draft model
+    draft_n_max: int | None = Field(default=None, ge=1, le=16)
 
 
 class RecommendBody(BaseModel):
@@ -56,6 +65,10 @@ class RecommendBody(BaseModel):
     spread: Spread = "gpu"
     pin_devices: list[str] = Field(default_factory=list)
     limit: int = Field(default=3, ge=1, le=10)
+    kv_cache_type: KvCacheType = "f16"
+    speculative: SpecMode = "none"
+    draft_file: str | None = None
+    draft_n_max: int = Field(default=4, ge=1, le=16)
 
 
 class SimFields(BaseModel):
@@ -70,9 +83,17 @@ class SimFields(BaseModel):
     parallel: int | None = Field(default=None, ge=1)
     spread: Spread | None = None
     pin_devices: list[str] | None = None
+    kv_cache_type: KvCacheType | None = None
+    speculative: SpecMode | None = None
+    draft_file: str | None = None
+    draft_n_max: int | None = Field(default=None, ge=1, le=16)
 
     def fields(self) -> dict:
-        return self.model_dump(exclude_none=True, include=set(SimFields.model_fields))
+        out = self.model_dump(exclude_none=True, include=set(SimFields.model_fields))
+        file = out.pop("draft_file", None)  # ModelSpec stores the draft as a source string
+        if file is not None:
+            out["draft"] = COORD_PREFIX + file
+        return out
 
 
 class SimChange(SimFields):
@@ -291,6 +312,34 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         return {"node_id": node_id, "device_id": device_id, "enabled": body.enabled}
 
     # ------------------------------------------------------------------ models
+    async def check_draft(spec: ModelSpec, label: str = "") -> None:
+        """422 unless the draft model of a speculative "draft" spec is usable with its target."""
+        if spec.speculative != "draft":
+            return
+        pre = f"{label}: " if label else ""
+        if not spec.draft or not spec.draft.startswith(COORD_PREFIX):
+            raise HTTPException(422, f"{pre}speculative 'draft' needs a draft_file from the library")
+        file = spec.draft[len(COORD_PREFIX):]
+        item = library.get(file)
+        if item is None or item.status != "ready":
+            raise HTTPException(422, f"{pre}draft file {file!r} is not a ready library item")
+        if spec.source == spec.draft:
+            raise HTTPException(422, f"{pre}the draft model must differ from the model itself")
+        try:
+            meta = await reconciler.meta_for(spec)
+            dmeta = await reconciler.draft_meta_for(spec)
+        except Exception as e:
+            raise HTTPException(422, f"{pre}cannot read model metadata: {type(e).__name__}: {e}") from e
+        if dmeta is None:
+            return
+        if meta.tokenizer_model and dmeta.tokenizer_model and meta.tokenizer_model != dmeta.tokenizer_model:
+            raise HTTPException(422, f"{pre}draft tokenizer {dmeta.tokenizer_model!r} does not match "
+                                     f"the model's {meta.tokenizer_model!r}")
+        if (meta.vocab_size and dmeta.vocab_size
+                and abs(meta.vocab_size - dmeta.vocab_size) > MAX_VOCAB_DIFF):
+            raise HTTPException(422, f"{pre}draft vocabulary size {dmeta.vocab_size} is too different from "
+                                     f"the model's {meta.vocab_size} (at most {MAX_VOCAB_DIFF} apart)")
+
     def check_name(name: str) -> None:
         if not NAME_RE.match(name):
             raise HTTPException(422, "model name must match [A-Za-z0-9._-]{1,64}")
@@ -318,13 +367,21 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             raise HTTPException(422, f"min_replicas ({lo}) must not exceed max_replicas ({hi})")
         if idle is not None and lo != 0:
             raise HTTPException(422, "idle_unload_s needs min_replicas == 0 (a model that may unload)")
+        speculative = body.speculative if body.speculative is not None else existing.speculative if existing else "none"
+        draft = COORD_PREFIX + body.draft_file if body.draft_file is not None else existing.draft if existing else None
+        if speculative != "draft":
+            draft = None  # a draft only means something to speculative "draft"
         spec = ModelSpec(
             name=name, source=COORD_PREFIX + body.file, ctx_size=body.ctx_size, parallel=body.parallel,
+            kv_cache_type=body.kv_cache_type or (existing.kv_cache_type if existing else "f16"),
+            speculative=speculative, draft=draft,
+            draft_n_max=body.draft_n_max or (existing.draft_n_max if existing else 4),
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
             min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle,
             preemptible=body.preemptible if body.preemptible is not None else existing.preemptible if existing else True)
+        await check_draft(spec)
         store.put_model(spec)
         reconciler.wake()
         return spec.model_dump(mode="json")
@@ -413,7 +470,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         return await capacity_view()
 
     # ------------------------------------------------------------------ simulate
-    def checked_spec(spec: ModelSpec) -> ModelSpec:
+    async def checked_spec(spec: ModelSpec) -> ModelSpec:
         """The same validation put_model applies, for a spec a simulation builds."""
         spec = ModelSpec.model_validate(spec.model_dump())  # field constraints (model_copy skips them)
         lo, hi = spec.min_replicas, spec.max_replicas
@@ -425,6 +482,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         for pin in spec.pin_devices:
             if not PIN_RE.match(pin) or pin.split("/", 1)[0] not in registered:
                 raise HTTPException(422, f"{spec.name}: pin_devices entry {pin!r} is not a registered node/device")
+        if spec.speculative != "draft":
+            spec = spec.model_copy(update={"draft": None})
+        await check_draft(spec, spec.name)
         return spec
 
     @router.post("/simulate")
@@ -441,7 +501,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             cur = specs.get(ch.model)
             if cur is None:
                 raise HTTPException(404, f"unknown model {ch.model}")
-            specs[ch.model] = checked_spec(cur.model_copy(update=ch.fields()))
+            specs[ch.model] = await checked_spec(cur.model_copy(update=ch.fields()))
         for add in body.add:
             check_name(add.name)
             if add.name in specs:
@@ -450,7 +510,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             if item is None or item.status != "ready":
                 raise HTTPException(422, f"file {add.file!r} is not a ready library item")
             base = ModelSpec(name=add.name, source=COORD_PREFIX + add.file)
-            specs[add.name] = checked_spec(base.model_copy(update=add.fields()))
+            specs[add.name] = await checked_spec(base.model_copy(update=add.fields()))
         try:
             return await reconciler.simulate(list(specs.values()))
         except HTTPException:
@@ -486,10 +546,15 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         def spec_for(ctx: int) -> ModelSpec:
             return ModelSpec(
                 name=stem or "recommend", source=COORD_PREFIX + body.file, ctx_size=ctx, parallel=body.parallel,
-                replicas=1, pin_devices=body.pin_devices, priority=body.priority, spread=body.spread)
+                replicas=1, pin_devices=body.pin_devices, priority=body.priority, spread=body.spread,
+                kv_cache_type=body.kv_cache_type, speculative=body.speculative,
+                draft=COORD_PREFIX + body.draft_file if body.speculative == "draft" and body.draft_file else None,
+                draft_n_max=body.draft_n_max)
 
+        await check_draft(spec_for(body.ctx_size))
         try:
             meta = await reconciler.meta_for(spec_for(body.ctx_size))
+            dmeta = await reconciler.draft_meta_for(spec_for(body.ctx_size))
         except Exception as e:
             raise HTTPException(400, f"cannot read model metadata: {type(e).__name__}: {e}") from e
 
@@ -504,7 +569,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                     hi = mid - 1
             return best
 
-        need = total_need_mb(meta, body.ctx_size)
+        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type)
+        if dmeta is not None:
+            need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type)
         try:
             ranked = (await reconciler.rank_for(spec_for(body.ctx_size), body.limit))[: body.limit]
             max_single = await largest_ctx(131072, lambda opts: any(o.tier == "single_gpu" for o in opts))

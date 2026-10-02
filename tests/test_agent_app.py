@@ -169,6 +169,34 @@ async def test_server_model_path_from_ensure_accepted(cfg, tmp_path):
     assert len(pm.started) == 1
 
 
+async def test_draft_model_path_allowlist(cfg, tmp_path):
+    cfg.cache_dir.mkdir()
+    main = cfg.cache_dir / "m.gguf"
+    main.write_bytes(b"x")
+    draft = cfg.cache_dir / "d.gguf"
+    draft.write_bytes(b"x")
+    outside = tmp_path / "secret.gguf"
+    outside.write_bytes(b"x")
+    pm = _FakePM()
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    spec = {**SERVER, "model_path": str(main), "spec_type": "draft", "draft_device": "CUDA0"}
+    async with client(app) as c:
+        r = await c.post("/engines", json={**spec, "draft_model_path": str(outside)}, headers=H)
+        assert r.status_code == 422 and "draft_model_path" in r.json()["detail"]
+        r = await c.post("/engines", json={**spec, "draft_model_path": str(cfg.cache_dir / "x.gguf")},
+                         headers=H)
+        assert r.status_code == 422 and "not found" in r.json()["detail"]
+        assert pm.started == []
+        r = await c.post("/engines", json={**spec, "draft_model_path": str(draft)}, headers=H)
+        assert r.status_code == 200
+        # a draft outside the cache is fine once /models/ensure handed it out
+        await c.post("/models/ensure", json={"name": "s", "source": str(outside)}, headers=H)
+        r = await c.post("/engines", json={**spec, "engine_id": "h2",
+                                           "draft_model_path": str(outside)}, headers=H)
+        assert r.status_code == 200
+    assert len(pm.started) == 2
+
+
 async def test_models_ensure(cfg, tmp_path):
     f = tmp_path / "m.gguf"
     f.write_bytes(b"12345")

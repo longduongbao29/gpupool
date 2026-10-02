@@ -7,7 +7,7 @@ from gpupool.coordinator import preemption
 from gpupool.coordinator.reconciler import _Realloc
 from gpupool.coordinator.store import ServerRecord
 from tests.test_coordinator_helpers import (
-    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_ranker, make_reconciler,
+    META, SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_ranker, make_reconciler,
     make_scored_ranker, node, put_replica, settle,
 )
 
@@ -1272,3 +1272,139 @@ async def test_no_poller_keeps_the_pure_time_rule():
     beat(store, clock, node("a"))
     clock.t += 20
     assert not rec.node_alive(store.list_nodes()[0], clock())
+
+
+# ---------------------------------------------------------------- KV cache type and speculative decoding
+DRAFT_META = META.model_copy(update={"vocab_size": 1000})
+DSPEC = ModelSpec(name="m", source="coordinator://big.gguf", kv_cache_type="q8_0", speculative="draft",
+                  draft="coordinator://small.gguf", draft_n_max=6, replicas=1)
+
+
+def _meta_by_source(seen=None):
+    async def meta_for(spec):
+        if seen is not None:
+            seen.append(spec.source)
+        return DRAFT_META if spec.source.endswith("small.gguf") else META
+
+    return meta_for
+
+
+async def test_draft_meta_for_only_when_speculative_draft():
+    rec, store, clock = make_reconciler()
+    seen = []
+    rec.meta_for = _meta_by_source(seen)
+    assert await rec.draft_meta_for(DSPEC) is DRAFT_META
+    assert seen == ["coordinator://small.gguf"]  # meta of the draft file, not of the model
+    assert await rec.draft_meta_for(DSPEC.model_copy(update={"speculative": "ngram"})) is None
+    assert await rec.draft_meta_for(DSPEC.model_copy(update={"speculative": "none"})) is None
+    assert await rec.draft_meta_for(DSPEC.model_copy(update={"draft": None})) is None
+    await rec.shutdown()
+
+
+async def test_draft_meta_reaches_planner_ranker_and_preemption():
+    rec, store, clock = make_reconciler()
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a", devices=[dev(usable=9000)]))
+    got = {}
+
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset(), **kw):
+        got["plan"] = kw.get("draft_meta")
+        return make_planner()(meta, spec, nodes, rid, port_alloc)
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, **kw):
+        got.setdefault("rank", []).append(kw.get("draft_meta"))
+        return []
+
+    rec.planner, rec.ranker = planner, ranker
+    await rec.plan_for(DSPEC)
+    await rec.rank_for(DSPEC, 3)
+    assert got["plan"] is DRAFT_META and got["rank"] == [DRAFT_META]
+    # preemption: a lower-priority replica is a candidate, so find_victims calls the ranker
+    put_replica(store, "o-1", model="o")
+    store.put_model(ModelSpec(name="o", source="http://x/o.gguf", priority=1))
+    got["rank"] = []
+    assert await rec._find_victims(DSPEC.model_copy(update={"priority": 90}), exclude="m") is None
+    assert got["rank"] and all(d is DRAFT_META for d in got["rank"])
+    # a model without a draft passes no draft_meta at all
+    got["rank"] = []
+    await rec.rank_for(SPEC, 3)
+    assert got["rank"] == [None]
+    await rec.shutdown()
+
+
+async def test_simulate_and_rebalance_take_the_draft_into_account():
+    rec, store, clock = make_reconciler()
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a"))
+    seen = []
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, **kw):
+        seen.append(kw.get("draft_meta"))
+        return []
+
+    rec.ranker = ranker
+    out = await rec.simulate([DSPEC])
+    assert seen and all(d is DRAFT_META for d in seen)
+    assert out["unplaced"][0]["model"] == "m"
+    store.put_model(DSPEC)
+    put_replica(store, "m-1")
+    seen.clear()
+    await rec.rebalance_candidates()
+    assert seen == [DRAFT_META]
+    await rec.shutdown()
+
+
+async def test_launch_with_draft_ensures_both_files_and_sends_engine_spec(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a"))
+    store.put_model(DSPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    ensures = [c for c in client.calls if c[0] == "ensure"]
+    assert [(c[1], c[2], c[3]) for c in ensures] == [
+        ("http://10.0.0.1:7070", "big.gguf", "coordinator://big.gguf"),
+        ("http://10.0.0.1:7070", "small.gguf", "coordinator://small.gguf")]
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert (hs.model_path, hs.draft_model_path) == ("/cache/big.gguf", "/cache/small.gguf")
+    assert (hs.cache_type, hs.spec_type, hs.draft_device, hs.draft_n_max) == ("q8_0", "draft", "CUDA0", 6)
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("mode", ["none", "ngram"])
+async def test_launch_without_draft_sends_cache_and_spec_type_only(mock_health, mode):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC.model_copy(update={"kv_cache_type": "q4_0", "speculative": mode, "replicas": 1,
+                                            "draft": "coordinator://ignored.gguf"}))
+    await rec.tick()
+    await settle(rec)
+    assert client.kinds() == ["ensure", "start"]  # the stale draft source is never fetched
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert (hs.cache_type, hs.spec_type, hs.draft_model_path, hs.draft_device) == ("q4_0", mode, None, None)
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("llama_device", ["CPU", "RPC0"])
+async def test_draft_on_a_non_cuda_first_device_fails_the_launch_cleanly(mock_health, llama_device):
+    client = FakeClient()
+    inner = make_planner()
+
+    def planner(*a, **kw):
+        p = inner(*a)
+        p.assignments[0].llama_device = llama_device
+        return p
+
+    rec, store, clock = make_reconciler(planner=planner, client=client)
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a"))
+    store.put_model(DSPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "LaunchError" in r.error and "local CUDA device" in r.error
+    assert "start" not in client.kinds()  # nothing was started, so nothing pins VRAM
+    await rec.shutdown()

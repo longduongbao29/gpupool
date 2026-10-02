@@ -30,16 +30,29 @@ def overhead_mb(meta: ModelMeta, kind: str) -> int:
     return compute_mb(meta) + CONTEXT_MB[kind]
 
 
-def kv_bytes_per_layer(meta: ModelMeta, ctx_size: int) -> int:
-    return 2 * ctx_size * meta.n_head_kv * meta.head_dim * 2
+# Bytes per KV element: ggml block layouts (q8_0: 32 values + f16 scale = 34 B; q4_0: 16 B + scale = 18 B).
+# Measured on Qwen2.5-3B ctx 8192: q8_0 -132 MB, q4_0 -204 MB vs f16; theory -142 / -217 MB.
+_KV_BYTES_PER_ELEM = {"f16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}
 
 
-def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_last: bool) -> int:
-    total = sum(meta.layer_bytes[i] for i in layers) + len(layers) * kv_bytes_per_layer(meta, ctx_size)
+def kv_bytes_per_layer(meta: ModelMeta, ctx_size: int, cache_type: str = "f16") -> int:
+    return math.ceil(2 * ctx_size * meta.n_head_kv * meta.head_dim * _KV_BYTES_PER_ELEM[cache_type])
+
+
+def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_last: bool,
+                   cache_type: str = "f16") -> int:
+    total = (sum(meta.layer_bytes[i] for i in layers)
+             + len(layers) * kv_bytes_per_layer(meta, ctx_size, cache_type))
     if is_last:
         total += meta.output_bytes
     return math.ceil(total / _MB) + overhead_mb(meta, kind)
 
 
-def total_need_mb(meta: ModelMeta, ctx_size: int) -> int:
-    return device_need_mb(meta, range(meta.n_layers), ctx_size, "cuda", True)
+def total_need_mb(meta: ModelMeta, ctx_size: int, cache_type: str = "f16") -> int:
+    return device_need_mb(meta, range(meta.n_layers), ctx_size, "cuda", True, cache_type)
+
+
+def draft_need_mb(draft_meta: ModelMeta, ctx_size: int, cache_type: str = "f16") -> int:
+    """A speculative draft model runs whole on one CUDA device (the head's), with its own
+    KV at the same ctx and its own compute buffer / runtime context."""
+    return device_need_mb(draft_meta, range(draft_meta.n_layers), ctx_size, "cuda", True, cache_type)

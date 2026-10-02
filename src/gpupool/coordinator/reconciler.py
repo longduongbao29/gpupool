@@ -249,12 +249,24 @@ class Reconciler:
                     if f"{rep.node_id}/{d.device_id}" not in pins:
                         d.usable_mb = 0
 
+    async def draft_meta_for(self, spec: ModelSpec) -> ModelMeta | None:
+        """Meta of the draft model, or None when `spec` does not use one."""
+        if spec.speculative != "draft" or not spec.draft:
+            return None
+        return await self.meta_for(spec.model_copy(update={"source": spec.draft}))
+
+    @staticmethod
+    def _dkw(draft_meta: ModelMeta | None) -> dict:
+        # Only passed when there is a draft, so planners/rankers without the parameter keep working.
+        return {} if draft_meta is None else {"draft_meta": draft_meta}
+
     async def rank_for(self, spec: ModelSpec, limit: int) -> list[Placement]:
         """Best placements for `spec` right now, without ports or a replica id. No side effects."""
         meta = await self.meta_for(spec)
+        draft = await self.draft_meta_for(spec)
         reports = self.available_reports()
         self._apply_pins(spec, reports)
-        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit)
+        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit, **self._dkw(draft))
 
     async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
         """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
@@ -279,7 +291,9 @@ class Reconciler:
 
         rid = replica_id or self._new_replica_id(spec.name)
         meta = await self.meta_for(spec)
-        return self._planner()(meta, spec, reports, rid, port_alloc, occupants=self.occupants())
+        draft = await self.draft_meta_for(spec)
+        return self._planner()(meta, spec, reports, rid, port_alloc, occupants=self.occupants(),
+                               **self._dkw(draft))
 
     @staticmethod
     def _new_replica_id(model: str) -> str:
@@ -314,12 +328,14 @@ class Reconciler:
         return frozenset((n.node_id, d.device_id) for n in nodes for d in n.devices
                          if not flags.get((n.node_id, gpu_key(d)), True))
 
-    def _ranker_for(self, spec: ModelSpec) -> Callable:
-        """The ranker, with `spec`'s constraints re-applied to whatever reports it is handed."""
+    def _ranker_for(self, spec: ModelSpec, draft_meta: ModelMeta | None = None) -> Callable:
+        """The ranker, with `spec`'s constraints re-applied to whatever reports it is handed and
+        the draft model (if any) accounted for, so preemption and simulation size it like a launch."""
         base = self._ranker()
+        extra = self._dkw(draft_meta)
 
         def ranked(meta, spec_, nodes, occupants=(), limit=5):
-            return base(meta, spec_, self._constrain(spec, nodes), occupants=occupants, limit=limit)
+            return base(meta, spec_, self._constrain(spec, nodes), occupants=occupants, limit=limit, **extra)
 
         return ranked
 
@@ -343,9 +359,11 @@ class Reconciler:
         if not cands:
             return None
         meta = await self.meta_for(spec)
+        draft = await self.draft_meta_for(spec)
         reports = self.available_reports()
         self._apply_pins(spec, reports)
-        return preemption.find_victims(meta, spec, reports, self.occupants(), cands, self._ranker_for(spec),
+        return preemption.find_victims(meta, spec, reports, self.occupants(), cands,
+                                        self._ranker_for(spec, draft),
                                         disabled=self._disabled(reports))
 
     async def rank_with_preemption(self, spec: ModelSpec, limit: int, exclude: str | None = None,
@@ -359,7 +377,8 @@ class Reconciler:
         reports = self.available_reports()
         reports = preemption.free_replicas(reports, victims, self._disabled(reports))
         occ = preemption.without_occupants(self.occupants(), {v.replica_id for v in victims})
-        ranked = self._ranker_for(spec)(await self.meta_for(spec), spec, reports, occupants=occ, limit=limit)
+        ranked = self._ranker_for(spec, await self.draft_meta_for(spec))(
+            await self.meta_for(spec), spec, reports, occupants=occ, limit=limit)
         return (victims, ranked) if ranked else None
 
     def _claim_priority(self, specs: dict[str, ModelSpec], wanted: dict[str, int], now: float) -> int:
@@ -458,12 +477,13 @@ class Reconciler:
             started = 0
             try:
                 meta = await self.meta_for(s)
+                draft = await self.draft_meta_for(s)
             except Exception as e:
                 if missing > 0:
                     out["unplaced"].append({"model": s.name, "missing": missing,
                                             "why": f"{type(e).__name__}: {e}"})
                 continue
-            ranker = self._ranker_for(s)
+            ranker = self._ranker_for(s, draft)
             for _ in range(max(0, missing)):
                 ranked = ranker(meta, s, reports, occupants=occ, limit=1)
                 if not ranked and len(active_of(s.name)) + started < min(wanted[s.name], self._floor(s)):
@@ -479,7 +499,7 @@ class Reconciler:
                         ranked = ranker(meta, s, reports, occupants=occ, limit=1)
                 if not ranked:
                     out["unplaced"].append({"model": s.name, "missing": missing - started,
-                                            "why": self._why_unplaced(meta, s, reports, occ)})
+                                            "why": self._why_unplaced(meta, s, reports, occ, draft)})
                     break
                 p = ranked[0]
                 out["start"].append({"model": s.name, "tier": p.tier, "est_decode_tps": p.est_decode_tps,
@@ -492,10 +512,11 @@ class Reconciler:
         return out
 
     def _why_unplaced(self, meta: ModelMeta, spec: ModelSpec, reports: list[NodeReport],
-                      occ: list[Occupant]) -> str:
+                      occ: list[Occupant], draft: ModelMeta | None = None) -> str:
         """The planner's own NoFit message for the simulated cluster state."""
         try:
-            self._planner()(meta, spec, self._constrain(spec, reports), "sim", lambda _n: 0, occupants=occ)
+            self._planner()(meta, spec, self._constrain(spec, reports), "sim", lambda _n: 0, occupants=occ,
+                           **self._dkw(draft))
         except Exception as e:
             return f"{type(e).__name__}: {e}"
         return "no placement found"
@@ -525,10 +546,12 @@ class Reconciler:
                 continue
             try:
                 meta = await self.meta_for(spec)
+                draft = await self.draft_meta_for(spec)
                 reports = self.available_reports()
                 self._apply_pins(spec, reports)  # a move stays within the model's pins
                 ranked = self._ranker()(meta, spec, reports, limit=5, extra=[r.placement],
-                                        occupants=[o for o in occ_all if o.replica_id != r.replica_id])
+                                        occupants=[o for o in occ_all if o.replica_id != r.replica_id],
+                                        **self._dkw(draft))
             except Exception:
                 log.exception("scoring a rebalance for %s failed", r.replica_id)
                 continue
@@ -952,9 +975,9 @@ class Reconciler:
         return rec
 
     # ------------------------------------------------------------------ launch
-    def _model_source(self, spec: ModelSpec) -> tuple[str, str]:
-        """(cache name, source to send to the agent)."""
-        src = spec.source
+    def _model_source(self, spec: ModelSpec, source: str | None = None) -> tuple[str, str]:
+        """(cache name, source to send to the agent). `source` overrides spec.source (the draft)."""
+        src = source if source is not None else spec.source
         if not src.startswith("coordinator://"):
             try:
                 p = Path(src)
@@ -1004,6 +1027,19 @@ class Reconciler:
             name, src = self._model_source(spec)
             path = await self.client.ensure_model(head_url, name, src)
 
+            extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative}
+            if spec.speculative == "draft":
+                if not spec.draft:
+                    raise LaunchError("speculative 'draft' without a draft model")
+                first = p.assignments[0]
+                # The draft runs inside the head's llama-server: an RPC or remote device cannot host it.
+                if first.node_id != p.head_node or first.rpc_endpoint or not first.llama_device.startswith("CUDA"):
+                    raise LaunchError(f"the draft model needs a local CUDA device on the head node, but the "
+                                      f"first device is {first.node_id}/{first.llama_device}")
+                dname, dsrc = self._model_source(spec, spec.draft)
+                extra.update(draft_model_path=await self.client.ensure_model(head_url, dname, dsrc),
+                             draft_device=first.llama_device, draft_n_max=spec.draft_n_max)
+
             head_id = f"{rid}-head"
             created.append((head_url, head_id))
             await self.client.start_engine(head_url, EngineSpec(
@@ -1011,7 +1047,7 @@ class Reconciler:
                 devices=[a.llama_device for a in p.assignments],
                 rpc_endpoints=[a.rpc_endpoint for a in p.assignments if a.rpc_endpoint],
                 tensor_split=p.tensor_split, model=spec.name, model_path=path,
-                ctx_size=spec.ctx_size, parallel=spec.parallel))
+                ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
             await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health")
 
             cur = self.store.get_replica(rid)

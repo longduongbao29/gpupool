@@ -339,6 +339,8 @@
                     <span class="pill accent" x-show="m.spec.priority != null && m.spec.priority !== 50" title="Scheduling priority">Priority <span x-text="m.spec.priority"></span></span></div>
                   <div class="muted small ellipsis" style="margin-top:2px"><span x-text="m.file || m.spec.source"></span> &middot; ctx <span x-text="m.spec.ctx_size"></span> &middot; parallel <span x-text="m.spec.parallel"></span></div></div>
               </div>
+              <div class="row wrap" style="gap:6px;margin-top:8px" x-show="specChips(m).length">
+                <template x-for="c in specChips(m)" :key="c"><span class="chip" x-text="c"></span></template></div>
               <div class="endpoint"><code class="grow ellipsis" x-text="endpoint()"></code><span class="muted small">model:</span><code x-text="m.spec.name"></code>
                 <button class="btn sm ghost icon" @click="copy(endpoint())" title="Copy endpoint" aria-label="Copy endpoint" x-html="icon('copy')"></button></div>
 
@@ -406,6 +408,7 @@
                     <code class="rep-id" :title="'Replica ' + p.id + ' (' + p.state + ')'" x-text="p.id"></code>
                     <span class="chips"><template x-for="c in p.devs" :key="c"><span class="chip mono" :title="c" x-text="c"></span></template></span>
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
+                    <span class="chip" x-show="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
                   </div>
                 </template>
@@ -603,7 +606,7 @@
     <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn ghost icon sm right" aria-label="Close" @click="form.open = false" x-html="icon('x')"></button></div>
     <div class="modal-body">
       <label class="field"><span>File (from the library)</span>
-        <select x-model="form.file" @change="form.plan = null">
+        <select x-model="form.file" @change="form.plan = null; form.rec = null; form.sim = null; if (form.draftFile === form.file) form.draftFile = ''">
           <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" x-text="form.file"></option></template>
           <template x-for="l in readyLibrary()" :key="l.name"><option :value="l.name" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
         </select></label>
@@ -620,6 +623,28 @@
       </div>
       <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.preemptible" @change="form.sim = null"><span></span></label>
         <div><div>Can be preempted</div><div class="muted small">a higher-priority model may stop this model's replicas when GPUs are full</div></div></div>
+      <h3 class="sec" style="margin-top:4px">Performance</h3>
+      <label class="field"><span>KV cache</span>
+        <select x-model="form.kv" @change="form.rec = null; form.sim = null" style="width:100%">
+          <option value="f16">Full precision (f16)</option>
+          <option value="q8_0">8-bit (q8_0) &mdash; about half the KV memory, negligible quality loss</option>
+          <option value="q4_0">4-bit (q4_0) &mdash; about a quarter, small quality loss</option></select></label>
+      <div class="muted small" style="margin:-4px 0 var(--s-3)">The KV cache grows with context size &times; parallel slots; quantizing it can let a model fit on fewer GPUs.</div>
+      <label class="field"><span>Speculative decoding</span>
+        <select x-model="form.spec" @change="form.rec = null; form.sim = null" style="width:100%">
+          <option value="none">Off</option>
+          <option value="ngram">N-gram (no extra memory)</option>
+          <option value="draft">Draft model</option></select></label>
+      <div class="row" x-show="form.spec==='draft'">
+        <label class="field grow"><span>Draft model (from the library)</span>
+          <select x-model="form.draftFile" @change="form.rec = null; form.sim = null" style="width:100%">
+            <option value="">Select a draft model...</option>
+            <template x-for="l in draftChoices()" :key="l.name"><option :value="l.name" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
+          </select></label>
+        <label class="field"><span>Draft tokens</span><input type="number" min="1" max="16" step="1" x-model="form.draftN" @input="form.rec = null; form.sim = null" style="width:110px"></label>
+      </div>
+      <div class="muted small" x-show="form.spec==='draft' && draftChoices().length === 0" style="margin:-4px 0 var(--s-3)">No other ready file in the library. Add a small model of the same family first.</div>
+      <div class="muted small" style="margin:-4px 0 var(--s-3)">Fewer passes of the big model per token. Helps most when the model is split across servers (fewer network round trips). Measured on one small GPU: n-gram +11 %, a 0.5B draft with 4 tokens +5 %, 8 tokens slower.</div>
       <h3 class="sec" style="margin-top:4px">Scaling</h3>
       <label class="field"><span>Mode</span>
         <select x-model="form.mode" style="width:100%">

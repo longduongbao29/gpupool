@@ -91,6 +91,32 @@ your real address.
 
 To require a key from clients, start the coordinator with `-e GPUPOOL_API_KEYS=key1,key2`.
 
+## Try it on one machine (simulated 3-server cluster)
+
+`docker-compose.sim.yml` starts a coordinator and three "servers" joined exactly like a real install
+(`GPUPOOL_JOIN`), so you can try the UI, multi-server placement and RPC splits with one GPU. Build both
+images first (`docker compose -f docker-compose.coordinator.yml build` and the agent compose file), then:
+
+```bash
+GPUPOOL_HOST_MODELS_DIR=/srv/gguf docker compose -f docker-compose.sim.yml up -d
+```
+
+UI: `http://<docker host>:8080`, admin key `sim-admin`. server-a reports the real GPU; server-b and
+server-c report a simulated Tesla T4 and A100 (`GPUPOOL_FAKE_DEVICES`) but run on the same real GPU. The
+budgets (`SIM_BUDGET_A/B/C`, default 1300/1100/1100 MB) must add up to less than the real GPU memory.
+Each server gets its own IP on a private Docker network instead of `--network host`.
+
+## Performance options (per model, in the deploy form)
+
+| Option | Values | Effect | Measured (GTX 1650, Qwen2.5-3B) |
+| --- | --- | --- | --- |
+| KV cache | f16, q8_0, q4_0 | smaller KV cache, so a model can fit on fewer GPUs | ctx 8192: −132 / −204 MB, speed unchanged (51.9 / 51.2 / 50.8 tok/s) |
+| Speculative | none, ngram, draft | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+
+N-gram needs no extra memory but only helps when the output repeats earlier text. A draft model must share
+the tokenizer of the main model (checked when saving) and runs on the head's GPU (its memory is planned for).
+Drafting 4 tokens is the default; 8 was slower in our measurements.
+
 ## Without Docker
 
 Coordinator:

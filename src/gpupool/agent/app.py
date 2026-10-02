@@ -185,6 +185,14 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                     422, "model_path must be inside the model cache or returned by /models/ensure")
             if not Path(spec.model_path).is_file():
                 raise HTTPException(422, f"model file not found: {spec.model_path}")
+            if spec.draft_model_path:
+                if not model_path_allowed(spec.draft_model_path):
+                    raise HTTPException(
+                        422, "draft_model_path must be inside the model cache or returned "
+                             "by /models/ensure")
+                if not Path(spec.draft_model_path).is_file():
+                    raise HTTPException(
+                        422, f"draft model file not found: {spec.draft_model_path}")
         elif len(spec.devices) != 1:
             raise HTTPException(422, "rpc engine needs exactly one device")
         try:

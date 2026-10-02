@@ -75,6 +75,19 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
             "--fit", "off"]
     if len(spec.devices) > 1:
         cmd += ["--tensor-split", ",".join(f"{x:g}" for x in spec.tensor_split)]
+    if spec.cache_type != "f16":
+        cmd += ["-ctk", spec.cache_type, "-ctv", spec.cache_type]
+    # b11342: without --spec-type, -md loads the draft model but never uses it.
+    if spec.spec_type == "ngram":
+        cmd += ["--spec-type", "ngram-mod"]
+    elif spec.spec_type == "draft":
+        if not spec.draft_model_path or not spec.draft_device:
+            raise ValueError("draft speculative decoding needs draft_model_path and draft_device")
+        cmd += ["--spec-type", "draft-simple", "-md", spec.draft_model_path,
+                "-devd", spec.draft_device, "-ngld", "999",
+                "--spec-draft-n-max", str(spec.draft_n_max)]
+        if spec.cache_type != "f16":
+            cmd += ["-ctkd", spec.cache_type, "-ctvd", spec.cache_type]
     return cmd + list(spec.extra_args)
 
 

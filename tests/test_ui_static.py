@@ -378,3 +378,55 @@ def test_ui_polish_markup():
     assert 'class="modal-foot split"' in html and ".foot-group" in css
     assert re.search(r"\.model-grid \{[^}]*align-items: start", css)
     assert re.search(r"\.sc-table \{[^}]*table-layout: fixed", css)
+
+
+def test_mock_perf_fields_in_state_and_put(client):
+    st = client.get("/api/state", headers=HEAD).json()
+    for m in st["models"]:
+        assert {"kv_cache_type", "speculative", "draft", "draft_n_max"} <= m["spec"].keys()
+    auto = next(m for m in st["models"] if m["spec"]["name"] == "chat-auto")["spec"]
+    assert (auto["kv_cache_type"], auto["speculative"], auto["draft"]) == ("q8_0", "ngram", None)
+    body = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 2048, "parallel": 1, "pin_devices": []}
+    spec = client.put("/api/models/k1", json=body, headers=HEAD).json()
+    assert (spec["kv_cache_type"], spec["speculative"], spec["draft"], spec["draft_n_max"]) == ("f16", "none", None, 4)
+    spec = client.put("/api/models/k1", json={**body, "kv_cache_type": "q4_0", "speculative": "draft",
+                                              "draft_file": "qwen2.5-0.5b-q8.gguf", "draft_n_max": 8}, headers=HEAD).json()
+    assert (spec["kv_cache_type"], spec["draft"], spec["draft_n_max"]) == ("q4_0", "coordinator://qwen2.5-0.5b-q8.gguf", 8)
+
+
+def test_mock_perf_validation_422(client):
+    body = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 2048, "parallel": 1, "pin_devices": [], "speculative": "draft"}
+    for bad, text in (({}, "draft_file"), ({"draft_file": "nope.gguf"}, "draft_file"),
+                      ({"draft_file": "llama-8b.gguf"}, "draft_file"),  # still downloading, not ready
+                      ({"draft_file": "qwen2.5-3b-q4.gguf"}, "differ"),
+                      ({"draft_file": "llama-3.2-1b-q8.gguf"}, "does not share the tokenizer"),
+                      ({"draft_file": "qwen2.5-0.5b-q8.gguf", "draft_n_max": 17}, "draft_n_max"),
+                      ({"draft_file": "qwen2.5-0.5b-q8.gguf", "draft_n_max": 0}, "draft_n_max")):
+        r = client.put("/api/models/k2", json={**body, **bad}, headers=HEAD)
+        assert r.status_code == 422 and text in r.json()["detail"], (bad, r.text)
+    assert client.put("/api/models/k2", json={**body, "speculative": "x"}, headers=HEAD).status_code == 422
+    assert client.put("/api/models/k2", json={**body, "speculative": "none", "kv_cache_type": "q2"}, headers=HEAD).status_code == 422
+    assert "k2" not in {m["spec"]["name"] for m in client.get("/api/state", headers=HEAD).json()["models"]}  # nothing saved
+
+
+def test_mock_recommend_accepts_perf_fields(client):
+    req = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 4096, "parallel": 2, "limit": 3}
+    full = client.post("/api/recommend", json=req, headers=HEAD).json()
+    q4 = client.post("/api/recommend", json={**req, "kv_cache_type": "q4_0"}, headers=HEAD).json()
+    assert q4["need_mb"] < full["need_mb"]
+    d = client.post("/api/recommend", json={**req, "speculative": "draft", "draft_file": "qwen2.5-0.5b-q8.gguf"}, headers=HEAD).json()
+    assert d["options"][0]["draft_est_mb"] > 0 and d["need_mb"] > full["need_mb"]
+    assert client.post("/api/recommend", json={**req, "speculative": "draft"}, headers=HEAD).status_code == 422
+
+
+def test_ui_has_kv_cache_and_speculative_controls():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for needle in ("kv_cache_type", "speculative", "draft_file", "draft_n_max", "draft_est_mb", "perfBody", "specChips"):
+        assert needle in js, needle
+    for needle in ("Performance", "KV cache", "Full precision (f16)", "8-bit (q8_0)", "4-bit (q4_0)", "about half the KV memory",
+                   "Speculative decoding", "N-gram (no extra memory)", "Draft model", "Draft tokens",
+                   "quantizing it can let a model fit on fewer GPUs", "Measured on one small GPU", "specChips(m)", "p.draft"):
+        assert needle in html, needle
+    # the request bodies of save, recommend and preview impact all carry the fields
+    assert js.count("pb.body") >= 3
