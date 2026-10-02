@@ -1,0 +1,90 @@
+# gpupool
+
+> Tiếng Việt. English: [README.md](README.md)
+
+Gom VRAM trống rải rác trên nhiều server (ví dụ 3 GB + 5 GB + 10 GB ở ba máy) thành một pool và
+serve LLM qua một endpoint OpenAI-compatible duy nhất. Engine là
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` + `ggml-rpc-server`, model GGUF);
+gpupool là control plane bên trên: đo VRAM trống từng node, quyết định model đặt ở đâu và chia layer
+thế nào, khởi chạy và giám sát engine, định tuyến request, và đặt lại replica khi một node chết.
+
+Dành cho server dùng chung: chạy hoàn toàn ở user space (không sudo), CUDA khác nhau giữa các máy,
+VRAM có người khác cùng dùng.
+
+## Trạng thái
+
+Giai đoạn đầu, đã test trên một laptop Windows giả lập ba node với llama.cpp thật. Xem
+[docs/TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md). Chưa chạy trên cụm nhiều server thật.
+
+## Cách hoạt động
+
+```
+client ──OpenAI API──► coordinator (router + scheduler + reconciler, SQLite)
+                            ▲ heartbeat             │ start/stop engine
+   server A: agent ─ llama-server (head) ──RPC──► server B: agent ─ ggml-rpc-server
+                                         └─RPC──► server C: agent ─ ggml-rpc-server
+```
+
+- **agent** (mỗi server một cái): báo GPU qua NVML, chạy/dừng tiến trình llama.cpp, cache file GGUF.
+- **scheduler**: đọc header GGUF (không tải cả file), ước lượng bộ nhớ theo layer, ưu tiên 1 GPU, rồi
+  1 server, rồi ít server nhất; GPU trước RAM CPU.
+- **router**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming, cân bằng tải theo
+  prefix (system prompt giống nhau vào replica đã cache), retry trước byte đầu tiên.
+- **reconciler**: giữ đủ số replica mong muốn, rollback khi launch lỗi, failover khi node chết, drain.
+
+Thiết kế: [docs/DESIGN.vi.md](docs/DESIGN.vi.md).
+
+## Bắt đầu nhanh
+
+Cần: [uv](https://docs.astral.sh/uv/), bản build llama.cpp (đã test b11342) có `llama-server` và
+`ggml-rpc-server` hợp với driver CUDA của từng node.
+
+```bash
+git clone <repo này> && cd multi-gpu-inference
+uv sync
+```
+
+Coordinator (`coordinator.toml`):
+
+```toml
+host = "0.0.0.0"
+port = 8080
+cluster_token = "change-me"
+admin_key = "change-me-too"
+api_keys = ["client-key"]
+models_dir = "/data/gguf"   # file ở đây được phát cho agent dưới dạng coordinator://<file>
+```
+
+Mỗi server (`agent.toml`):
+
+```toml
+node_id = "server-a"
+host = "10.0.0.5"            # IP mà các server khác gọi tới được (không dùng 0.0.0.0)
+port = 7070
+coordinator_url = "http://10.0.0.1:8080"
+cluster_token = "change-me"
+llama_dir = "/opt/llama.cpp/build/bin"
+margin_pct = 0.10            # chừa VRAM cho người khác
+```
+
+```bash
+uv run gpupool coordinator --config coordinator.toml
+uv run gpupool agent --config agent.toml            # trên mọi server
+
+export GPUPOOL_URL=http://10.0.0.1:8080 GPUPOOL_ADMIN_KEY=change-me-too
+uv run gpupool register qwen3b coordinator://qwen2.5-3b-instruct-q4_k_m.gguf --ctx 4096
+uv run gpupool plan qwen3b                           # xem trước placement
+uv run gpupool status
+```
+
+Sau đó trỏ bất kỳ client OpenAI nào tới `http://10.0.0.1:8080/v1` với key `client-key`.
+
+Bảo mật: RPC của llama.cpp không mã hoá và không xác thực. Chỉ chạy trong mạng nội bộ tin cậy.
+
+## Test
+
+```bash
+uv run pytest                 # unit test
+uv run pytest -m real         # cần llama.cpp ở .cache/llama/b11342-cuda12.4 và GGUF ở .cache/models
+uv run python scripts/e2e_local.py   # 3 node giả lập trên một máy, llama.cpp thật
+```
