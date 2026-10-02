@@ -22,6 +22,9 @@ class AgentConfig(BaseModel):
     budget_mb: dict[str, int] = Field(default_factory=dict)
     include_cpu: bool = False  # expose a "CPU" device (served through rpc-server -d CPU)
     heartbeat_s: float = 2.0
+    # The coordinator pulls /report from registered agents; pushing heartbeats is optional
+    # (kept for coordinators that predate pull mode).
+    push_heartbeat: bool = False
 
 
 class CoordinatorConfig(BaseModel):
@@ -38,6 +41,10 @@ class CoordinatorConfig(BaseModel):
     low_free_mb: int = 256  # device free below this while hosting an engine -> move replica
     drain_timeout_s: float = 60.0
     port_range: tuple[int, int] = (9000, 9999)  # ports handed to engines on agents
+    poll_s: float = 2.0  # how often registered agents are polled for /report
+    hf_token: str = ""  # Hugging Face token for gated/private repos (env HF_TOKEN)
+    # URL agents use to reach this coordinator; shown in the UI's agent install command.
+    public_url: str = ""
 
 
 def load_toml(path: Path) -> dict:

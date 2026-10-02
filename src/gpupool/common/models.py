@@ -16,6 +16,12 @@ ReplicaState = Literal["pending", "launching", "ready", "draining", "stopped", "
 Tier = Literal["single_gpu", "single_node", "multi_node"]
 
 
+class GpuProcess(BaseModel):
+    pid: int
+    name: str = ""  # "" when the OS hides it (other users' processes)
+    used_mb: int | None = None
+
+
 class Device(BaseModel):
     device_id: str  # llama.cpp name on its own node: "CUDA0", "CPU"
     kind: DeviceKind
@@ -24,6 +30,12 @@ class Device(BaseModel):
     free_mb: int  # measured (NVML / psutil)
     usable_mb: int  # max(0, min(free_mb - margin, budget_mb))
     util_pct: int | None = None
+    # Optional telemetry for the UI (agents before 0.2 do not send them).
+    temp_c: int | None = None
+    power_w: int | None = None
+    processes: list[GpuProcess] = Field(default_factory=list)
+    driver: str | None = None  # NVIDIA driver version, e.g. "535.154.05"
+    cuda: str | None = None  # highest CUDA version the driver supports, e.g. "12.2"
 
 
 class EngineSpec(BaseModel):
@@ -64,6 +76,10 @@ class NodeReport(BaseModel):
     llama_version: str
     models: list[str]  # GGUF file names present in the local cache
     ts: float
+    # Optional host telemetry for the UI.
+    cpu_pct: float | None = None
+    ram_used_mb: int | None = None
+    ram_total_mb: int | None = None
 
 
 class ModelSpec(BaseModel):
@@ -72,7 +88,24 @@ class ModelSpec(BaseModel):
     source: str
     ctx_size: int = 4096
     parallel: int = 1
-    replicas: int = 1
+    replicas: int = 1  # desired count; 0 = stopped
+    # "node_id/device_id" entries the replicas may use; empty = the scheduler chooses freely.
+    pin_devices: list[str] = Field(default_factory=list)
+
+
+class LibraryItem(BaseModel):
+    """A GGUF file the coordinator can serve to heads as coordinator://<name>."""
+
+    name: str  # unique file name, e.g. "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    path: str  # absolute path on the coordinator machine
+    source: Literal["hf", "path"]
+    hf_repo: str | None = None
+    hf_file: str | None = None  # path inside the repo (may contain "/")
+    bytes: int | None = None  # total size when known
+    downloaded: int = 0  # bytes written so far (HF downloads)
+    status: Literal["downloading", "ready", "failed"]
+    error: str | None = None
+    created_at: float
 
 
 class ModelMeta(BaseModel):
