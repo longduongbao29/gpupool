@@ -1,6 +1,7 @@
-# Coordinator (one machine). Copy .env.example to .env and set the secrets, then:
+# Coordinator (one machine):
 #   docker compose -f docker-compose.coordinator.yml up -d --build
-# Open http://<this machine>:8080 and log in with GPUPOOL_ADMIN_KEY.
+#   docker compose -f docker-compose.coordinator.yml logs   # UI URL, admin key, join command
+# GPUPOOL_ADMIN_KEY / GPUPOOL_CLUSTER_TOKEN are optional: generated and stored in the data volume.
 services:
   coordinator:
     build:
@@ -11,8 +12,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      GPUPOOL_ADMIN_KEY: ${GPUPOOL_ADMIN_KEY:?set GPUPOOL_ADMIN_KEY in .env}
-      GPUPOOL_CLUSTER_TOKEN: ${GPUPOOL_CLUSTER_TOKEN:?set GPUPOOL_CLUSTER_TOKEN in .env}
+      GPUPOOL_ADMIN_KEY: ${GPUPOOL_ADMIN_KEY:-}
+      GPUPOOL_CLUSTER_TOKEN: ${GPUPOOL_CLUSTER_TOKEN:-}
       GPUPOOL_API_KEYS: ${GPUPOOL_API_KEYS:-}
       GPUPOOL_PUBLIC_URL: ${GPUPOOL_PUBLIC_URL:-}
       GPUPOOL_WEBHOOK_URL: ${GPUPOOL_WEBHOOK_URL:-}

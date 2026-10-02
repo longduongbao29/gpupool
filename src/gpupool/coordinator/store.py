@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS replicas (
 CREATE INDEX IF NOT EXISTS replicas_model ON replicas(model);
 CREATE TABLE IF NOT EXISTS servers (
     node_id TEXT PRIMARY KEY, agent_url TEXT NOT NULL, added_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS removed_servers (
+    node_id TEXT PRIMARY KEY, removed_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS gpu_flags (
     node_id TEXT NOT NULL, device_id TEXT NOT NULL, enabled INTEGER NOT NULL,
     PRIMARY KEY (node_id, device_id));
@@ -102,6 +104,19 @@ class Store:
             self._conn.execute("DELETE FROM servers WHERE node_id=?", (node_id,))
             self._conn.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
             self._conn.execute("DELETE FROM gpu_flags WHERE node_id=?", (node_id,))
+
+    # servers removed by the operator: auto-join must not bring them back
+    def mark_removed(self, node_id: str, now: float | None = None) -> None:
+        self._write(
+            "INSERT INTO removed_servers(node_id, removed_at) VALUES(?,?) "
+            "ON CONFLICT(node_id) DO UPDATE SET removed_at=excluded.removed_at",
+            (node_id, time.time() if now is None else now))
+
+    def clear_removed(self, node_id: str) -> None:
+        self._write("DELETE FROM removed_servers WHERE node_id=?", (node_id,))
+
+    def is_removed(self, node_id: str) -> bool:
+        return bool(self._read("SELECT 1 FROM removed_servers WHERE node_id=?", (node_id,)))
 
     # gpu flags
     def set_gpu_enabled(self, node_id: str, device_id: str, enabled: bool) -> None:

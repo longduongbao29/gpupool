@@ -28,14 +28,65 @@ class EnsureBody(BaseModel):
     source: str
 
 
+async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
+    """Register this agent with the coordinator, retrying until it works or is refused.
+
+    Waits for our own HTTP server first: the coordinator probes /report right away, so
+    joining before we accept connections would just fail once. Connection errors and 5xx are
+    retried forever with backoff (the coordinator may start later). 401 (wrong token) and
+    403 (server removed in the UI) are final. Never raises; returns True once joined.
+    """
+    base = cfg.coordinator_url.rstrip("/")
+    health = f"http://127.0.0.1:{cfg.port}/health"
+    body = {"agent_url": f"http://{cfg.host}:{cfg.port}"}
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        while True:  # our own server must be accepting connections
+            try:
+                if (await http.get(health, timeout=2.0)).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            await sleep(0.3)
+        delay, last_log = 2.0, ""
+        while True:
+            try:
+                r = await http.post(f"{base}/internal/join", json=body,
+                                    headers=bearer_headers(cfg.cluster_token))
+                if r.status_code == 200:
+                    log.info("joined as %s (coordinator %s)", cfg.node_id, base)
+                    return True
+                if r.status_code == 401:
+                    log.error("coordinator %s rejected the join: wrong cluster token. Check the "
+                              "token in GPUPOOL_JOIN.", base)
+                    return False
+                if r.status_code == 403:
+                    log.error("coordinator %s refused %s: this server was removed in the UI and "
+                              "must be re-added there (Servers > Add Server).", base, cfg.node_id)
+                    return False
+                reason = f"HTTP {r.status_code} {r.text[:200]}"
+            except asyncio.CancelledError:
+                raise
+            except httpx.HTTPError as e:
+                reason = f"{type(e).__name__}: {e}"
+            except Exception as e:  # never let a surprise kill the agent
+                reason = f"unexpected {type(e).__name__}: {e}"
+            if reason != last_log:  # do not repeat the same line every retry
+                log.warning("join to %s failed (%s); retrying in %.0fs", base, reason, delay)
+                last_log = reason
+            await sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
-               start_heartbeat: bool | None = None) -> FastAPI:
+               start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host)
     version_cache: dict[str, str] = {}
     # Default follows cfg.push_heartbeat: the coordinator pulls /report, and a server
     # removed from the UI must not re-register itself by pushing.
     if start_heartbeat is None:
         start_heartbeat = cfg.push_heartbeat
+    if start_join is None:
+        start_join = bool(cfg.auto_join and cfg.coordinator_url and cfg.cluster_token)
 
     def version() -> str:
         if "v" not in version_cache:
@@ -82,9 +133,14 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
+        join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None
         try:
             yield
         finally:
+            if join_task:
+                join_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await join_task
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -151,4 +207,8 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
 
 
 def run_agent(cfg: AgentConfig) -> None:
-    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port)
+    # The API binds all interfaces (unless the operator chose loopback) so the container
+    # healthcheck and the self-join probe can use 127.0.0.1 whatever cfg.host resolved to.
+    # Engines still bind cfg.host (ProcessManager), the address other nodes connect to.
+    bind = cfg.host if cfg.host in ("127.0.0.1", "localhost", "::1") else "0.0.0.0"
+    uvicorn.run(create_app(cfg), host=bind, port=cfg.port)

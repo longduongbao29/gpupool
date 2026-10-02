@@ -1,12 +1,13 @@
 # gpupool coordinator: web UI + admin API + scheduler + OpenAI-compatible router. No GPU needed.
 #
-#   docker run -d --name gpupool -p 8080:8080 \
-#     -e GPUPOOL_ADMIN_KEY=... -e GPUPOOL_CLUSTER_TOKEN=... \
-#     -e GPUPOOL_PUBLIC_URL=http://10.0.0.1:8080 \
-#     -v gpupool-data:/data -v /srv/gguf:/models:ro gpupool-coordinator
+#   docker run -d --name gpupool -p 8080:8080 -v gpupool:/data ghcr.io/longduongbao29/gpupool-coordinator
+#   docker logs gpupool    # UI URL, admin key and the join command for GPU servers
 #
-# /data holds the database and models downloaded from Hugging Face; mount any folder with
-# existing .gguf files (e.g. at /models) and add them in the UI by path.
+# The admin key and cluster token are generated on first start and kept in /data/secrets.json.
+# Set GPUPOOL_ADMIN_KEY / GPUPOOL_CLUSTER_TOKEN to choose them, and GPUPOOL_PUBLIC_URL if the
+# address shown in the log is not reachable from your servers. Mount existing GGUF files with
+# -v /srv/gguf:/models:ro and add them in the UI by path.
+# /data holds the database, secrets and models downloaded from Hugging Face.
 
 FROM docker.io/library/python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:0.10 /uv /usr/local/bin/uv

@@ -36,50 +36,22 @@ Thiết kế: [docs/DESIGN.vi.md](docs/DESIGN.vi.md).
 
 ## Bắt đầu nhanh
 
-Cần: [uv](https://docs.astral.sh/uv/), bản build llama.cpp (đã test b11342) có `llama-server` và
-`ggml-rpc-server` hợp với driver CUDA của từng node.
+Một lệnh cho coordinator, mỗi server GPU một lệnh, rồi trỏ client OpenAI bất kỳ vào.
+Hướng dẫn đầy đủ: [docs/QUICKSTART.vi.md](docs/QUICKSTART.vi.md).
 
 ```bash
-git clone <repo này> && cd multi-gpu-inference
-uv sync
+# 1. coordinator (máy bất kỳ): log in ra admin key; mở http://<IP máy đó>:8080
+docker run -d --name gpupool -p 8080:8080 -v gpupool:/data ghcr.io/longduongbao29/gpupool-coordinator
+docker logs gpupool
+
+# 2. mỗi server GPU: chạy lệnh join hiện trên UI (Servers -> Add Server)
+docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data \
+  -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" ghcr.io/longduongbao29/gpupool-agent
+
+# 3. trên UI: Models -> Add model (Hugging Face hoặc đường dẫn) -> New model -> Start, rồi:
+curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "qwen7b", "messages": [{"role": "user", "content": "Xin chào"}]}'
 ```
-
-Coordinator (`coordinator.toml`):
-
-```toml
-host = "0.0.0.0"
-port = 8080
-cluster_token = "change-me"
-admin_key = "change-me-too"
-api_keys = ["client-key"]
-models_dir = "/data/gguf"   # file ở đây được phát cho agent dưới dạng coordinator://<file>
-```
-
-Mỗi server (`agent.toml`):
-
-```toml
-node_id = "server-a"
-host = "10.0.0.5"            # IP mà các server khác gọi tới được (không dùng 0.0.0.0)
-port = 7070
-coordinator_url = "http://10.0.0.1:8080"
-cluster_token = "change-me"
-llama_dir = "/opt/llama.cpp/build/bin"
-margin_pct = 0.10            # chừa VRAM cho người khác
-```
-
-```bash
-uv run gpupool coordinator --config coordinator.toml
-uv run gpupool agent --config agent.toml            # trên mọi server
-
-export GPUPOOL_URL=http://10.0.0.1:8080 GPUPOOL_ADMIN_KEY=change-me-too
-uv run gpupool register qwen3b coordinator://qwen2.5-3b-instruct-q4_k_m.gguf --ctx 4096
-uv run gpupool plan qwen3b                           # xem trước placement
-uv run gpupool status
-```
-
-Sau đó trỏ bất kỳ client OpenAI nào tới `http://10.0.0.1:8080/v1` với key `client-key`.
-
-Bảo mật: RPC của llama.cpp không mã hoá và không xác thực. Chỉ chạy trong mạng nội bộ tin cậy.
 
 ## Test
 

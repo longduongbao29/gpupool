@@ -187,6 +187,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         t = now()
         rec = ServerRecord(node_id=report.node_id, agent_url=url, added_at=t)
         store.add_server(rec)
+        store.clear_removed(report.node_id)  # a manual add undoes an earlier removal
         store.upsert_node(report, t)
         emit("info", "server_added", f"Server {rec.node_id} added ({url})", node_id=rec.node_id)
         nodes = {n.report.node_id: n for n in store.list_nodes()}
@@ -196,6 +197,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     async def delete_server(node_id: str) -> dict:
         server_or_404(node_id)
         await reconciler.remove_node(node_id)
+        store.mark_removed(node_id, now())  # sticks against the agent's auto-join until re-added here
         emit("info", "server_removed", f"Server {node_id} removed; its replicas were stopped", node_id=node_id)
         return {"ok": True}
 

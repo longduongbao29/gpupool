@@ -1,10 +1,12 @@
 # gpupool agent: CUDA runtime + llama.cpp (CUDA + RPC) + the gpupool agent.
 #
 # Run on each GPU server (needs the NVIDIA Container Toolkit):
-#   docker run -d --name gpupool-agent --gpus all --network host --pid host \
-#     -e GPUPOOL_NODE_ID=server-a -e GPUPOOL_HOST=10.0.0.5 \
-#     -e GPUPOOL_CLUSTER_TOKEN=... -e GPUPOOL_COORDINATOR_URL=http://10.0.0.1:8080 \
-#     -v gpupool-agent:/data gpupool-agent
+#   docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data \
+#     -e GPUPOOL_JOIN=http://10.0.0.1:8080#<cluster_token> ghcr.io/longduongbao29/gpupool-agent
+#
+# GPUPOOL_JOIN (printed in the coordinator log) is all that is needed: the node id defaults to
+# the hostname, the IP is detected, and the agent registers itself with the coordinator.
+# Override with GPUPOOL_NODE_ID / GPUPOOL_HOST if the defaults are wrong.
 #
 # --network host: engines open RPC/HTTP ports chosen by the coordinator and must be reachable
 #   on the server's own IP. --pid host: NVML reports host PIDs; without it GPU process names
@@ -65,6 +67,8 @@ ENV GPUPOOL_LLAMA_DIR=/opt/llama \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 VOLUME /data
 EXPOSE 7070
+# The agent API binds 0.0.0.0 (engines bind the resolved GPUPOOL_HOST), so probing loopback
+# works whether or not GPUPOOL_HOST is set.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD curl -fsS "http://${GPUPOOL_HOST:-127.0.0.1}:${GPUPOOL_PORT}/health" || exit 1
+    CMD curl -fsS "http://127.0.0.1:${GPUPOOL_PORT}/health" || exit 1
 ENTRYPOINT ["gpupool", "agent"]

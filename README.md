@@ -37,50 +37,22 @@ Design: [docs/DESIGN.en.md](docs/DESIGN.en.md).
 
 ## Quick start
 
-Requirements: [uv](https://docs.astral.sh/uv/), a llama.cpp build (b11342 tested) with `llama-server`
-and `ggml-rpc-server` matching each node's CUDA driver.
+One command for the coordinator, one per GPU server, then point any OpenAI client at it.
+Full guide: [docs/QUICKSTART.en.md](docs/QUICKSTART.en.md).
 
 ```bash
-git clone <this repo> && cd multi-gpu-inference
-uv sync
+# 1. coordinator (any machine): the log prints the admin key; open http://<its IP>:8080
+docker run -d --name gpupool -p 8080:8080 -v gpupool:/data ghcr.io/longduongbao29/gpupool-coordinator
+docker logs gpupool
+
+# 2. each GPU server: run the join command shown in the UI (Servers -> Add Server)
+docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data \
+  -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" ghcr.io/longduongbao29/gpupool-agent
+
+# 3. in the UI: Models -> Add model (Hugging Face or path) -> New model -> Start, then:
+curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "qwen7b", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
-
-Coordinator (`coordinator.toml`):
-
-```toml
-host = "0.0.0.0"
-port = 8080
-cluster_token = "change-me"
-admin_key = "change-me-too"
-api_keys = ["client-key"]
-models_dir = "/data/gguf"   # files here are served to agents as coordinator://<file>
-```
-
-Each server (`agent.toml`):
-
-```toml
-node_id = "server-a"
-host = "10.0.0.5"            # an IP the other servers can reach (not 0.0.0.0)
-port = 7070
-coordinator_url = "http://10.0.0.1:8080"
-cluster_token = "change-me"
-llama_dir = "/opt/llama.cpp/build/bin"
-margin_pct = 0.10            # leave VRAM for other users
-```
-
-```bash
-uv run gpupool coordinator --config coordinator.toml
-uv run gpupool agent --config agent.toml            # on every server
-
-export GPUPOOL_URL=http://10.0.0.1:8080 GPUPOOL_ADMIN_KEY=change-me-too
-uv run gpupool register qwen3b coordinator://qwen2.5-3b-instruct-q4_k_m.gguf --ctx 4096
-uv run gpupool plan qwen3b                           # dry-run placement
-uv run gpupool status
-```
-
-Then point any OpenAI client at `http://10.0.0.1:8080/v1` with `client-key`.
-
-Security: llama.cpp RPC is unencrypted and unauthenticated. Run it only on a trusted internal network.
 
 ## Tests
 

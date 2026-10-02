@@ -1,5 +1,6 @@
 """gpupool command line.
 
+  gpupool agent --join "http://10.0.0.1:8080#<cluster_token>" --llama-dir /path/to/bin
   gpupool agent --config agent.toml [--node-id ... --port ...]
   gpupool coordinator --config coordinator.toml
   gpupool register NAME SOURCE [--ctx 4096 --parallel 1 --replicas 1]
@@ -23,7 +24,11 @@ from pathlib import Path
 import httpx
 
 from gpupool.common.auth import bearer_headers
-from gpupool.common.config import AgentConfig, CoordinatorConfig, env_overrides, load_toml
+from gpupool.common.config import (AgentConfig, CoordinatorConfig, build_agent_config, env_overrides,
+                                   load_toml)
+
+
+log = logging.getLogger("gpupool.cli")
 
 
 def _merge(base: dict, overrides: dict) -> dict:
@@ -39,8 +44,11 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     data = load_toml(Path(args.config)) if args.config else {}
     data = _merge(data, env_overrides(AgentConfig))
     data = _merge(data, {"node_id": args.node_id, "host": args.host, "port": args.port,
-                         "coordinator_url": args.coordinator, "llama_dir": args.llama_dir})
-    run_agent(AgentConfig(**data))
+                         "coordinator_url": args.coordinator, "llama_dir": args.llama_dir,
+                         "join": args.join, "auto_join": False if args.no_auto_join else None})
+    cfg = build_agent_config(data)  # expands --join, resolves node_id / host defaults
+    log.info("agent %s on %s:%d, coordinator %s", cfg.node_id, cfg.host, cfg.port, cfg.coordinator_url)
+    run_agent(cfg)
     return 0
 
 
@@ -81,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--port", type=int)
     a.add_argument("--coordinator")
     a.add_argument("--llama-dir")
+    a.add_argument("--join", help="<coordinator_url>#<cluster_token> (env GPUPOOL_JOIN)")
+    a.add_argument("--no-auto-join", action="store_true", help="do not register with the coordinator by itself")
     a.set_defaults(fn=_cmd_agent)
 
     c = sub.add_parser("coordinator", help="run the coordinator (scheduler + router)")

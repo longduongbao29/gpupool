@@ -357,20 +357,24 @@ function app() {
       }
     },
 
-    agentCmd: function (name, ip) {
-      var st = this.settings();
-      return "docker run -d --name gpupool-agent --gpus all --network host" +
-        " -e GPUPOOL_NODE_ID=" + (name || "<name>") +
-        " -e GPUPOOL_HOST=" + (ip || "<this server IP>") +
-        " -e GPUPOOL_CLUSTER_TOKEN=" + (st.cluster_token || "<cluster_token>") +
-        " -e GPUPOOL_COORDINATOR_URL=" + (st.public_url || "<public_url>") +
-        " ghcr.io/longduongbao29/gpupool-agent:latest";
+    // The URL servers use to reach this coordinator: the configured public URL, else the
+    // address the browser used (inside Docker the server-side detection only sees a container IP).
+    coordUrl: function () {
+      return (this.settings().public_url || location.origin).replace(/\/+$/, "");
     },
-    addSrvHost: function () {
-      try { return new URL(this.addSrv.url).hostname; } catch (e) { return ""; }
+    joinString: function () {
+      return this.coordUrl() + "#" + (this.settings().cluster_token || "<cluster_token>");
     },
+    agentCmd: function () {
+      return "docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data" +
+        " -e GPUPOOL_JOIN='" + this.joinString() + "' ghcr.io/longduongbao29/gpupool-agent";
+    },
+    agentCmdUv: function () {
+      return "uv run gpupool agent --join '" + this.joinString() + "' --llama-dir /path/to/llama.cpp/bin";
+    },
+    joinCmd: function (tab) { return tab === "uv" ? this.agentCmdUv() : this.agentCmd(); },
     openAddServer: function () {
-      this.addSrv = { open: true, url: "", name: "gpu-node-1", busy: false };
+      this.addSrv = { open: true, url: "", tab: "docker", busy: false };
     },
     addServer: async function () {
       var url = this.addSrv.url.trim();
@@ -576,12 +580,13 @@ function app() {
     // ================= snippets =================
     curlSnippet: function () {
       var name = this.models().length ? this.models()[0].spec.name : "<model>";
-      return "curl " + this.endpoint() + "/chat/completions \\\n  -H \"Authorization: Bearer <api key>\" \\\n  -H \"Content-Type: application/json\" \\\n" +
+      var auth = this.settings().api_keys_set ? "  -H \"Authorization: Bearer <api key>\" \\\n" : "";
+      return "curl " + this.endpoint() + "/chat/completions \\\n" + auth + "  -H \"Content-Type: application/json\" \\\n" +
         "  -d '{\"model\": \"" + name + "\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'";
     },
     pySnippet: function () {
       var name = this.models().length ? this.models()[0].spec.name : "<model>";
-      return "from openai import OpenAI\n\nclient = OpenAI(base_url=\"" + this.endpoint() + "\", api_key=\"<api key>\")\n" +
+      return "from openai import OpenAI\n\nclient = OpenAI(base_url=\"" + this.endpoint() + "\", api_key=\"" + (this.settings().api_keys_set ? "<api key>" : "no key required") + "\")\n" +
         "resp = client.chat.completions.create(\n    model=\"" + name + "\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(resp.choices[0].message.content)";
     },
 

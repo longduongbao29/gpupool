@@ -3,27 +3,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ValidationError
 
 from gpupool.common.auth import require_bearer
-from gpupool.common.config import CoordinatorConfig
+from gpupool.common.config import CoordinatorConfig, detect_local_ip, load_or_create_secrets
 from gpupool.common.models import ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
-from gpupool.coordinator.agent_client import AgentClient
-from gpupool.coordinator.api import make_api_router
+from gpupool.coordinator.agent_client import AgentClient, AgentError
+from gpupool.coordinator.api import _normalize_url, make_api_router
 from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.library import Library
 from gpupool.coordinator.library_api import make_files_router, make_library_router
 from gpupool.coordinator.poller import Poller
 from gpupool.coordinator.reconciler import Reconciler
-from gpupool.coordinator.store import Store
+from gpupool.coordinator.store import ServerRecord, Store
+
+log = logging.getLogger("gpupool.coordinator")
 
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
+
+class JoinBody(BaseModel):
+    agent_url: str
+
 
 ALL_STATES = ["pending", "launching", "ready", "draining", "stopped", "failed"]
 
@@ -131,6 +140,44 @@ def create_app(
             raise HTTPException(403, f"server {report.node_id} is not registered")
         store.upsert_node(report, reconciler.clock())
         return {"ok": True}
+
+
+
+    @app.post("/internal/join", dependencies=[cluster_auth])
+    async def join(body: JoinBody) -> dict:
+        """Self-registration of an agent (`gpupool agent --join ...`).
+
+        Same probe as the UI's manual add, so only a reachable, correctly-tokened agent can
+        register. Servers the operator removed get 403 so removal sticks.
+        """
+        url = _normalize_url(body.agent_url)
+        try:
+            report = await poller.probe(url)
+        except AgentError as e:
+            raise HTTPException(502, f"agent at {url} answered {e.status}: {e.body}")
+        except httpx.HTTPError as e:
+            raise HTTPException(502, f"cannot reach agent at {url}: {type(e).__name__} {e}".strip())
+        except (ValidationError, ValueError) as e:
+            raise HTTPException(502, f"{url} did not return a valid agent report: {e}")
+        node_id = report.node_id
+        if store.is_removed(node_id):
+            raise HTTPException(403, f"server {node_id} was removed in the UI; re-add it there")
+        now = reconciler.clock()
+        existing = store.get_server(node_id)
+        if existing is not None:
+            if existing.agent_url != url:  # e.g. the server's IP changed after a reboot
+                store.add_server(ServerRecord(node_id=node_id, agent_url=url, added_at=existing.added_at))
+                log.info("server %s moved: %s -> %s", node_id, existing.agent_url, url)
+            return {"node_id": node_id, "agent_url": url, "added_at": existing.added_at, "new": False}
+        rec = ServerRecord(node_id=node_id, agent_url=url, added_at=now)
+        store.add_server(rec)
+        report.agent_url = url
+        store.upsert_node(report, now)
+        try:
+            notifier.emit("info", "server_added", f"Server {node_id} joined from {url}", node_id=node_id)
+        except Exception:
+            log.exception("emitting event failed")
+        return {"node_id": node_id, "agent_url": url, "added_at": now, "new": True}
 
     def model_uses_file(name: str) -> bool:
         return any(m.source == f"coordinator://{name}" for m in store.list_models())
@@ -268,7 +315,38 @@ def create_app(
     return app
 
 
+def startup_banner(cfg: CoordinatorConfig, lan_ip: str | None = None) -> list[str]:
+    """Plain lines telling the operator where the UI is and how to attach GPU servers."""
+    ui = cfg.public_url.rstrip("/") if cfg.public_url else f"http://{lan_ip or detect_local_ip()}:{cfg.port}"
+    join = f"{ui}#{cfg.cluster_token}"
+    lines = [
+        "=" * 64,
+        "gpupool coordinator is ready",
+        f"  UI:         {ui}",
+        f"  Admin key:  {cfg.admin_key}",
+        "",
+        "Add a GPU server: run this on it (NVIDIA Container Toolkit required):",
+        f"  docker run -d --name gpupool-agent --gpus all --network host --pid host "
+        f"-v gpupool-agent:/data -e GPUPOOL_JOIN='{join}' ghcr.io/longduongbao29/gpupool-agent",
+        "Without Docker:",
+        f"  uv run gpupool agent --join '{join}' --llama-dir /path/to/llama.cpp/bin",
+    ]
+    if not cfg.public_url:
+        lines += ["",
+                  "If this IP is not reachable from your servers (e.g. the coordinator runs in",
+                  "Docker and shows a container IP), use this machine's LAN IP instead, or set",
+                  "GPUPOOL_PUBLIC_URL."]
+    lines.append("=" * 64)
+    return lines
+
+
 def run_coordinator(cfg: CoordinatorConfig) -> None:
     import uvicorn
 
+    # Secrets are filled in here, not in create_app: tests build apps with explicit (or empty,
+    # i.e. open) keys and must keep that behaviour.
+    admin_key, cluster_token = load_or_create_secrets(cfg.db_path, cfg.admin_key, cfg.cluster_token)
+    cfg = cfg.model_copy(update={"admin_key": admin_key, "cluster_token": cluster_token})
+    for line in startup_banner(cfg):
+        log.info("%s", line)
     uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, log_level="info")

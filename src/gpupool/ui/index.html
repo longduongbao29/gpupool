@@ -367,11 +367,15 @@
         <div class="cmd" style="margin:6px 0 16px"><span x-text="curlSnippet()"></span><button class="btn sm" @click="copy(curlSnippet())">Copy</button></div>
         <div class="muted small">Python (openai)</div>
         <div class="cmd" style="margin:6px 0"><span x-text="pySnippet()"></span><button class="btn sm" @click="copy(pySnippet())">Copy</button></div>
-        <div class="muted small" x-show="!settings().api_keys_set">No API keys are configured: the OpenAI endpoint is open.</div>
+        <div class="muted small" x-show="!settings().api_keys_set">API key: no key required (no API keys are configured, the OpenAI endpoint is open).</div>
+        <div class="muted small" x-show="settings().api_keys_set">API key: use one of the configured keys as the Bearer token.</div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Agent install</h2></div><div class="panel-body">
-        <div class="muted small">Run on each GPU server, replacing the placeholders:</div>
-        <div class="cmd" style="margin-top:6px"><span x-text="agentCmd('<name>', '<this server IP>')"></span><button class="btn sm" @click="copy(agentCmd('<name>', '<this server IP>'))">Copy</button></div>
+      <div class="panel mt"><div class="panel-head"><h2>Add a GPU server</h2></div><div class="panel-body">
+        <div class="muted small">Run on each GPU server; it appears under Servers within a few seconds.</div>
+        <div class="muted small" style="margin-top:10px">Docker</div>
+        <div class="cmd" style="margin-top:6px"><span x-text="agentCmd()"></span><button class="btn sm" @click="copy(agentCmd())">Copy</button></div>
+        <div class="muted small" style="margin-top:12px">Without Docker (uv)</div>
+        <div class="cmd" style="margin-top:6px"><span x-text="agentCmdUv()"></span><button class="btn sm" @click="copy(agentCmdUv())">Copy</button></div>
       </div></div>
       <div class="panel mt"><div class="panel-head"><h2>Session</h2></div><div class="panel-body">
         <div class="row" style="margin-bottom:14px"><label class="switch"><input type="checkbox" :checked="desktop" @change="toggleDesktop($event.target.checked)"><span></span></label>
@@ -390,15 +394,18 @@
   <div class="modal">
     <div class="modal-head"><h2>Add Server</h2><button class="btn icon right" @click="addSrv.open = false" x-html="icon('x')"></button></div>
     <form class="modal-body" @submit.prevent="addServer()">
-      <label class="field"><span>Agent URL</span><input type="text" x-model="addSrv.url" placeholder="http://10.0.0.5:7070" autofocus></label>
-      <div class="muted small" style="margin-bottom:14px">The coordinator contacts the agent, reads its node id and registers it. Install the agent first with the command below.</div>
-      <label class="field"><span>Node name (used in the command)</span><input type="text" x-model="addSrv.name"></label>
-      <div class="muted small" style="margin-bottom:6px">Install command (run on the GPU server)</div>
-      <div class="cmd"><span x-text="agentCmd(addSrv.name, addSrvHost())"></span><button type="button" class="btn sm" @click="copy(agentCmd(addSrv.name, addSrvHost()))">Copy</button></div>
+      <div class="muted small" style="margin-bottom:8px">Run this on the GPU server; it appears here within a few seconds.</div>
+      <div class="tabs"><button type="button" :class="{active: addSrv.tab==='docker'}" @click="addSrv.tab='docker'">Docker</button><button type="button" :class="{active: addSrv.tab==='uv'}" @click="addSrv.tab='uv'">Without Docker (uv)</button></div>
+      <div class="cmd"><span x-text="joinCmd(addSrv.tab)"></span><button type="button" class="btn sm" @click="copy(joinCmd(addSrv.tab))">Copy</button></div>
+      <div class="muted small" style="margin:8px 0 18px">The server name is its hostname and its IP is detected automatically. Servers removed here stay removed until you add them again by URL.</div>
+      <details><summary class="muted small" style="cursor:pointer">Advanced: add by agent URL</summary>
+        <label class="field" style="margin-top:10px"><span>Agent URL</span><input type="text" x-model="addSrv.url" placeholder="http://10.0.0.5:7070"></label>
+        <div class="muted small">The coordinator contacts an already running agent, reads its node id and registers it.</div>
+      </details>
       <button type="submit" style="display:none"></button>
     </form>
     <div class="modal-foot"><button class="btn" @click="addSrv.open = false">Cancel</button>
-      <button class="btn primary" @click="addServer()" :disabled="addSrv.busy || !addSrv.url.trim()">Add Server</button></div>
+      <button class="btn primary" @click="addServer()" :disabled="addSrv.busy || !addSrv.url.trim()" title="Add by agent URL (advanced)">Add by URL</button></div>
   </div>
 </div>
 

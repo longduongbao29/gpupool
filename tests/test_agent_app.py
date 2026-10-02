@@ -26,7 +26,7 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr(procs, "llama_version", lambda d: "b1")
     import gpupool.agent.app as appmod
     monkeypatch.setattr(appmod, "llama_version", lambda d: "b1")
-    return AgentConfig(node_id="n1", port=7071, llama_dir=tmp_path, cluster_token="secret",
+    return AgentConfig(node_id="n1", port=7071, host="127.0.0.1", llama_dir=tmp_path, cluster_token="secret",
                        cache_dir=tmp_path / "cache", log_dir=tmp_path / "logs",
                        coordinator_url="http://coord:8080", heartbeat_s=0.05)
 
@@ -69,14 +69,15 @@ async def test_engine_endpoints(cfg, monkeypatch, tmp_path):
             r = await c.post("/engines", json=spec, headers=H)
             assert r.status_code == 200 and r.json()["engine_id"] == "e1"
             assert (await c.post("/engines", json=spec, headers=H)).status_code == 409
-            assert (await c.post("/engines", json={**spec, "engine_id": "e2"},
-                                 headers=H)).status_code in (409, 422)
             for _ in range(100):
                 st = (await c.get("/engines/e1", headers=H)).json()
                 if st["state"] == "running":
                     break
                 await asyncio.sleep(0.1)
             assert st["state"] == "running"
+            # Only once e1 is running has its child bound the port; checking earlier races the bind.
+            assert (await c.post("/engines", json={**spec, "engine_id": "e2"},
+                                 headers=H)).status_code in (409, 422)
             assert (await c.get("/engines/zzz", headers=H)).status_code == 404
             r = await c.delete("/engines/e1", headers=H)
             assert r.json()["state"] == "exited"
