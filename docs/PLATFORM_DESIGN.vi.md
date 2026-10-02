@@ -279,6 +279,8 @@ gì trên cụm.
 
 **Trạng thái giai đoạn 2:** đã triển khai. Chạy thật trên GTX 1650: model 3B ở chế độ theo yêu cầu tự dỡ sau 20 s không có request, request tiếp theo khởi động lạnh và nhận trả lời sau 2.9 s; model 0.5B (min 1, max 2) có request xếp hàng thì lên 2 replica sau khoảng 9 s, 82 request chia 49/33 cho hai replica, hết tải 16 s thì về 1. Trạng thái autoscale nằm trong bộ nhớ: coordinator khởi động lại thì mọi model quay về mức tối thiểu đang chạy.
 
+**Trạng thái giai đoạn 3:** đã triển khai. Chạy thật trên GTX 1650 (budget 2500 MB): `/api/simulate` báo trước đúng việc sẽ gỡ `q05` (priority 20) để chạy `q3b` (priority 80), `/api/recommend` trả phương án `fits_now: false` kèm replica cần gỡ, và khi `q05` không cho giành chỗ thì báo `q3b` không đặt được. Giành chỗ thật: `q3b` chạy 23.5 s sau lệnh start, `q05` không giành lại được. Lần chạy đầu lộ ra một lỗi: replica bị gỡ chuyển sang draining nên model của nó launch lại ngay vào phần bộ nhớ đang giải phóng. Đã sửa bằng một khoảng giữ chỗ: trong lúc model giành chỗ chưa có replica (tối đa `drain_timeout_s` + 120 s), model ưu tiên thấp hơn không được launch.
+
 Mỗi giai đoạn được kiểm trên cụm thật, ít nhất 2 server và 2 model, trước khi sang giai đoạn sau.
 
 ## 9. Câu hỏi mở

@@ -12,6 +12,13 @@ ranked options normally and with `not_possible` when the estimated need exceeds 
 Autoscaling: the model "chat-demand" starts in state `idle` (unloaded; POST /start loads it), "chat-auto" is an
 autoscaled running model whose busy ratio oscillates; GET /api/models/{name}/scaling returns plausible data and a few
 scaled_up / cold_start / unloaded_idle events are seeded. PUT /api/models/{name} validates the scaling fields (422).
+Preemption: specs carry `preemptible` (default true; "chat-demand" is false). POST /api/recommend adds an option with
+fits_now false + requires_preemption when the request priority is 80 or more. POST /api/simulate is a pure dry run:
+- an add / change that cannot fit at all (huge ctx) -> `unplaced`;
+- priority above a running preemptible model's, or 3+ replicas -> `preempt` (+ `start`); priority 90 with 4+ replicas
+  also shows `stop` (an autoscaled model shrinks) and `unplaced` (not enough GPUs);
+- an edit that changes nothing, or only lowers replicas, -> empty / `stop`.
+A `preempted` warning event is seeded.
 """
 from __future__ import annotations
 
@@ -76,20 +83,21 @@ def reset() -> None:
         "hf_repo": "bartowski/Llama-3.1-8B-GGUF", "hf_file": "llama-8b.gguf", "bytes": 5_000_000_000,
         "downloaded": 500_000_000, "status": "downloading", "error": None, "created_at": T0, "_t": T0}
     MODELS["qwen3b"] = {"spec": {"name": "qwen3b", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096,
-        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu"}, "file": "qwen2.5-3b-q4.gguf", "state": "stopped", "error": None,
+        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "preemptible": True, "spread": "gpu"}, "file": "qwen2.5-3b-q4.gguf", "state": "stopped", "error": None,
         "replicas": [], "_t": 0.0}
     MODELS["chat-auto"] = {"spec": {"name": "chat-auto", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 8192, "parallel": 4,
-        "replicas": 2, "pin_devices": [], "priority": 70, "spread": "gpu", "min_replicas": 1, "max_replicas": 4,
+        "replicas": 2, "pin_devices": [], "priority": 70, "preemptible": True, "spread": "gpu", "min_replicas": 1, "max_replicas": 4,
         "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": None},
         "file": "qwen2.5-3b-q4.gguf", "state": "running", "error": None, "replicas": [], "_t": 0.0}
     _place(MODELS["chat-auto"], 2)
     MODELS["chat-demand"] = {"spec": {"name": "chat-demand", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096, "parallel": 2,
-        "replicas": 1, "pin_devices": [], "priority": 30, "spread": "gpu", "min_replicas": 0, "max_replicas": 2,
+        "replicas": 1, "pin_devices": [], "priority": 30, "preemptible": False, "spread": "gpu", "min_replicas": 0, "max_replicas": 2,
         "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": 600},
         "file": "qwen2.5-3b-q4.gguf", "state": "idle", "error": None, "replicas": [], "_t": 0.0}
     add_event("info", "unloaded_idle", "chat-demand unloaded after 10 min without requests", None, "chat-demand")
     add_event("info", "cold_start", "chat-demand was unloaded; a request loaded it (cold start)", None, "chat-demand")
     add_event("info", "scaled_up", "chat-auto scaled up to 2 replicas (busy 0.82 above target 0.70 for 30 s)", None, "chat-auto")
+    add_event("warning", "preempted", "chat-batch-1a2b3c stopped to make room for chat-auto (priority 20 < 70)", None, "chat-batch")
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
 
@@ -343,6 +351,7 @@ def put_model(name: str, body: dict) -> dict:
     m["file"] = file
     m["spec"].update(source=f"coordinator://{file}", ctx_size=int(body.get("ctx_size", 4096)), parallel=int(body.get("parallel", 1)),
                      pin_devices=list(body.get("pin_devices", [])), priority=_int_in(body.get("priority", 50), 0, 100, "priority"),
+                     preemptible=_bool(body.get("preemptible", True), "preemptible"),
                      spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
     m["spec"].update(_scaling_fields(body))
     return m["spec"]
@@ -379,6 +388,12 @@ def _int_in(v, lo: int, hi: int, field: str) -> int:
     if not lo <= n <= hi:
         raise HTTPException(422, f"{field} must be between {lo} and {hi}")
     return n
+
+
+def _bool(v, field: str) -> bool:
+    if not isinstance(v, bool):
+        raise HTTPException(422, f"{field} must be a boolean")
+    return v
 
 
 def _choice(v, allowed: tuple, field: str) -> str:
@@ -500,8 +515,92 @@ def recommend(body: dict) -> dict:
                          "assignments": [{"node_id": n, "device_id": g["device_id"], "layers": 17, "est_mb": half} for n, g in multi],
                          "est_decode_tps": tps, "est_total_mb": need,
                          "reasons": ["needs more than one GPU", "split layers evenly across the pair"]})
+    if _int_in(body.get("priority", 50), 0, 100, "priority") >= 80 and ranked:
+        victim = _victim(100)
+        if victim:
+            n, g = ranked[0]
+            opts.append({"score": 55.0, "tier": "single_gpu", "fits_now": False,
+                         "assignments": [{"node_id": n, "device_id": g["device_id"], "layers": 33, "est_mb": need}],
+                         "est_decode_tps": round((g["bandwidth_gbps"] or 100) * 1024 / max(need, 1) * 0.5, 1), "est_total_mb": need,
+                         "requires_preemption": [{"replica_id": victim[1]["replica_id"], "model": victim[0]["spec"]["name"],
+                                                  "priority": victim[0]["spec"]["priority"]}],
+                         "reasons": ["the fastest GPU is full; a lower-priority replica would have to stop"]})
     for i, o in enumerate(sorted(opts, key=lambda o: -o["score"]), 1):
         out["options"].append({"rank": i, **o})
+    return out
+
+
+def _victim(priority: int, skip: str | None = None):
+    """First replica of a running, preemptible model with a lower priority than `priority`."""
+    for m in MODELS.values():
+        sp = m["spec"]
+        if m["replicas"] and sp["name"] != skip and sp.get("preemptible", True) and sp["priority"] < priority:
+            return m, m["replicas"][0]
+    return None
+
+
+def _sim_start(model: str, n: int, ctx: int, parallel: int, size_mb: int) -> list[dict]:
+    gpus = sorted(((s["node_id"], g) for s in SERVERS.values() if s["alive"] for g in s["gpus"]
+                   if s["gpu_enabled"].get(g["device_id"], True)), key=lambda t: -(t[1]["bandwidth_gbps"] or 0))
+    out = []
+    for i in range(min(n, len(gpus))):
+        node, g = gpus[i]
+        out.append({"model": model, "tier": "single_gpu", "est_decode_tps": round((g["bandwidth_gbps"] or 100) * 1024 / max(size_mb, 1) * 0.5, 1),
+                    "assignments": [{"node_id": node, "device_id": g["device_id"], "layers": 33, "est_mb": size_mb}]})
+    return out
+
+
+@app.post("/api/simulate", dependencies=[api])
+def simulate(body: dict) -> dict:
+    """Pure dry run with canned rules (see the module docstring); changes nothing."""
+    out: dict = {"start": [], "stop": [], "preempt": [], "unplaced": []}
+    biggest_node = max((sum(g["usable_mb"] for g in s["gpus"]) for s in SERVERS.values() if s["alive"]), default=0)
+    items = [(c.get("model"), c, MODELS.get(c.get("model"))) for c in body.get("changes") or []]
+    items += [(a.get("name"), a, None) for a in body.get("add") or []]
+    if not items:
+        raise HTTPException(422, "changes or add required")
+    for name, req, cur in items:
+        if cur is None and "changes" in body and any(c is req for c in body["changes"]):
+            raise HTTPException(404, f"unknown model {name}")
+        file = req.get("file") or (cur or {}).get("file")
+        if file not in LIBRARY:
+            raise HTTPException(404, f"{file} is not in the library")
+        sp = (cur or {}).get("spec", {})
+        ctx = _int_in(req.get("ctx_size", sp.get("ctx_size", 4096)), 256, 10_000_000, "ctx_size")
+        parallel = _int_in(req.get("parallel", sp.get("parallel", 1)), 1, 64, "parallel")
+        prio = _int_in(req.get("priority", sp.get("priority", 50)), 0, 100, "priority")
+        want = int(req.get("replicas") or req.get("min_replicas") or sp.get("replicas") or 1)
+        running = len((cur or {}).get("replicas", []))
+        need = _need_mb(LIBRARY[file]["bytes"], ctx, parallel)
+        if need > biggest_node:
+            out["unplaced"].append({"model": name, "missing": max(1, want - running),
+                                    "why": f"needs about {need // 1024} GB on one server; the largest has {biggest_node // 1024} GB usable"})
+            continue
+        extra = want - running
+        if extra < 0 and req.get("replicas") is None:  # autoscaled models are not shrunk by a new minimum
+            continue
+        if extra < 0:
+            out["stop"] += [{"replica_id": r["replica_id"], "model": name, "reason": "replicas lowered"}
+                            for r in cur["replicas"][want:]]
+            continue
+        if cur is not None and extra == 0 and prio == sp.get("priority") and ctx == sp.get("ctx_size") and parallel == sp.get("parallel"):
+            continue
+        extra = max(extra, 1) if cur is None or running == 0 else extra
+        if extra <= 0:
+            continue
+        victim = _victim(prio, skip=name) if (prio > 50 or want >= 3) else None
+        if victim:
+            m, r = victim
+            out["preempt"].append({"replica_id": r["replica_id"], "model": m["spec"]["name"], "priority": m["spec"]["priority"], "for_model": name})
+            if prio >= 90 and want >= 4 and m["spec"].get("min_replicas") is not None and len(m["replicas"]) > 1:
+                out["stop"].append({"replica_id": m["replicas"][1]["replica_id"], "model": m["spec"]["name"],
+                                    "reason": "autoscaled model shrinks to its minimum to free GPUs"})
+        starts = _sim_start(name, extra, ctx, parallel, need)
+        out["start"] += starts
+        if len(starts) < extra:
+            out["unplaced"].append({"model": name, "missing": extra - len(starts), "why": "no more GPUs with room, even after preemption"})
+        elif prio >= 90 and want >= 4:
+            out["unplaced"].append({"model": name, "missing": 1, "why": "spread=gpu needs a different GPU per replica and only the remaining ones are protected"})
     return out
 
 

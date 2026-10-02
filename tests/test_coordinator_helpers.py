@@ -163,6 +163,9 @@ class FakeAutoscaler:
     def desired(self, spec) -> int:
         return self.want.get(spec.name, spec.replicas)
 
+    def peek(self, spec) -> int:
+        return self.desired(spec)
+
     def can_cold_start(self, model) -> bool:
         return self.cold
 
@@ -179,3 +182,22 @@ class FakeAutoscaler:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def make_ranker(est_mb=1000):
+    """Fake scheduler.rank, consistent with make_planner: every device with enough usable_mb is one
+    single-GPU candidate, in report order."""
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5):
+        out = []
+        for n in nodes:
+            for d in n.devices:
+                if d.usable_mb >= est_mb:
+                    asg = [DeviceAssignment(node_id=n.node_id, device_id=d.device_id, llama_device=d.device_id,
+                                            layers=2, est_mb=est_mb)]
+                    out.append(Placement(model=spec.name, replica_id="", tier="single_gpu", head_node=n.node_id,
+                                         head_port=0, assignments=asg, tensor_split=[1.0], est_total_mb=est_mb,
+                                         est_decode_tps=40.0))
+        return out[:limit]
+
+    return ranker

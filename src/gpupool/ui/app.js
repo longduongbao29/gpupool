@@ -38,7 +38,8 @@ var EV_KIND = {
   scaled_up: { cls: "green", icon: "up" },
   scaled_down: { cls: "blue", icon: "down" },
   unloaded_idle: { cls: "blue", icon: "moon" },
-  cold_start: { cls: "amber", icon: "bolt" }
+  cold_start: { cls: "amber", icon: "bolt" },
+  preempted: { cls: "amber", icon: "alert" }
 };
 
 // Scaling part of the deploy form, derived from a model spec (defaults match the server's).
@@ -94,7 +95,7 @@ function app() {
     // add model modal
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false },
     // deploy (new / edit) modal
-    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false }, scalingForm(null)),
+    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null)),
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
 
     // ================= lifecycle =================
@@ -580,12 +581,12 @@ function app() {
     openForm: function (m, file) {
       if (m) {
         this.form = Object.assign({ open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
-          priority: m.spec.priority == null ? 50 : m.spec.priority, spread: m.spec.spread || "gpu",
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false }, scalingForm(m.spec));
+          priority: m.spec.priority == null ? 50 : m.spec.priority, preemptible: m.spec.preemptible !== false, spread: m.spec.spread || "gpu",
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(m.spec));
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false }, scalingForm(null));
+        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null));
       }
     },
     togglePin: function (key, on) {
@@ -594,6 +595,7 @@ function app() {
       if (!on && i >= 0) this.form.pins.splice(i, 1);
       this.form.plan = null;
       this.form.rec = null;
+      this.form.sim = null;
     },
     // Scaling fields of the PUT body for the selected mode, or { error } when the inputs are invalid.
     scalingBody: function (f) {
@@ -633,7 +635,7 @@ function app() {
       try {
         await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), Object.assign({
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
-          priority: this.priorityOf(f), spread: f.spread || "gpu",
+          priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu",
           pin_devices: f.auto ? [] : f.pins
         }, sb.body));
         await this.refresh();
@@ -674,6 +676,36 @@ function app() {
     priorityOf: function (f) {
       var p = parseInt(f.priority, 10);
       return isNaN(p) ? 50 : Math.max(0, Math.min(100, p));
+    },
+
+    // ================= impact preview =================
+    // Dry run of the whole cluster with this form applied: one change (existing model) or one add (new model).
+    simulate: async function () {
+      var f = this.form;
+      if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return; }
+      var sb = this.scalingBody(f);
+      if (sb.error) { this.toast(sb.error, "error"); return; }
+      var item = {
+        ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+        priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins
+      };
+      if (f.mode === "fixed") item.replicas = parseInt(f.replicas, 10);
+      else { item.min_replicas = sb.body.min_replicas; item.max_replicas = sb.body.max_replicas; }
+      var body = {};
+      if (f.edit) body.changes = [Object.assign({ model: f.name.trim() }, item)];
+      else body.add = [Object.assign({ name: f.name.trim(), file: f.file }, item)];
+      f.simBusy = true;
+      f.sim = null;
+      try {
+        f.sim = await this.api("POST", "/api/simulate", body);
+      } catch (e) { this.fail(e); }
+      f.simBusy = false;
+    },
+    simEmpty: function (r) {
+      return !r || !["start", "stop", "preempt", "unplaced"].some(function (k) { return (r[k] || []).length; });
+    },
+    simDevices: function (s) {
+      return (s.assignments || []).map(function (a) { return a.node_id + "/" + a.device_id; }).join(", ");
     },
 
     // ================= recommendation =================

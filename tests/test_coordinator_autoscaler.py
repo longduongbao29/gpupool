@@ -419,3 +419,25 @@ def test_view_states(desired, ready, launching, state):
     r.a.desired(spec)
     r.a._state["m"].desired = desired
     assert r.a.view("m")["state"] == state
+
+
+def test_peek_matches_desired_without_touching_state():
+    rig = Rig()
+    spec = autoscaled(rig, min_replicas=2, max_replicas=4)
+    assert rig.a.peek(spec) == 2 and rig.a._state == {}  # no state yet: the floor, none created
+    rig.a._state_for(spec, rig.clock()).desired = 3
+    assert rig.a.peek(spec) == rig.a.desired(spec) == 3
+    # a hypothetical spec is clamped by ITS bounds, and the stored state is left alone
+    assert rig.a.peek(spec.model_copy(update={"max_replicas": 2})) == 2
+    assert rig.a.peek(spec.model_copy(update={"min_replicas": 4, "max_replicas": 4})) == 4
+    assert rig.a._state["m"].desired == 3
+    assert rig.a.peek(spec.model_copy(update={"replicas": 0})) == 0 and "m" in rig.a._state  # desired() would pop it
+
+
+def test_peek_unloaded_model_stays_zero_and_new_model_is_not_registered():
+    rig = Rig()
+    spec = autoscaled(rig, min_replicas=0, max_replicas=2, idle_unload_s=10)
+    rig.a._state_for(spec, rig.clock()).desired = 0
+    assert rig.a.peek(spec) == 0
+    fresh = ModelSpec(name="fresh", source="x.gguf", min_replicas=0)
+    assert rig.a.peek(fresh) == 1 and "fresh" not in rig.a._state  # floor is max(min, 1)

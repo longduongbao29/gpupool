@@ -504,11 +504,13 @@
         <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
       </div>
       <div class="row">
-        <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" style="width:100%"></label>
+        <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" @input="form.sim = null" style="width:100%"></label>
         <label class="field grow"><span>Spread replicas across</span>
           <select x-model="form.spread" @change="form.rec = null" style="width:100%">
             <option value="gpu">Different GPUs</option><option value="node">Different servers</option><option value="none">No preference</option></select></label>
       </div>
+      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.preemptible" @change="form.sim = null"><span></span></label>
+        <div><div>Can be preempted</div><div class="muted small">a higher-priority model may stop this model's replicas when GPUs are full</div></div></div>
       <h3 class="sec" style="margin-top:4px">Scaling</h3>
       <label class="field"><span>Mode</span>
         <select x-model="form.mode" style="width:100%">
@@ -556,6 +558,29 @@
       </div></template>
       <div class="result bad" x-show="form.plan && !form.plan.ok"><b>Does not fit.</b> <span x-text="form.plan && form.plan.msg"></span></div>
 
+      <!-- impact preview -->
+      <template x-if="form.sim">
+        <div class="rec">
+          <div class="result ok" x-show="simEmpty(form.sim)"><b>No change.</b> <span class="muted small">Applying these settings would not start, stop or preempt anything.</span></div>
+          <div class="result ok" x-show="(form.sim.start || []).length"><b>Will start</b>
+            <template x-for="(s, i) in (form.sim.start || [])" :key="'st' + i">
+              <div class="small"><span x-text="s.model"></span> on <span x-text="simDevices(s)"></span> &middot; <span x-text="String(s.tier).replace('_', ' ')"></span> &middot; <span x-text="tps(s.est_decode_tps)"></span></div>
+            </template></div>
+          <div class="result neutral" x-show="(form.sim.stop || []).length"><b>Will stop</b>
+            <template x-for="s in (form.sim.stop || [])" :key="'sp' + s.replica_id">
+              <div class="small"><span x-text="s.replica_id"></span> (model <span x-text="s.model"></span>)<span x-show="s.reason"> &mdash; <span x-text="s.reason"></span></span></div>
+            </template></div>
+          <div class="result warn" x-show="(form.sim.preempt || []).length"><b>Will be preempted</b>
+            <template x-for="p in (form.sim.preempt || [])" :key="'pr' + p.replica_id">
+              <div class="small"><span x-text="p.replica_id"></span> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>) to make room for <b x-text="p.for_model"></b></div>
+            </template></div>
+          <div class="result bad" x-show="(form.sim.unplaced || []).length"><b>Cannot be placed</b>
+            <template x-for="(u, i) in (form.sim.unplaced || [])" :key="'un' + i">
+              <div class="small"><span x-text="u.model"></span><span x-show="u.missing != null"> (<span x-text="u.missing"></span> missing)</span> &mdash; <span x-text="u.why"></span></div>
+            </template></div>
+        </div>
+      </template>
+
       <!-- recommendation -->
       <template x-if="form.rec">
         <div class="rec">
@@ -582,6 +607,9 @@
               <template x-for="a in (o.assignments || [])" :key="a.node_id + '/' + a.device_id">
                 <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
               </template>
+              <template x-for="p in (o.requires_preemption || [])" :key="p.replica_id">
+                <div class="warn small"><span x-html="icon('alert')"></span> Needs room: would stop <b x-text="p.replica_id"></b> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>)</div>
+              </template>
               <ul class="reasons" x-show="(o.reasons || []).length">
                 <template x-for="(r, i) in (o.reasons || [])" :key="i"><li x-text="r"></li></template>
               </ul>
@@ -592,6 +620,7 @@
     </div>
     <div class="modal-foot">
       <button class="btn" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement</button>
+      <button class="btn" @click="simulate()" :disabled="form.busy || form.simBusy || !form.file" title="Dry run over the whole cluster: what would start, stop or be preempted. Saves nothing"><span class="spin" x-show="form.simBusy"></span> Preview impact</button>
       <button class="btn" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
       <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
       <button class="btn green" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>

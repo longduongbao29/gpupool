@@ -121,11 +121,14 @@ class Autoscaler:
             st = self._state[spec.name] = _State(desired=self._floor(spec), last_request=now)
         return st
 
-    def _clamp(self, spec: ModelSpec, st: _State) -> None:
+    def _clamped(self, spec: ModelSpec, desired: int) -> int:
         lo, hi = bounds(spec)
-        if st.desired == 0 and lo == 0:
-            return  # unloaded by the idle rule; stays until a request wakes it
-        st.desired = min(max(st.desired, self._floor(spec)), hi)
+        if desired == 0 and lo == 0:
+            return 0  # unloaded by the idle rule; stays until a request wakes it
+        return min(max(desired, self._floor(spec)), hi)
+
+    def _clamp(self, spec: ModelSpec, st: _State) -> None:
+        st.desired = self._clamped(spec, st.desired)
 
     @staticmethod
     def _decide(st: _State, now: float, action: str, reason: str) -> None:
@@ -158,6 +161,14 @@ class Autoscaler:
         st = self._state_for(spec, self.clock())
         self._clamp(spec, st)
         return st.desired
+
+    def peek(self, spec: ModelSpec) -> int:
+        """What desired() would return, without creating or changing any state. For the simulator,
+        which asks about hypothetical specs: a model with no state yet starts at its floor."""
+        if spec.replicas == 0:
+            return 0
+        st = self._state.get(spec.name)
+        return self._clamped(spec, st.desired if st is not None else self._floor(spec))
 
     def can_cold_start(self, model: str) -> bool:
         """The model is started and currently unloaded/zero, so a request may load it."""

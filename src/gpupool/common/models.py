@@ -123,6 +123,8 @@ class ModelSpec(BaseModel):
     # Only with min_replicas == 0: unload after this many seconds without a request; the next
     # request loads it again (cold start).
     idle_unload_s: float | None = Field(default=None, gt=0)
+    # False: a higher-priority model may never stop this model's replicas to make room.
+    preemptible: bool = True
 
 
 class AutoscalePolicy(BaseModel):

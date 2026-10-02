@@ -211,3 +211,57 @@ def test_mock_model_flow(client):
     r = client.post("/api/models/m1/plan", headers=HEAD)
     assert r.status_code == 409 and isinstance(r.json()["detail"], str)
     assert client.delete("/api/models/m1", headers=HEAD).status_code == 200
+
+
+def test_mock_preemptible_roundtrip_and_event(client):
+    st = client.get("/api/state", headers=HEAD).json()
+    assert all(isinstance(m["spec"]["preemptible"], bool) for m in st["models"])
+    assert "preempted" in {e["kind"] for e in st["events"]}
+    assert next(e for e in st["events"] if e["kind"] == "preempted")["level"] == "warning"
+    body = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 2048, "parallel": 1, "pin_devices": []}
+    assert client.put("/api/models/p1", json={**body, "preemptible": False}, headers=HEAD).json()["preemptible"] is False
+    assert client.put("/api/models/p1", json=body, headers=HEAD).json()["preemptible"] is True
+    assert client.put("/api/models/p1", json={**body, "preemptible": "no"}, headers=HEAD).status_code == 422
+
+
+def test_mock_recommend_requires_preemption(client):
+    req = {"file": "llama-8b.gguf", "ctx_size": 4096, "parallel": 1, "priority": 90, "spread": "gpu", "pin_devices": [], "limit": 3}
+    opts = client.post("/api/recommend", json=req, headers=HEAD).json()["options"]
+    needy = [o for o in opts if not o["fits_now"]]
+    assert needy and {"replica_id", "model", "priority"} <= needy[0]["requires_preemption"][0].keys()
+    low = client.post("/api/recommend", json={**req, "priority": 10}, headers=HEAD).json()["options"]
+    assert all(o["fits_now"] and not o.get("requires_preemption") for o in low)
+
+
+def test_mock_simulate_contract_and_purity(client):
+    def sim(body):
+        return client.post("/api/simulate", json=body, headers=HEAD)
+
+    before = client.get("/api/state", headers=HEAD).json()["models"]
+    keys = {"start", "stop", "preempt", "unplaced"}
+    r = sim({"add": [{"name": "big", "file": "qwen2.5-3b-q4.gguf", "priority": 90, "replicas": 4}]}).json()
+    assert keys <= r.keys() and r["start"] and r["preempt"] and r["stop"] and r["unplaced"]
+    assert {"model", "tier", "assignments", "est_decode_tps"} <= r["start"][0].keys()
+    assert {"node_id", "device_id", "layers", "est_mb"} <= r["start"][0]["assignments"][0].keys()
+    assert {"replica_id", "model", "priority", "for_model"} <= r["preempt"][0].keys()
+    assert {"replica_id", "model", "reason"} <= r["stop"][0].keys() and {"model", "missing", "why"} <= r["unplaced"][0].keys()
+    r = sim({"add": [{"name": "huge", "file": "llama-8b.gguf", "ctx_size": 200_000}]}).json()
+    assert r["unplaced"] and not r["start"]
+    r = sim({"changes": [{"model": "chat-auto", "priority": 70}]}).json()
+    assert not any(r[k] for k in keys)
+    assert sim({"changes": [{"model": "nope", "priority": 70}]}).status_code == 404
+    assert sim({}).status_code == 422
+    assert client.get("/api/state", headers=HEAD).json()["models"] == before  # pure: nothing changed
+    assert "huge" not in {m["spec"]["name"] for m in client.get("/api/state", headers=HEAD).json()["models"]}
+
+
+def test_ui_has_preemption_and_preview():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    for needle in ("/api/simulate", "preemptible", "preempted", "changes", "add"):
+        assert needle in js, needle
+    for needle in ("Can be preempted", "a higher-priority model may stop", "Preview impact", "Will start", "Will stop",
+                   "Will be preempted", "Cannot be placed", "No change", "Needs room: would stop", "requires_preemption"):
+        assert needle in html, needle
+    assert ".warn" in css

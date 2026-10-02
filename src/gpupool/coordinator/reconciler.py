@@ -6,7 +6,8 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,7 +29,9 @@ from gpupool.common.models import (
     ReplicaRecord,
 )
 from gpupool.common.net import internal_client
+from gpupool.coordinator import preemption
 from gpupool.coordinator.agent_client import AgentClient
+from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store, gpu_key
 from gpupool.scheduler.placement import NoFit, plan, rank
@@ -80,6 +83,10 @@ class Reconciler:
     READY_REPORT_GRACE_S = 5.0
     STABLE_S = 300.0  # a replica ready this long counts as healthy: crashes before it feed the backoff
     KEEP_TERMINAL_PER_MODEL = 10  # stopped/failed history rows kept per model
+    # A model that evicted others may not do it again for this long, so two models whose needs
+    # overlap cannot keep stopping each other's replicas.
+    PREEMPT_COOLDOWN_S = 600.0
+    PREEMPT_CLAIM_GRACE_S = 120.0  # after the drain timeout, time for the preemptor to be placed
 
     def __init__(
         self,
@@ -110,6 +117,7 @@ class Reconciler:
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
         self._realloc: dict[str, _Realloc] = {}
+        self._preempted: dict[str, tuple[float, set[str]]] = {}  # model -> (when, victim replica ids)
         self._wake = asyncio.Event()
 
     # ------------------------------------------------------------------ helpers
@@ -256,6 +264,221 @@ class Reconciler:
     @staticmethod
     def _new_replica_id(model: str) -> str:
         return f"{re.sub(r'[^A-Za-z0-9_.-]', '-', model)}-{uuid.uuid4().hex[:6]}"
+
+    # ------------------------------------------------------------------ preemption
+    @staticmethod
+    def _floor(spec: ModelSpec) -> int:
+        """The replica count below which a model counts as under its running minimum."""
+        return max(bounds(spec)[0], 1)
+
+    def _wanted(self, spec: ModelSpec) -> int:
+        return self.autoscaler.desired(spec) if self.autoscaler is not None else spec.replicas
+
+    def _constrain(self, spec: ModelSpec, nodes: Sequence[NodeReport]) -> list[NodeReport]:
+        """Copies of `nodes` with GPUs switched off in the pool and GPUs the model is not pinned
+        to at usable 0. preemption.free_replicas hands memory back to every device, so this is
+        re-applied after freeing: a preemption must never place a model where a normal launch
+        could not go."""
+        flags = self.store.gpu_flags()
+        reps = [n.model_copy(deep=True) for n in nodes]
+        for rep in reps:
+            for d in rep.devices:
+                if not flags.get((rep.node_id, gpu_key(d)), True):
+                    d.usable_mb = 0
+        self._apply_pins(spec, reps)
+        return reps
+
+    def _disabled(self, nodes: Sequence[NodeReport]) -> frozenset[tuple[str, str]]:
+        """(node_id, device_id) of GPUs switched off in the pool, for preemption.free_replicas."""
+        flags = self.store.gpu_flags()
+        return frozenset((n.node_id, d.device_id) for n in nodes for d in n.devices
+                         if not flags.get((n.node_id, gpu_key(d)), True))
+
+    def _ranker_for(self, spec: ModelSpec) -> Callable:
+        """The ranker, with `spec`'s constraints re-applied to whatever reports it is handed."""
+        base = self._ranker()
+
+        def ranked(meta, spec_, nodes, occupants=(), limit=5):
+            return base(meta, spec_, self._constrain(spec, nodes), occupants=occupants, limit=limit)
+
+        return ranked
+
+    def _candidates(self, specs: dict[str, ModelSpec], reps: Sequence[ReplicaRecord],
+                    exclude: str | None) -> list[preemption.Candidate]:
+        """Active replicas of other models, annotated for preemption.find_victims."""
+        count = Counter(r.model for r in reps)
+        out = []
+        for r in reps:
+            s = specs.get(r.model)
+            if s is None or r.model == exclude:
+                continue
+            busy = min(1.0, self.outstanding(r.replica_id) / max(1, s.parallel))
+            out.append(preemption.Candidate(replica=r, priority=s.priority, preemptible=s.preemptible,
+                                            above_min=count[r.model] > self._floor(s), busy=busy))
+        return out
+
+    async def _find_victims(self, spec: ModelSpec, exclude: str | None) -> list[ReplicaRecord] | None:
+        specs = {s.name: s for s in self.store.list_models()}
+        cands = self._candidates(specs, self.store.list_replicas(states=set(ACTIVE_STATES)), exclude)
+        if not cands:
+            return None
+        meta = await self.meta_for(spec)
+        reports = self.available_reports()
+        self._apply_pins(spec, reports)
+        return preemption.find_victims(meta, spec, reports, self.occupants(), cands, self._ranker_for(spec),
+                                        disabled=self._disabled(reports))
+
+    async def rank_with_preemption(self, spec: ModelSpec, limit: int, exclude: str | None = None,
+                                   ) -> tuple[list[ReplicaRecord], list[Placement]] | None:
+        """(victims, placements once they are gone), or None when evicting lower-priority replicas
+        would not help. No side effects. `exclude`: a model whose replicas are never victims
+        (the one being placed)."""
+        victims = await self._find_victims(spec, exclude)
+        if not victims:
+            return None
+        reports = self.available_reports()
+        reports = preemption.free_replicas(reports, victims, self._disabled(reports))
+        occ = preemption.without_occupants(self.occupants(), {v.replica_id for v in victims})
+        ranked = self._ranker_for(spec)(await self.meta_for(spec), spec, reports, occupants=occ, limit=limit)
+        return (victims, ranked) if ranked else None
+
+    def _claim_priority(self, specs: dict[str, ModelSpec], wanted: dict[str, int], now: float) -> int:
+        """Priority of the highest model still waiting for room it preempted, else -1.
+
+        While victims drain, a draining replica is no longer active, so its own model would see a
+        deficit and relaunch into the memory being freed (seen on real hardware: the evicted model
+        came straight back and the preemptor stayed stuck behind the cooldown). Lower priorities
+        therefore do not launch until the preemptor has its replica or the claim expires."""
+        hold = self.cfg.drain_timeout_s + self.PREEMPT_CLAIM_GRACE_S
+        best = -1
+        for name, (when, _ids) in self._preempted.items():
+            spec = specs.get(name)
+            if spec is None or now - when > hold:
+                continue
+            active = len(self.store.list_replicas(model=name, states=set(ACTIVE_STATES)))
+            if active < min(wanted.get(name, 0), self._floor(spec)):
+                best = max(best, spec.priority)
+        return best
+
+    async def _preempt_for(self, spec: ModelSpec, now: float, wanted: int) -> None:
+        """Stop lower-priority replicas so `spec` can place one, when it has no room.
+
+        Only a model below its running minimum may evict, so autoscale extras never do. The
+        model is not placed here: draining replicas still hold their memory, so a later tick
+        places it once they are stopped. Pins naming devices that do not exist are not special-
+        cased: they simply find no victims."""
+        active = len(self.store.list_replicas(model=spec.name, states=set(ACTIVE_STATES)))
+        if active >= min(wanted, self._floor(spec)):
+            return
+        prev = self._preempted.get(spec.name)
+        if prev is not None:
+            when, ids = prev
+            if now - when < self.PREEMPT_COOLDOWN_S:
+                return
+            if any((r := self.store.get_replica(i)) is not None and r.state in LIVE_STATES for i in ids):
+                return  # earlier victims still drain: wait for their memory instead of evicting more
+        try:
+            victims = await self._find_victims(spec, exclude=spec.name)
+        except Exception:
+            log.exception("looking for preemption victims for %s failed", spec.name)
+            return
+        if not victims:
+            return
+        specs = {s.name: s for s in self.store.list_models()}
+        for v in victims:
+            vs = specs.get(v.model)
+            await self.drain(v.replica_id)
+            self._emit("warning", "preempted",
+                       f"Stopped replica {v.replica_id} of {v.model} (priority {vs.priority if vs else 0}) "
+                       f"to make room for {spec.name} (priority {spec.priority})",
+                       node_id=v.placement.head_node, model=v.model)
+        self._preempted[spec.name] = (now, {v.replica_id for v in victims})
+
+    # ------------------------------------------------------------------ simulation
+    async def simulate(self, specs: list[ModelSpec]) -> dict:
+        """What the next ticks would do if the models were `specs`. No side effects.
+
+        Same order and rules as _enforce_counts/_preempt_for, except: the preemption cooldown is
+        ignored, memory freed by a stop is available to every model (the real cluster frees it a
+        tick later), and busyness of replicas the simulation starts is 0."""
+        stored = {s.name for s in self.store.list_models()}
+        by_name = {s.name: s for s in specs}
+        live = [r for r in self.store.list_replicas(states=set(ACTIVE_STATES)) if r.model in by_name]
+        reports, occ = self.available_reports(), self.occupants()
+        gone: set[str] = set()
+        out: dict = {"start": [], "stop": [], "preempt": [], "unplaced": []}
+
+        def wanted_of(s: ModelSpec) -> int:
+            if s.name in stored:
+                return s.replicas if self.autoscaler is None else self.autoscaler.peek(s)
+            return self._floor(s) if s.replicas > 0 else 0  # a model that does not exist yet starts at its floor
+
+        def active_of(name: str) -> list[ReplicaRecord]:
+            return [r for r in live if r.model == name and r.replica_id not in gone]
+
+        wanted = {n: wanted_of(s) for n, s in by_name.items()}
+        order = sorted(specs, key=lambda s: (-s.priority, bool(active_of(s.name)), s.name))
+
+        def release(recs: list[ReplicaRecord]) -> None:
+            nonlocal reports, occ
+            gone.update(r.replica_id for r in recs)
+            reports = preemption.free_replicas(reports, recs, self._disabled(reports))
+            occ = preemption.without_occupants(occ, {r.replica_id for r in recs})
+
+        # Stops first: their memory is what the deficits below can use.
+        for s in order:
+            act = sorted(active_of(s.name), key=lambda r: r.created_at, reverse=True)
+            for r in act[: max(0, len(act) - wanted[s.name])]:
+                out["stop"].append({"replica_id": r.replica_id, "model": s.name,
+                                    "reason": f"{len(act)} running, {wanted[s.name]} wanted"})
+                release([r])
+
+        for s in order:
+            missing = wanted[s.name] - len(active_of(s.name))
+            started = 0
+            try:
+                meta = await self.meta_for(s)
+            except Exception as e:
+                if missing > 0:
+                    out["unplaced"].append({"model": s.name, "missing": missing,
+                                            "why": f"{type(e).__name__}: {e}"})
+                continue
+            ranker = self._ranker_for(s)
+            for _ in range(max(0, missing)):
+                ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                if not ranked and len(active_of(s.name)) + started < min(wanted[s.name], self._floor(s)):
+                    cands = self._candidates(by_name, [r for r in live if r.replica_id not in gone], s.name)
+                    victims = (preemption.find_victims(meta, s, reports, occ, cands, ranker,
+                                                         disabled=self._disabled(reports))
+                               if cands else None)
+                    if victims:
+                        for v in victims:
+                            out["preempt"].append({"replica_id": v.replica_id, "model": v.model,
+                                                   "priority": by_name[v.model].priority, "for_model": s.name})
+                        release(victims)
+                        ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                if not ranked:
+                    out["unplaced"].append({"model": s.name, "missing": missing - started,
+                                            "why": self._why_unplaced(meta, s, reports, occ)})
+                    break
+                p = ranked[0]
+                out["start"].append({"model": s.name, "tier": p.tier, "est_decode_tps": p.est_decode_tps,
+                                     "assignments": [{"node_id": a.node_id, "device_id": a.device_id,
+                                                      "layers": a.layers, "est_mb": a.est_mb}
+                                                     for a in p.assignments]})
+                reports = preemption.apply_placement(reports, p)
+                occ = occ + preemption.placement_occupants(p)
+                started += 1
+        return out
+
+    def _why_unplaced(self, meta: ModelMeta, spec: ModelSpec, reports: list[NodeReport],
+                      occ: list[Occupant]) -> str:
+        """The planner's own NoFit message for the simulated cluster state."""
+        try:
+            self._planner()(meta, spec, self._constrain(spec, reports), "sim", lambda _n: 0, occupants=occ)
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+        return "no placement found"
 
     # ------------------------------------------------------------------ server removal
     async def remove_node(self, node_id: str) -> None:
@@ -494,8 +717,7 @@ class Reconciler:
             if rec.model not in specs:
                 await self.drain(rec.replica_id)
         # Without an autoscaler the count is the spec's fixed `replicas`, as before.
-        wanted = {n: self.autoscaler.desired(s) if self.autoscaler is not None else s.replicas
-                  for n, s in specs.items()}
+        wanted = {n: self._wanted(s) for n, s in specs.items()}
         for m in [m for m in self._realloc if m not in specs or wanted[m] == 0]:
             self._realloc.pop(m)  # stopped or unloaded on purpose: nothing left to re-allocate
 
@@ -506,13 +728,17 @@ class Reconciler:
         # before any gets a second, then name order keeps ticks deterministic.
         for spec in sorted(specs.values(), key=lambda s: (-s.priority, has_active(s.name), s.name)):
             active = self.store.list_replicas(model=spec.name, states=set(ACTIVE_STATES))
+            # Re-read per model: a preemption made earlier in this same tick must already hold.
+            if (len(active) < wanted[spec.name]
+                    and spec.priority < self._claim_priority(specs, wanted, now)):
+                continue  # memory being freed by a preemption belongs to the higher-priority model
             moving = [r for r in active if r.state == "ready" and self._low_free(r, nodes)]
             moving_ids = {r.replica_id for r in moving}
             normal = [r for r in active if r.replica_id not in moving_ids]
             need = wanted[spec.name]
 
             if len(normal) < need:
-                await self._maybe_launch(spec, now)
+                await self._maybe_launch(spec, now, need)
             elif len(normal) > need:
                 for r in sorted(normal, key=lambda r: r.created_at, reverse=True)[: len(normal) - need]:
                     await self.drain(r.replica_id)
@@ -521,7 +747,7 @@ class Reconciler:
                     log.info("replica %s: device low on free memory, replacement ready; draining", r.replica_id)
                     await self.drain(r.replica_id)
 
-    async def _maybe_launch(self, spec: ModelSpec, now: float) -> None:
+    async def _maybe_launch(self, spec: ModelSpec, now: float, wanted: int | None = None) -> None:
         fails, not_before = self._backoff.get(spec.name, (0, 0.0))
         if now < not_before:
             return
@@ -539,6 +765,8 @@ class Reconciler:
                     self._emit("error", "launch_failed", f"Cannot plan {spec.name}: {msg}", model=spec.name)
                 (log.warning if isinstance(e, NoFit) else log.error)(
                     "cannot place %s: %s", spec.name, msg)
+            if isinstance(e, NoFit):
+                await self._preempt_for(spec, now, self._wanted(spec) if wanted is None else wanted)
             return
         self._nofit.pop(spec.name, None)
         rec = ReplicaRecord(replica_id=placement.replica_id, model=spec.name, placement=placement,

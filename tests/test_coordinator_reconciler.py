@@ -2,11 +2,13 @@ import httpx
 import pytest
 import respx
 
-from gpupool.common.models import EngineStatus
+from gpupool.common.models import EngineStatus, ModelSpec
+from gpupool.coordinator import preemption
 from gpupool.coordinator.reconciler import _Realloc
 from gpupool.coordinator.store import ServerRecord
 from tests.test_coordinator_helpers import (
-    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_reconciler, node, put_replica, settle,
+    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_ranker, make_reconciler, node,
+    put_replica, settle,
 )
 
 HEALTH = r"http://10\.0\.0\.\d+:\d+/health"
@@ -765,4 +767,260 @@ async def test_no_autoscaler_keeps_fixed_replicas(mock_health):
     await rec.tick()
     await settle(rec)
     assert len(store.list_replicas()) == 1
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- priority preemption
+def _rig(usable_a=500, outstanding=None):
+    """Node a is full: a ready replica of 'lo' holds 1000 MB and the node reports little usable."""
+    rec, store, clock = make_reconciler(outstanding=outstanding)
+    rec.ranker = make_ranker()
+    beat(store, clock, node("a", devices=[dev(usable=usable_a)]))
+    store.put_model(SPEC.model_copy(update={"name": "lo", "priority": 10}))
+    put_replica(store, "lo-1", model="lo", now=clock())
+    return rec, store, clock
+
+
+def _hi(**kw):
+    return SPEC.model_copy(update={"name": "hi", "priority": 80, **kw})
+
+
+def _preempted_events(store):
+    return [e for e in store.list_events() if e.kind == "preempted"]
+
+
+async def test_preempts_lower_priority_below_minimum_then_places_when_memory_is_free(mock_health):
+    rec, store, clock = _rig()
+    store.put_model(_hi())
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "draining"
+    assert store.list_replicas(model="hi") == []  # waits: the victim still holds its memory
+    ev = _preempted_events(store)
+    assert len(ev) == 1 and ev[0].level == "warning" and ev[0].model == "lo" and ev[0].node_id == "a"
+    assert ev[0].message == "Stopped replica lo-1 of lo (priority 10) to make room for hi (priority 80)"
+    # lo is lower priority: it cannot evict hi back and is not relaunched over hi's claim
+    assert store.list_replicas(model="lo", states={"launching", "pending"}) == []
+    await rec.tick()  # drain finishes (nothing in flight)
+    beat(store, clock, node("a", devices=[dev(usable=1500)]))  # the node reports the memory free again
+    await rec.tick()
+    await settle(rec)
+    assert store.get_replica("lo-1").state == "stopped"
+    assert [r.state for r in store.list_replicas(model="hi")] == ["ready"]
+    await rec.shutdown()
+
+
+def _claim_rig():
+    """lo (needs 500) runs on a; hi (needs 1500) does not fit until lo's 1000 MB come back."""
+    need = {"lo": 500, "hi": 1500}
+    rec, store, clock = make_reconciler()
+    rec.planner = lambda meta, spec, nodes, rid, pa, **kw: make_planner(need[spec.name])(meta, spec, nodes, rid, pa, **kw)
+    rec.ranker = lambda meta, spec, nodes, **kw: make_ranker(need[spec.name])(meta, spec, nodes, **kw)
+    lo_engine = EngineStatus(engine_id="lo-1-head", kind="server", state="running", port=9000)
+
+    def report(usable):  # the agent's view: lo-1 until stopped, plus engines the fake client started
+        engines = [st for (_u, _e), st in rec.client.engines.items()]
+        if store.get_replica("lo-1").state in ("ready", "draining"):
+            engines.append(lo_engine)
+        clock.t += 1
+        beat(store, clock, node("a", devices=[dev(usable=usable)], engines=engines))
+
+    store.put_model(SPEC.model_copy(update={"name": "lo", "priority": 10}))
+    beat(store, clock, node("a", devices=[dev(usable=1700)], engines=[lo_engine]))
+    put_replica(store, "lo-1", model="lo", now=clock())
+    clock.t += rec.READY_REPORT_GRACE_S + 1
+    report(700)  # lo-1 loaded: 700 left, room for another lo (500) but not for hi (1500)
+    return rec, store, clock, report
+
+
+async def test_evicted_model_does_not_relaunch_into_the_preemptors_room(mock_health):
+    # Real-hardware repro: the node still showed room for the small evicted model, which relaunched
+    # in the same tick while its old replica drained, and the preemptor never got the memory.
+    rec, store, clock, report = _claim_rig()
+    store.put_model(_hi())
+    await rec.tick()
+    await settle(rec)
+    assert store.get_replica("lo-1").state == "draining"
+    assert store.list_replicas(model="lo", states={"pending", "launching", "ready"}) == []
+    report(700)
+    await rec.tick()  # drain completes; lo still must not take the room
+    await settle(rec)
+    assert store.get_replica("lo-1").state == "stopped"
+    assert store.list_replicas(model="lo", states={"pending", "launching", "ready"}) == []
+    report(1700)  # lo-1's memory is free now
+    await rec.tick()
+    await settle(rec)
+    assert [r.state for r in store.list_replicas(model="hi")] == ["ready"]
+    clock.t += rec.READY_REPORT_GRACE_S
+    report(200)  # hi loaded: no room left for lo
+    await rec.tick()
+    await settle(rec)
+    assert [r.state for r in store.list_replicas(model="hi")] == ["ready"]
+    assert store.list_replicas(model="lo", states={"pending", "launching", "ready"}) == []
+    await rec.shutdown()
+
+
+async def test_preemption_claim_expires(mock_health):
+    rec, store, clock, report = _claim_rig()
+    store.put_model(_hi())
+    await rec.tick()
+    report(700)
+    await rec.tick()
+    # the memory never shows up free (e.g. the victim's process hangs on): once the claim expires
+    # lower priorities may use what is there again
+    clock.t += rec.cfg.drain_timeout_s + rec.PREEMPT_CLAIM_GRACE_S
+    report(700)
+    await rec.tick()
+    await settle(rec)
+    assert len(store.list_replicas(model="lo", states={"ready"})) == 1
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("victim", [
+    {"priority": 80},  # equal priority never evicts
+    {"priority": 90},  # higher priority is never a victim
+    {"priority": 10, "preemptible": False},
+])
+async def test_no_preemption_for_equal_higher_or_non_preemptible(victim):
+    rec, store, clock = _rig()
+    store.put_model(store.get_model("lo").model_copy(update=victim))
+    store.put_model(_hi())
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "ready"
+    assert not _preempted_events(store)
+    await rec.shutdown()
+
+
+async def test_autoscale_extra_replica_never_preempts():
+    rec, store, clock = _rig()
+    rec.autoscaler = FakeAutoscaler({"hi": 2})
+    beat(store, clock, node("a", devices=[dev(usable=500)]), node("b", devices=[dev(usable=500)]))
+    store.put_model(_hi(min_replicas=1, max_replicas=3))
+    put_replica(store, "hi-1", model="hi", head="b", now=clock())  # hi already meets its minimum
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "ready"
+    assert not _preempted_events(store)
+    await rec.shutdown()
+
+
+async def test_cold_start_below_floor_may_preempt():
+    rec, store, clock = _rig()
+    rec.autoscaler = FakeAutoscaler({"hi": 1})  # a request woke the unloaded model: desired 1, active 0
+    store.put_model(_hi(min_replicas=0, max_replicas=2))
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "draining"
+    await rec.shutdown()
+
+
+async def test_preempt_cooldown_and_pending_victims():
+    inflight = {"old-victim": 1}  # its drain is held open by a request in flight
+    rec, store, clock = _rig(outstanding=lambda rid: inflight.get(rid, 0))
+    store.put_model(_hi())
+    rec._preempted["hi"] = (clock(), set())  # evicted a moment ago
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "ready"
+    clock.t += rec.PREEMPT_COOLDOWN_S + 1
+    rec.cfg.heartbeat_timeout_s = 10_000  # the node report is old by now; a fresh one would show lo-1 gone
+    rec._preempted["hi"] = (clock() - 1000, {"old-victim"})
+    put_replica(store, "old-victim", model="other", state="draining", head="a", head_port=9100, now=clock())
+    await rec.tick()  # cooldown over, but an earlier victim still drains: wait for it
+    assert store.get_replica("lo-1").state == "ready"
+    inflight.clear()
+    await rec.tick()  # old-victim stops at the start of this tick, then hi may evict
+    assert store.get_replica("lo-1").state == "draining"
+    assert rec._preempted["hi"] == (clock(), {"lo-1"})
+    await rec.shutdown()
+
+
+async def test_disabled_gpu_is_not_made_usable_by_preemption():
+    rec, store, clock = _rig()
+    store.set_gpu_enabled("a", "CUDA0", False)
+    store.put_model(_hi())
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "ready"  # freeing a disabled GPU would not let hi use it
+    await rec.shutdown()
+
+
+async def test_preemption_failure_does_not_break_the_tick(monkeypatch):
+    rec, store, clock = _rig()
+    store.put_model(_hi())
+
+    def boom(*a, **k):
+        raise RuntimeError("bad victims")
+
+    monkeypatch.setattr(preemption, "find_victims", boom)
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "ready"
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- simulate
+def _snapshot(store):
+    return ([(r.replica_id, r.state) for r in store.list_replicas()],
+            [m.model_dump() for m in store.list_models()])
+
+
+async def test_simulate_start_shapes_and_purity():
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    rec.ranker = make_ranker()
+    beat(store, clock, node("a", devices=[dev(usable=2500)]))
+    store.put_model(SPEC)
+    before = _snapshot(store)
+    out = await rec.simulate([SPEC.model_copy(update={"replicas": 3})])
+    assert [s["model"] for s in out["start"]] == ["m", "m"]  # 2500 MB: two fit, the third does not
+    assert out["start"][0] == {"model": "m", "tier": "single_gpu", "est_decode_tps": 40.0,
+                               "assignments": [{"node_id": "a", "device_id": "CUDA0", "layers": 2, "est_mb": 1000}]}
+    assert out["stop"] == [] and out["preempt"] == []
+    assert out["unplaced"] == [{"model": "m", "missing": 1, "why": "NoFit: nothing fits"}]
+    assert _snapshot(store) == before and client.calls == [] and rec._preempted == {}
+
+
+async def test_simulate_stops_newest_and_uses_autoscaler_peek():
+    rec, store, clock = make_reconciler()
+    rec.ranker = make_ranker()
+    rec.autoscaler = fake = FakeAutoscaler({"m": 1})
+    beat(store, clock, node("a"))
+    store.put_model(SPEC.model_copy(update={"replicas": 2}))
+    put_replica(store, "m-1", now=clock())
+    put_replica(store, "m-2", head_port=9001, now=clock() + 5)
+    out = await rec.simulate([SPEC.model_copy(update={"replicas": 2})])
+    assert out["stop"] == [{"replica_id": "m-2", "model": "m", "reason": "2 running, 1 wanted"}]
+    assert out["start"] == [] and out["unplaced"] == []
+    fake.want["m"] = 0
+    out = await rec.simulate([SPEC.model_copy(update={"replicas": 2})])
+    assert [s["replica_id"] for s in out["stop"]] == ["m-2", "m-1"]
+    assert store.get_replica("m-2").state == "ready"
+
+
+async def test_simulate_preempts_for_higher_priority():
+    rec, store, clock = _rig()
+    hi = _hi()
+    store.put_model(hi)
+    before = _snapshot(store)
+    out = await rec.simulate([hi, store.get_model("lo")])
+    assert out["preempt"] == [{"replica_id": "lo-1", "model": "lo", "priority": 10, "for_model": "hi"}]
+    assert [s["model"] for s in out["start"]] == ["hi"]
+    # lo lost its replica and cannot evict hi back: unplaced, not started
+    assert [u["model"] for u in out["unplaced"]] == ["lo"]
+    assert _snapshot(store) == before and not _preempted_events(store)
+    # equal priority: nothing to evict, hi is unplaced
+    out = await rec.simulate([hi.model_copy(update={"priority": 10}), store.get_model("lo")])
+    assert out["preempt"] == [] and [u["model"] for u in out["unplaced"]] == ["hi"]
+    await rec.shutdown()
+
+
+async def test_simulate_autoscale_extra_does_not_preempt_and_new_model_starts_at_floor():
+    rec, store, clock = _rig()
+    rec.autoscaler = FakeAutoscaler({"hi": 2})
+    beat(store, clock, node("a", devices=[dev(usable=500)]), node("b", devices=[dev(usable=500)]))
+    hi = _hi(min_replicas=1, max_replicas=3)
+    store.put_model(hi)
+    put_replica(store, "hi-1", model="hi", head="b", now=clock())
+    out = await rec.simulate([hi, store.get_model("lo")])
+    assert out["preempt"] == [] and out["unplaced"] == [{"model": "hi", "missing": 1, "why": "NoFit: nothing fits"}]
+    # a model that does not exist yet is wanted at max(min_replicas, 1)
+    added = ModelSpec(name="new", source="coordinator://x.gguf", min_replicas=2, max_replicas=4)
+    beat(store, clock, node("c", devices=[dev(usable=5000)]))
+    out = await rec.simulate([hi, store.get_model("lo"), added])
+    assert [s["model"] for s in out["start"]].count("new") == 2
     await rec.shutdown()

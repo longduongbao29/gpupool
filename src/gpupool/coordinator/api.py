@@ -45,6 +45,7 @@ class ModelBody(BaseModel):
     max_replicas: int | None = Field(default=None, ge=1)
     autoscale: AutoscalePolicy | None = None
     idle_unload_s: float | None = Field(default=None, gt=0)
+    preemptible: bool | None = None  # None: keep the stored value, else True
 
 
 class RecommendBody(BaseModel):
@@ -55,6 +56,37 @@ class RecommendBody(BaseModel):
     spread: Spread = "gpu"
     pin_devices: list[str] = Field(default_factory=list)
     limit: int = Field(default=3, ge=1, le=10)
+
+
+class SimFields(BaseModel):
+    """Optional ModelSpec fields a simulation may override; absent means unchanged."""
+
+    replicas: int | None = Field(default=None, ge=0)
+    min_replicas: int | None = Field(default=None, ge=0)
+    max_replicas: int | None = Field(default=None, ge=1)
+    priority: int | None = Field(default=None, ge=0, le=100)
+    preemptible: bool | None = None
+    ctx_size: int | None = Field(default=None, ge=1)
+    parallel: int | None = Field(default=None, ge=1)
+    spread: Spread | None = None
+    pin_devices: list[str] | None = None
+
+    def fields(self) -> dict:
+        return self.model_dump(exclude_none=True, include=set(SimFields.model_fields))
+
+
+class SimChange(SimFields):
+    model: str
+
+
+class SimAdd(SimFields):
+    name: str
+    file: str
+
+
+class SimulateBody(BaseModel):
+    changes: list[SimChange] = Field(default_factory=list)
+    add: list[SimAdd] = Field(default_factory=list)
 
 
 class StartBody(BaseModel):
@@ -286,7 +318,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
-            min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle)
+            min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle,
+            preemptible=body.preemptible if body.preemptible is not None else existing.preemptible if existing else True)
         store.put_model(spec)
         reconciler.wake()
         return spec.model_dump(mode="json")
@@ -374,6 +407,52 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     async def capacity() -> dict:
         return await capacity_view()
 
+    # ------------------------------------------------------------------ simulate
+    def checked_spec(spec: ModelSpec) -> ModelSpec:
+        """The same validation put_model applies, for a spec a simulation builds."""
+        spec = ModelSpec.model_validate(spec.model_dump())  # field constraints (model_copy skips them)
+        lo, hi = spec.min_replicas, spec.max_replicas
+        if lo is not None and hi is not None and lo > hi:
+            raise HTTPException(422, f"{spec.name}: min_replicas ({lo}) must not exceed max_replicas ({hi})")
+        if spec.idle_unload_s is not None and lo != 0:
+            raise HTTPException(422, f"{spec.name}: idle_unload_s needs min_replicas == 0")
+        registered = {s.node_id for s in store.list_servers()}
+        for pin in spec.pin_devices:
+            if not PIN_RE.match(pin) or pin.split("/", 1)[0] not in registered:
+                raise HTTPException(422, f"{spec.name}: pin_devices entry {pin!r} is not a registered node/device")
+        return spec
+
+    @router.post("/simulate")
+    async def simulate(body: SimulateBody) -> dict:
+        """What the reconciler would do if `changes` and `add` were applied. Changes nothing.
+
+        Per model it uses the autoscaler's current desired count (a model added here starts at its
+        floor) and the same order, placement and preemption rules as a real tick. Unlike the real
+        reconciler it ignores the preemption cooldown and treats memory freed by stops and
+        evictions as available at once. Running replicas are not restarted by a changed
+        ctx_size/parallel, so those only shape new ones."""
+        specs = {s.name: s for s in store.list_models()}
+        for ch in body.changes:
+            cur = specs.get(ch.model)
+            if cur is None:
+                raise HTTPException(404, f"unknown model {ch.model}")
+            specs[ch.model] = checked_spec(cur.model_copy(update=ch.fields()))
+        for add in body.add:
+            check_name(add.name)
+            if add.name in specs:
+                raise HTTPException(422, f"model {add.name!r} already exists")
+            item = library.get(add.file)
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {add.file!r} is not a ready library item")
+            base = ModelSpec(name=add.name, source=COORD_PREFIX + add.file)
+            specs[add.name] = checked_spec(base.model_copy(update=add.fields()))
+        try:
+            return await reconciler.simulate(list(specs.values()))
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise plan_http_error(e) from e
+
     # ------------------------------------------------------------------ recommend
     @router.post("/recommend")
     async def recommend(body: RecommendBody) -> dict:
@@ -408,20 +487,35 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             ranked = (await reconciler.rank_for(spec_for(body.ctx_size), body.limit))[: body.limit]
             max_single = await largest_ctx(131072, lambda opts: any(o.tier == "single_gpu" for o in opts))
             not_possible = None
+            preempt_option = None
             if not ranked:
+                try:  # best effort: a failure here must not hide the plain "nothing fits" answer
+                    preempt_option = await reconciler.rank_with_preemption(spec_for(body.ctx_size), 1)
+                except Exception:
+                    log.exception("preemption lookup for recommend failed")
+            if not ranked and preempt_option is None:
                 cap = (await capacity_view())["summary"]
                 not_possible = {"need_mb": need, "largest_single_gpu_mb": cap["largest_single_gpu_mb"],
                                 "largest_single_node_mb": cap["largest_single_node_mb"],
                                 "max_ctx_that_fits": await largest_ctx(body.ctx_size - 1, bool)}
         except Exception as e:
             raise plan_http_error(e) from e
+        def option(i: int, p, extra: dict) -> dict:
+            return {"rank": i + 1, "score": p.score, "tier": p.tier, "fits_now": not extra, **extra,
+                    "assignments": [{"node_id": a.node_id, "device_id": a.device_id, "layers": a.layers,
+                                     "est_mb": a.est_mb} for a in p.assignments],
+                    "est_decode_tps": p.est_decode_tps, "est_total_mb": p.est_total_mb, "reasons": p.reasons}
+
+        options = [option(i, p, {}) for i, p in enumerate(ranked)]
+        if preempt_option is not None:
+            victims, placements = preempt_option
+            prio = {s.name: s.priority for s in store.list_models()}
+            options.append(option(0, placements[0], {"requires_preemption": [
+                {"replica_id": v.replica_id, "model": v.model, "priority": prio.get(v.model, 0)}
+                for v in victims]}))
         return {
             "need_mb": need,
-            "options": [{"rank": i + 1, "score": p.score, "tier": p.tier, "fits_now": True,
-                         "assignments": [{"node_id": a.node_id, "device_id": a.device_id, "layers": a.layers,
-                                          "est_mb": a.est_mb} for a in p.assignments],
-                         "est_decode_tps": p.est_decode_tps, "est_total_mb": p.est_total_mb,
-                         "reasons": p.reasons} for i, p in enumerate(ranked)],
+            "options": options,
             "max_ctx_single_gpu": max_single,
             "not_possible": not_possible,
         }

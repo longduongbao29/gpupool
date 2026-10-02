@@ -9,7 +9,7 @@ from gpupool.coordinator.api import make_api_router
 from gpupool.coordinator.store import ServerRecord
 from gpupool.router.balancer import Balancer
 from tests.test_coordinator_helpers import (
-    SPEC, FakeAutoscaler, dev, make_cfg, make_planner, make_reconciler, node, put_replica,
+    SPEC, FakeAutoscaler, dev, make_cfg, make_planner, make_ranker, make_reconciler, node, put_replica,
 )
 
 AD = {"Authorization": "Bearer adm"}
@@ -68,7 +68,8 @@ async def test_auth_required_on_every_route(env):
                          ("POST", "/api/models/m/start"), ("POST", "/api/models/m/stop"),
                          ("DELETE", "/api/models/m"), ("POST", "/api/models/m/plan"),
                          ("GET", "/api/events"), ("POST", "/api/events/read"),
-                         ("GET", "/api/capacity"), ("POST", "/api/recommend")]:
+                         ("GET", "/api/capacity"), ("POST", "/api/recommend"),
+                         ("POST", "/api/simulate")]:
         r = await c.request(method, path, headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 401, (method, path)
 
@@ -249,7 +250,8 @@ async def test_put_model_create_update_validation(env):
     assert r.status_code == 200
     assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "ctx_size": 4096,
                         "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu",
-                        "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None}
+                        "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
+                        "preemptible": True}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -532,3 +534,97 @@ async def test_state_not_idle_while_a_replica_is_still_live(env):
     store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 0}))
     put_replica(store, "m-1", state="ready", now=clock())
     assert model_state((await c.get("/api/state")).json())["state"] == "running"
+
+
+# ---------------------------------------------------------------- preemption: model field, simulate, recommend
+async def test_put_model_preemptible_stored_and_kept(env):
+    c, store, *_ = env
+    assert (await c.put("/api/models/q", json={"file": "x.gguf"})).json()["preemptible"] is True
+    assert (await c.put("/api/models/q", json={"file": "x.gguf", "preemptible": False})).json()["preemptible"] is False
+    assert (await c.put("/api/models/q", json={"file": "x.gguf", "ctx_size": 8192})).json()["preemptible"] is False
+    assert store.get_model("q").preemptible is False
+
+
+def _full_node_with_lo(store, rec, clock):
+    """Node a has 500 MB usable; 'lo' (priority 10) holds a replica there."""
+    rec.ranker = make_ranker()
+    rec.planner = make_planner()
+    register(store, clock, node("a", devices=[dev(usable=500)]))
+    store.put_model(SPEC.model_copy(update={"name": "lo", "priority": 10, "replicas": 1}))
+    put_replica(store, "lo-1", model="lo", now=clock())
+
+
+async def test_simulate_start_stop_preempt_unplaced_and_purity(env):
+    c, store, rec, _, clock, _ = env
+    rec.ranker = make_ranker()
+    rec.planner = make_planner()
+    register(store, clock, node("a", devices=[dev(usable=5000)]))
+    store.put_model(SPEC.model_copy(update={"replicas": 2}))
+    put_replica(store, "m-1", now=clock())
+    put_replica(store, "m-2", head_port=9001, now=clock() + 1)
+    before = ([(r.replica_id, r.state) for r in store.list_replicas()], store.list_models())
+    r = await c.post("/api/simulate", json={"changes": [{"model": "m", "replicas": 1}]})
+    assert r.status_code == 200
+    assert r.json() == {"start": [], "preempt": [], "unplaced": [],
+                        "stop": [{"replica_id": "m-2", "model": "m", "reason": "2 running, 1 wanted"}]}
+    r = await c.post("/api/simulate", json={"changes": [{"model": "m", "replicas": 5}],
+                                            "add": [{"name": "n", "file": "x.gguf", "priority": 90}]})
+    j = r.json()
+    # 5000 MB - 2000 held by m-1/m-2 = 3000: n (priority 90) first, then two more m, one m left over
+    assert [s["model"] for s in j["start"]] == ["n", "m", "m"] and j["preempt"] == [] and j["stop"] == []
+    assert j["start"][0]["assignments"] == [{"node_id": "a", "device_id": "CUDA0", "layers": 2, "est_mb": 1000}]
+    assert [(u["model"], u["missing"]) for u in j["unplaced"]] == [("m", 1)]
+    assert before == ([(r.replica_id, r.state) for r in store.list_replicas()], store.list_models())
+    assert store.get_model("n") is None and store.list_events() == []
+
+
+async def test_simulate_reports_preemption(env):
+    c, store, rec, _, clock, _ = env
+    _full_node_with_lo(store, rec, clock)
+    r = await c.post("/api/simulate", json={"add": [{"name": "hi", "file": "x.gguf", "priority": 80}]})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["preempt"] == [{"replica_id": "lo-1", "model": "lo", "priority": 10, "for_model": "hi"}]
+    assert [s["model"] for s in j["start"]] == ["hi"]
+    assert store.get_replica("lo-1").state == "ready"
+    r = await c.post("/api/simulate", json={"add": [{"name": "hi", "file": "x.gguf", "priority": 80}],
+                                            "changes": [{"model": "lo", "preemptible": False}]})
+    assert r.json()["preempt"] == [] and r.json()["unplaced"][0]["model"] == "hi"
+
+
+async def test_simulate_validation(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    store.put_model(SPEC)
+    assert (await c.post("/api/simulate", json={"changes": [{"model": "nope", "replicas": 1}]})).status_code == 404
+    for body in ({"add": [{"name": "n", "file": "nope.gguf"}]}, {"add": [{"name": "n", "file": "big.gguf"}]},
+                 {"add": [{"name": "m", "file": "x.gguf"}]}, {"add": [{"name": "bad name", "file": "x.gguf"}]},
+                 {"changes": [{"model": "m", "min_replicas": 3, "max_replicas": 2}]},
+                 {"changes": [{"model": "m", "pin_devices": ["zzz/CUDA0"]}]},
+                 {"changes": [{"model": "m", "priority": 101}]}):
+        assert (await c.post("/api/simulate", json=body)).status_code == 422, body
+    j = (await c.post("/api/simulate", json={})).json()  # no changes: just what the next tick would do
+    assert [s["model"] for s in j["start"]] == ["m"] and j["stop"] == [] and j["preempt"] == []
+
+
+async def test_recommend_offers_preemption_when_nothing_fits(env):
+    c, store, rec, _, clock, _ = env
+    _full_node_with_lo(store, rec, clock)
+    j = (await c.post("/api/recommend", json={"file": "x.gguf", "priority": 80})).json()
+    assert j["not_possible"] is None and len(j["options"]) == 1
+    o = j["options"][0]
+    assert o["fits_now"] is False and o["rank"] == 1 and o["tier"] == "single_gpu"
+    assert o["requires_preemption"] == [{"replica_id": "lo-1", "model": "lo", "priority": 10}]
+    assert o["assignments"] == [{"node_id": "a", "device_id": "CUDA0", "layers": 2, "est_mb": 1000}]
+    assert store.get_replica("lo-1").state == "ready"  # recommend only looks
+    # equal priority cannot evict: the plain answer
+    j = (await c.post("/api/recommend", json={"file": "x.gguf", "priority": 10})).json()
+    assert j["options"] == [] and j["not_possible"] is not None
+
+
+async def test_recommend_fitting_option_has_no_preemption_key(env):
+    c, store, rec, _, clock, _ = env
+    rec.ranker = make_ranker()
+    register(store, clock, node("a"))
+    o = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()["options"][0]
+    assert o["fits_now"] is True and "requires_preemption" not in o
