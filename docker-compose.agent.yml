@@ -10,11 +10,23 @@ services:
       dockerfile: docker/agent.Dockerfile
       args:
         CUDA_ARCHS: ${CUDA_ARCHS:-61;70;75;80;86;89;90}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     image: gpupool-agent:latest
     restart: unless-stopped
     network_mode: host   # engines listen on ports the coordinator picks, on this server's IP
     pid: host            # NVML reports host PIDs; needed for correct GPU process names
     environment:
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
       GPUPOOL_JOIN: ${GPUPOOL_JOIN:?set GPUPOOL_JOIN in .env (see the coordinator log)}
       GPUPOOL_NODE_ID: ${GPUPOOL_NODE_ID:-}
       GPUPOOL_HOST: ${GPUPOOL_HOST:-}

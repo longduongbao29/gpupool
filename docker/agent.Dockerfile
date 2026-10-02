@@ -14,6 +14,15 @@
 #
 # CUDA 12.4 runs on drivers >= 525 (minor-version compatibility). For older drivers rebuild
 # with a lower CUDA_VERSION.
+#
+# Behind a proxy: Docker forwards the predefined build args to every RUN step (apt-get, git clone,
+# uv downloads), so pass them at build time:
+#   docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy \
+#     --build-arg no_proxy=$no_proxy -f docker/agent.Dockerfile -t gpupool-agent .
+# They are deliberately NOT declared with ARG/ENV here: predefined proxy args are excluded from
+# the image history and never baked into the final image (they are site secrets). Pulling the
+# base images and the uv image is done by the Docker daemon: configure the daemon proxy for that.
+# At run time pass them through from the host: -e http_proxy -e https_proxy -e no_proxy
 
 ARG CUDA_VERSION=12.4.1
 ARG UBUNTU_VERSION=22.04

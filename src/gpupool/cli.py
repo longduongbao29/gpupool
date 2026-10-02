@@ -24,6 +24,7 @@ from pathlib import Path
 import httpx
 
 from gpupool.common.auth import bearer_headers
+from gpupool.common.net import describe_proxy, normalize_proxy_env
 from gpupool.common.config import (AgentConfig, CoordinatorConfig, build_agent_config, env_overrides,
                                    load_toml)
 
@@ -48,6 +49,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                          "join": args.join, "auto_join": False if args.no_auto_join else None})
     cfg = build_agent_config(data)  # expands --join, resolves node_id / host defaults
     log.info("agent %s on %s:%d, coordinator %s", cfg.node_id, cfg.host, cfg.port, cfg.coordinator_url)
+    if os.environ.get("http_proxy") or os.environ.get("https_proxy") or os.environ.get("all_proxy"):
+        log.info("%s", describe_proxy())
     run_agent(cfg)
     return 0
 
@@ -58,6 +61,8 @@ def _cmd_coordinator(args: argparse.Namespace) -> int:
     data = load_toml(Path(args.config)) if args.config else {}
     data = _merge(data, env_overrides(CoordinatorConfig))
     data = _merge(data, {"host": args.host, "port": args.port})
+    if os.environ.get("http_proxy") or os.environ.get("https_proxy") or os.environ.get("all_proxy"):
+        log.info("%s", describe_proxy())
     run_coordinator(CoordinatorConfig(**data))
     return 0
 
@@ -66,8 +71,9 @@ def _admin(method: str, path: str, **kw) -> int:
     url = os.environ.get("GPUPOOL_URL", "http://127.0.0.1:8080").rstrip("/")
     key = os.environ.get("GPUPOOL_ADMIN_KEY", "")
     try:
-        r = httpx.request(method, url + path, headers=bearer_headers(key) if key else {},
-                          timeout=60, **kw)
+        # the coordinator is cluster-internal: never through the proxy
+        with httpx.Client(trust_env=False, timeout=60) as c:
+            r = c.request(method, url + path, headers=bearer_headers(key) if key else {}, **kw)
     except httpx.HTTPError as e:
         print(f"cannot reach coordinator at {url}: {e}", file=sys.stderr)
         return 2
@@ -79,6 +85,7 @@ def _admin(method: str, path: str, **kw) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    normalize_proxy_env()  # lowercase and uppercase spellings agree for us and for child processes
     p = argparse.ArgumentParser(prog="gpupool")
     sub = p.add_subparsers(dest="cmd", required=True)
 

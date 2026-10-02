@@ -8,6 +8,8 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
+from gpupool.common.net import INTERNAL, external_sync_kwargs
+
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 
@@ -28,6 +30,8 @@ def _safe_name(name: str) -> str:
 def ensure_model(name: str, source: str, cache_dir: Path, coordinator_url: str,
                  token: str) -> tuple[Path, int]:
     headers: dict[str, str] = {}
+    # coordinator:// is cluster-internal (never proxied); http(s):// leaves the cluster.
+    client_kw: dict = external_sync_kwargs()
     if source.startswith(("http://", "https://")):
         url = source
         fname = _safe_name(unquote(urlparse(source).path))
@@ -35,6 +39,7 @@ def ensure_model(name: str, source: str, cache_dir: Path, coordinator_url: str,
         fname = _safe_name(source[len("coordinator://"):])
         url = f"{coordinator_url.rstrip('/')}/files/{fname}"
         headers["Authorization"] = f"Bearer {token}"
+        client_kw = dict(INTERNAL)
     else:
         p = Path(source)
         if p.is_absolute() and p.is_file():
@@ -49,8 +54,8 @@ def ensure_model(name: str, source: str, cache_dir: Path, coordinator_url: str,
             return final, final.stat().st_size
         part = cache_dir / (fname + ".part")
         try:
-            with httpx.stream("GET", url, headers=headers, follow_redirects=True,
-                              timeout=httpx.Timeout(30.0, read=120.0)) as r:
+            with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0, read=120.0),
+                              **client_kw) as client, client.stream("GET", url, headers=headers) as r:
                 r.raise_for_status()
                 # With a Content-Encoding (gzip...), raw bytes are the compressed stream:
                 # saving them would leave a corrupt .gguf whose length still matches

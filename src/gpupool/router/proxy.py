@@ -7,6 +7,8 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 
 import httpx
+
+from gpupool.common.net import internal_client
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
@@ -82,7 +84,7 @@ def make_router(
     auth = require_bearer(*api_keys)
     if metrics.balancer is None:
         metrics.balancer = balancer
-    http = client or httpx.AsyncClient(timeout=httpx.Timeout(None, connect=5.0))
+    http = client or internal_client(timeout=httpx.Timeout(None, connect=5.0))
 
     def check_auth(request: Request) -> JSONResponse | None:
         try:

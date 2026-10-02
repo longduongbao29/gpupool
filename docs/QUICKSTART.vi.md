@@ -114,6 +114,30 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 
 RPC của llama.cpp không mã hoá: giữ các server GPU trong mạng nội bộ tin cậy.
 
+## Sau HTTP proxy
+
+Nếu các server ra internet qua proxy, hãy truyền biến proxy của máy chủ vào container
+(ưu tiên đọc `http_proxy`, `https_proxy`, `no_proxy` viết thường; viết hoa cũng được):
+
+```bash
+docker run -d ... -e http_proxy -e https_proxy -e no_proxy ghcr.io/longduongbao29/gpupool-agent
+```
+
+Với docker compose, các biến này tự được lấy từ môi trường máy chủ hoặc `.env`.
+
+- Đi qua proxy: Hugging Face (liệt kê và tải file), tải model từ URL `https://` trên các server, và webhook cảnh báo.
+- Không bao giờ đi qua proxy: lưu lượng giữa coordinator, các server và llama.cpp (heartbeat, điều khiển engine,
+  file model từ coordinator, request tới model của bạn).
+- `no_proxy` được tôn trọng: danh sách phân tách bằng dấu phẩy gồm host, hậu tố miền (`.corp.local`), IP, CIDR (`10.0.0.0/8`) hoặc `*`.
+
+Để build image cục bộ khi đứng sau proxy:
+
+```bash
+docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy   --build-arg no_proxy=$no_proxy -f docker/agent.Dockerfile -t gpupool-agent .
+```
+
+(`docker compose ... --build` tự truyền các biến này.) Giá trị proxy không được lưu trong image.
+
 ## Thiết lập tuỳ chọn (biến môi trường của coordinator)
 
 | Biến | Mặc định | Tác dụng |

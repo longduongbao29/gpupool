@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 
 import httpx
+
+from gpupool.common.net import internal_client
 import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -39,7 +41,7 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
     base = cfg.coordinator_url.rstrip("/")
     health = f"http://127.0.0.1:{cfg.port}/health"
     body = {"agent_url": f"http://{cfg.host}:{cfg.port}"}
-    async with httpx.AsyncClient(timeout=15.0) as http:
+    async with internal_client(timeout=15.0) as http:
         while True:  # our own server must be accepting connections
             try:
                 if (await http.get(health, timeout=2.0)).status_code == 200:
@@ -111,7 +113,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
     async def heartbeat_loop() -> None:
         last_log = 0.0
         url = f"{cfg.coordinator_url.rstrip('/')}/internal/heartbeat"
-        async with httpx.AsyncClient(timeout=5.0,
+        async with internal_client(timeout=5.0,
                                      headers=bearer_headers(cfg.cluster_token)) as client:
             while True:
                 try:

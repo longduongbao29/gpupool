@@ -116,6 +116,31 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 
 llama.cpp RPC is not encrypted: keep the GPU servers on a trusted internal network.
 
+## Behind an HTTP proxy
+
+If your servers reach the internet through a proxy, pass the host's proxy variables into the containers
+(lowercase `http_proxy`, `https_proxy`, `no_proxy` are read first, uppercase also works):
+
+```bash
+docker run -d ... -e http_proxy -e https_proxy -e no_proxy ghcr.io/longduongbao29/gpupool-agent
+```
+
+With docker compose they are passed from the host environment or `.env` automatically.
+
+- Through the proxy: Hugging Face (file listing and downloads), model downloads from `https://` URLs on the
+  servers, and the alert webhook.
+- Never through the proxy: traffic between the coordinator, the servers and llama.cpp (heartbeats, engine
+  control, model files from the coordinator, requests to your models).
+- `no_proxy` is honoured: comma-separated hosts, domain suffixes (`.corp.local`), IPs, CIDRs (`10.0.0.0/8`) or `*`.
+
+To build the images locally behind a proxy:
+
+```bash
+docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy   --build-arg no_proxy=$no_proxy -f docker/agent.Dockerfile -t gpupool-agent .
+```
+
+(`docker compose ... --build` passes them for you.) The proxy values are not stored in the image.
+
 ## Optional settings (environment variables on the coordinator)
 
 | Variable | Default | Purpose |

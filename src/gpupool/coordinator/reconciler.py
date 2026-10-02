@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from gpupool.common.net import internal_client
+
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
     EngineSpec,
@@ -84,7 +86,7 @@ class Reconciler:
     # ------------------------------------------------------------------ helpers
     def _http_client(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+            self._http = internal_client(timeout=httpx.Timeout(5.0))
         return self._http
 
     def _alive(self, rec: NodeRecord, now: float) -> bool:

@@ -8,6 +8,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
 import httpx
+
+from gpupool.common.net import external_client
 from pydantic import BaseModel
 
 if TYPE_CHECKING:  # store imports Event from here; avoid the cycle at runtime
@@ -65,7 +67,7 @@ class Notifier:
     async def _post(self, ev: Event) -> None:
         try:
             if self._http is None:
-                self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+                self._http = external_client(timeout=httpx.Timeout(5.0))
             r = await self._http.post(
                 self.webhook_url,
                 json={"text": ev.message, "content": ev.message, "event": ev.model_dump(mode="json")},

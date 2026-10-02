@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 import httpx
 
+from gpupool.common.net import external_client
+
 from gpupool.common.models import LibraryItem
 
 HF_BASE = "https://huggingface.co"
@@ -53,7 +55,7 @@ class Library:
         self.hf_token = hf_token
         self._clock = clock
         self._own_http = http is None
-        self._http = http or httpx.AsyncClient(
+        self._http = http or external_client(
             timeout=httpx.Timeout(30.0, read=120.0), follow_redirects=True)
         self._lock = threading.RLock()
         self._tasks: dict[str, asyncio.Task] = {}

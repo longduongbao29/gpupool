@@ -15,6 +15,8 @@ from typing import BinaryIO
 import gguf
 import httpx
 
+from gpupool.common.net import external_sync_kwargs
+
 from gpupool.common.models import ModelMeta
 
 _MAGIC = b"GGUF"
@@ -188,7 +190,8 @@ def read_meta(source: str, *, headers: dict | None = None) -> ModelMeta:
 
 
 def _read_url(url: str, headers: dict | None) -> ModelMeta:
-    with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0)) as client:
+    with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0),
+                      **external_sync_kwargs()) as client:
         with client.stream("GET", url, headers=headers or {}) as resp:
             resp.raise_for_status()
             cl = resp.headers.get("content-length")

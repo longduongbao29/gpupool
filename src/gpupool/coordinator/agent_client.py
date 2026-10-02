@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import httpx
 
+from gpupool.common.net import internal_client
+
 from gpupool.common.auth import bearer_headers
 from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
 
@@ -17,7 +19,7 @@ class AgentError(Exception):
 class AgentClient:
     def __init__(self, cluster_token: str, http: httpx.AsyncClient | None = None):
         self._headers = bearer_headers(cluster_token)
-        self._http = http or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+        self._http = http or internal_client(timeout=httpx.Timeout(10.0))
 
     async def _call(self, method: str, url: str, **kw) -> httpx.Response:
         return await self._http.request(method, url, headers=self._headers, **kw)

@@ -7,11 +7,24 @@ services:
     build:
       context: .
       dockerfile: docker/coordinator.Dockerfile
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     image: gpupool-coordinator:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
       GPUPOOL_ADMIN_KEY: ${GPUPOOL_ADMIN_KEY:-}
       GPUPOOL_CLUSTER_TOKEN: ${GPUPOOL_CLUSTER_TOKEN:-}
       GPUPOOL_API_KEYS: ${GPUPOOL_API_KEYS:-}
