@@ -304,6 +304,47 @@
               <div class="endpoint"><code class="grow ellipsis" x-text="endpoint()"></code><span class="muted small">model:</span><code x-text="m.spec.name"></code>
                 <button class="btn sm icon" @click="copy(endpoint())" title="Copy endpoint" x-html="icon('copy')"></button></div>
 
+              <div class="scaling" x-show="scalingOf(m)">
+                <template x-if="scalingOf(m)">
+                  <div>
+                    <div class="row wrap">
+                      <span class="small muted">Replicas desired <b x-text="scalingOf(m).desired"></b> (<span x-text="scaleRange(scalingOf(m))"></span>)</span>
+                      <span class="small muted">&middot; busy <b x-text="busyPct(scalingOf(m).avg_busy)"></b></span>
+                      <span class="pill blue" x-show="m.state==='idle'"><span x-html="icon('moon')"></span>Idle &mdash; loads on first request</span>
+                    </div>
+                    <div class="small" style="margin-top:4px"><a href="#" @click.prevent="toggleScaling(m)" x-text="scState(m.spec.name).open ? 'Hide scaling details' : 'Scaling details'"></a></div>
+                    <div class="sc-detail" x-show="scState(m.spec.name).open">
+                      <div class="muted small" x-show="scState(m.spec.name).busy">Loading...</div>
+                      <div class="small" style="color:#fca5a5" x-show="scState(m.spec.name).err" x-text="scState(m.spec.name).err"></div>
+                      <template x-if="scState(m.spec.name).data">
+                        <div>
+                          <div class="row wrap small" style="gap:8px">
+                            <span class="pill" :class="scStateClass(scState(m.spec.name).data.state)" x-text="scStateLabel(scState(m.spec.name).data.state)"></span>
+                            <span class="muted">ready <b x-text="scState(m.spec.name).data.ready"></b> &middot; launching <b x-text="scState(m.spec.name).data.launching"></b> &middot; queued <b x-text="scState(m.spec.name).data.queued"></b> &middot; idle <b x-text="scState(m.spec.name).data.idle_s == null ? dash : Math.round(scState(m.spec.name).data.idle_s) + ' s'"></b></span>
+                          </div>
+                          <div class="small muted" style="margin-top:6px">Last decision: <span x-text="decisionText(scState(m.spec.name).data.last_decision)"></span></div>
+                          <div class="muted small" style="margin-top:6px" x-show="!(scState(m.spec.name).data.replicas || []).length">No replicas running</div>
+                          <table class="sc-table" x-show="(scState(m.spec.name).data.replicas || []).length">
+                            <thead><tr><th>Replica</th><th>Busy</th><th>Active / deferred</th><th>Tok/s (measured / est.)</th><th>Metrics</th></tr></thead>
+                            <tbody>
+                              <template x-for="r in (scState(m.spec.name).data.replicas || [])" :key="r.replica_id">
+                                <tr>
+                                  <td class="ellipsis" x-text="r.replica_id"></td>
+                                  <td x-text="busyPct(r.busy)"></td>
+                                  <td><span x-text="r.requests_processing == null ? dash : r.requests_processing"></span> / <span x-text="r.requests_deferred == null ? dash : r.requests_deferred"></span></td>
+                                  <td><span x-text="tps(r.measured_decode_tps)"></span> / <span x-text="tps(r.est_decode_tps)"></span></td>
+                                  <td><span class="pill" :class="r.metrics_ok ? 'green' : 'amber'" x-text="r.metrics_ok ? 'ok' : 'unavailable'"></span></td>
+                                </tr>
+                              </template>
+                            </tbody>
+                          </table>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
               <div class="errbox" x-show="m.state==='failed' && reallocError(m)" x-text="reallocError(m)"></div>
               <div x-show="m.state==='failed' && modelError(m)">
                 <a href="#" class="small" @click.prevent="openErr[m.spec.name] = !openErr[m.spec.name]" x-text="openErr[m.spec.name] ? 'Hide error' : 'Show error'"></a>
@@ -325,7 +366,7 @@
                     <button class="btn green" @click="startModel(m)"><span x-html="icon('play')"></span> Start</button>
                   </div>
                 </template>
-                <button class="btn" x-show="m.state==='running' || m.state==='starting'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
+                <button class="btn" x-show="m.state==='running' || m.state==='starting' || m.state==='idle'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
                 <button class="btn right" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
                 <button class="btn danger icon" @click="deleteModel(m)" title="Delete" x-html="icon('trash')"></button>
               </div>
@@ -467,6 +508,30 @@
         <label class="field grow"><span>Spread replicas across</span>
           <select x-model="form.spread" @change="form.rec = null" style="width:100%">
             <option value="gpu">Different GPUs</option><option value="node">Different servers</option><option value="none">No preference</option></select></label>
+      </div>
+      <h3 class="sec" style="margin-top:4px">Scaling</h3>
+      <label class="field"><span>Mode</span>
+        <select x-model="form.mode" style="width:100%">
+          <option value="fixed">Fixed &mdash; a set number of replicas</option>
+          <option value="autoscale">Autoscale &mdash; follow the load</option>
+          <option value="demand">On demand &mdash; unload when idle</option></select></label>
+      <div class="row" x-show="form.mode==='fixed'">
+        <label class="field grow"><span>Replicas</span><input type="number" min="1" max="16" step="1" x-model="form.replicas" style="width:100%"></label></div>
+      <div x-show="form.mode==='autoscale'">
+        <div class="row">
+          <label class="field grow"><span>Min replicas</span><input type="number" min="0" max="16" step="1" x-model="form.minR" style="width:100%"></label>
+          <label class="field grow"><span>Max replicas</span><input type="number" min="1" max="16" step="1" x-model="form.maxR" style="width:100%"></label>
+          <label class="field grow"><span>Target busy (%)</span><input type="number" min="1" max="100" step="1" x-model="form.target" style="width:100%"></label></div>
+        <div class="row">
+          <label class="field grow"><span>Scale up after (s)</span><input type="number" min="0" step="1" x-model="form.upAfter" style="width:100%"></label>
+          <label class="field grow"><span>Scale down after (s)</span><input type="number" min="0" step="1" x-model="form.downAfter" style="width:100%"></label></div>
+        <div class="muted small" style="margin:-4px 0 10px">Adds a replica when the average busy ratio stays above the target; removes one when it stays below half of it.</div>
+      </div>
+      <div x-show="form.mode==='demand'">
+        <div class="row">
+          <label class="field grow"><span>Max replicas</span><input type="number" min="1" max="16" step="1" x-model="form.maxR" style="width:100%"></label>
+          <label class="field grow"><span>Unload after (minutes idle)</span><input type="number" min="1" step="1" x-model="form.idleMin" style="width:100%"></label></div>
+        <div class="muted small" style="margin:-4px 0 10px">Frees the GPUs after that long without requests; the next request loads the model again (the first one waits for the load).</div>
       </div>
       <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.auto" @change="form.plan = null"><span></span></label>
         <div><div>Auto placement</div><div class="muted small">Let the scheduler pick GPUs. Turn off to choose GPUs yourself.</div></div></div>

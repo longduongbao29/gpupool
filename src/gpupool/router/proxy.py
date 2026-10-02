@@ -1,6 +1,7 @@
 """OpenAI-compatible router in front of llama-server replicas."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import defaultdict
@@ -79,6 +80,10 @@ def make_router(
     client: httpx.AsyncClient | None = None,
     max_retries: int = 2,
     max_body_bytes: int = 32 * 1024 * 1024,
+    on_request: Callable[[str], bool] | None = None,
+    can_cold_start: Callable[[str], bool] | None = None,
+    cold_start_timeout_s: float = 120.0,
+    cold_start_poll_s: float = 0.5,
 ) -> APIRouter:
     router = APIRouter()
     auth = require_bearer(*api_keys)
@@ -130,6 +135,8 @@ def make_router(
         if model not in list_models():
             return _error(404, f"model '{model}' not found",
                           "invalid_request_error", "model_not_found")
+        if on_request is not None:
+            on_request(model)  # may start loading an unloaded model
         body.setdefault("cache_prompt", True)
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         stream = body.get("stream") is True
@@ -138,8 +145,26 @@ def make_router(
         exclude: set[str] = set()
         attempts = 0
         last_err = ""
+        waited = False
         while True:
             ep = balancer.pick(get_candidates(model), key, exclude)
+            if (ep is None and attempts == 0 and not waited and can_cold_start is not None
+                    and can_cold_start(model)):
+                # The model is unloaded on purpose: hold the request until a replica is ready
+                # instead of failing it, but not past the timeout or a gone client.
+                waited = True
+                deadline = time.monotonic() + cold_start_timeout_s
+                while ep is None and time.monotonic() < deadline:
+                    await asyncio.sleep(cold_start_poll_s)
+                    if await request.is_disconnected():
+                        break
+                    ep = balancer.pick(get_candidates(model), key, exclude)
+                if ep is None:
+                    metrics.observe_request(model, 503)
+                    resp503 = _error(503, f"model '{model}' is loading, retry shortly",
+                                     "server_error", "model_loading")
+                    resp503.headers["Retry-After"] = "10"
+                    return resp503
             if ep is None:
                 if attempts == 0:
                     metrics.observe_request(model, 503)

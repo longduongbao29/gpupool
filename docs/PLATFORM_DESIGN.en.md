@@ -280,6 +280,8 @@ cluster.
 
 **Status:** phase 1 is implemented. Real run on a GTX 1650: a `priority` 80 model wins over one whose name sorts first; replicas and new models spread to other GPUs (simulated with the real scheduler); estimated vs measured decode 41.6 vs 51.8 tok/s (3B) and 204 vs 182 (0.5B). `budget_mb` now also subtracts the VRAM gpupool's own replicas hold. Spreading has not been checked on real multi-GPU hardware.
 
+**Phase 2 status:** implemented. Real run on a GTX 1650: an on-demand 3B model unloaded after 20 s without requests, and the next request cold-started it and got its answer after 2.9 s; a 0.5B model (min 1, max 2) went to 2 replicas about 9 s after requests started queueing, 82 requests split 49/33 between them, and it went back to 1 after 16 s without load. Autoscaling state is in memory: after a coordinator restart every model returns to its running minimum.
+
 Each phase is checked on a real cluster, with at least 2 servers and 2 models, before the next one starts.
 
 ## 9. Open questions

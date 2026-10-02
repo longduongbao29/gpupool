@@ -129,6 +129,58 @@ def test_ui_uses_recommend_and_policy_fields():
         assert needle in html, needle
 
 
+def test_mock_state_has_scaling_and_idle_model(client):
+    st = client.get("/api/state", headers=HEAD).json()
+    by = {m["spec"]["name"]: m for m in st["models"]}
+    for m in st["models"]:
+        assert {"min", "max", "desired", "avg_busy", "unloaded"} <= m["scaling"].keys()
+    assert by["chat-demand"]["state"] == "idle" and by["chat-demand"]["scaling"]["unloaded"] is True
+    assert by["chat-demand"]["spec"]["idle_unload_s"] == 600 and by["chat-demand"]["spec"]["min_replicas"] == 0
+    assert by["chat-auto"]["scaling"]["avg_busy"] is not None and by["chat-auto"]["scaling"]["max"] == 4
+    kinds = {e["kind"] for e in st["events"]}
+    assert {"scaled_up", "cold_start", "unloaded_idle"} <= kinds
+
+
+def test_mock_model_put_scaling_validation(client):
+    body = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 2048, "parallel": 1, "pin_devices": []}
+    auto = {"target_busy": 0.6, "up_after_s": 20, "down_after_s": 120}
+    spec = client.put("/api/models/s1", json={**body, "min_replicas": 1, "max_replicas": 3, "autoscale": auto}, headers=HEAD).json()
+    assert (spec["min_replicas"], spec["max_replicas"], spec["autoscale"]) == (1, 3, auto)
+    spec = client.put("/api/models/s1", json={**body, "min_replicas": 0, "max_replicas": 2, "idle_unload_s": 900, "autoscale": auto},
+                      headers=HEAD).json()
+    assert spec["idle_unload_s"] == 900
+    spec = client.put("/api/models/s1", json={**body, "min_replicas": None, "max_replicas": None, "autoscale": None,
+                                              "idle_unload_s": None}, headers=HEAD).json()
+    assert spec["min_replicas"] is None and spec["autoscale"] is None and spec["idle_unload_s"] is None
+    for bad in ({"min_replicas": 3, "max_replicas": 2}, {"max_replicas": 0}, {"min_replicas": -1},
+                {"min_replicas": 1, "max_replicas": 2, "idle_unload_s": 60},  # idle unload only with min 0
+                {"autoscale": {"target_busy": 1.5, "up_after_s": 1, "down_after_s": 1}}):
+        r = client.put("/api/models/s1", json={**body, **bad}, headers=HEAD)
+        assert r.status_code == 422 and isinstance(r.json()["detail"], str), bad
+
+
+def test_mock_scaling_endpoint(client):
+    r = client.get("/api/models/chat-auto/scaling", headers=HEAD).json()
+    assert {"model", "min", "max", "desired", "ready", "launching", "avg_busy", "queued", "idle_s", "state", "last_decision",
+            "replicas"} <= r.keys()
+    assert r["ready"] == len(r["replicas"]) == 2 and {"ts", "action", "reason"} <= r["last_decision"].keys()
+    assert {"replica_id", "busy", "requests_processing", "requests_deferred", "measured_decode_tps", "est_decode_tps",
+            "metrics_ok"} <= r["replicas"][0].keys()
+    idle = client.get("/api/models/chat-demand/scaling", headers=HEAD).json()
+    assert idle["state"] == "unloaded" and idle["replicas"] == []
+    assert client.get("/api/models/nope/scaling", headers=HEAD).status_code == 404
+
+
+def test_ui_has_scaling_controls():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for needle in ("/scaling", "min_replicas", "max_replicas", "autoscale", "idle_unload_s", "target_busy", "scaled_up", "cold_start"):
+        assert needle in js, needle
+    for needle in ("Scaling", "Fixed", "Autoscale", "On demand", "Min replicas", "Max replicas", "Target busy", "Scale up after",
+                   "Scale down after", "Unload after", "Idle &mdash; loads on first request", "Scaling details", "Replicas desired"):
+        assert needle in html, needle
+
+
 def test_html_never_renders_server_data_as_html():
     # x-html is only for the static icon() helper; data fields must use x-text.
     html = (UI / "index.html").read_text(encoding="utf-8")

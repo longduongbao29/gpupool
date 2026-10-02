@@ -27,8 +27,35 @@ var ICONS = {
   bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',
   alert: '<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/>',
-  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'
 };
+
+// Event kinds with their own look; other kinds fall back to the level (info/warning/error).
+var EV_KIND = {
+  scaled_up: { cls: "green", icon: "up" },
+  scaled_down: { cls: "blue", icon: "down" },
+  unloaded_idle: { cls: "blue", icon: "moon" },
+  cold_start: { cls: "amber", icon: "bolt" }
+};
+
+// Scaling part of the deploy form, derived from a model spec (defaults match the server's).
+function scalingForm(spec) {
+  var f = { mode: "fixed", replicas: 1, minR: 1, maxR: 2, target: 70, upAfter: 30, downAfter: 300, idleMin: 10 };
+  if (!spec) return f;
+  var as = spec.autoscale || {};
+  if (as.target_busy != null) f.target = Math.round(as.target_busy * 100);
+  if (as.up_after_s != null) f.upAfter = as.up_after_s;
+  if (as.down_after_s != null) f.downAfter = as.down_after_s;
+  if (spec.idle_unload_s != null) f.idleMin = Math.max(1, Math.round(spec.idle_unload_s / 60));
+  if (spec.replicas >= 1) f.replicas = spec.replicas;
+  var mn = spec.min_replicas, mx = spec.max_replicas;
+  if (mn === 0 || spec.idle_unload_s != null) { f.mode = "demand"; f.maxR = mx != null ? mx : 1; }
+  else if (mn != null && mx != null && mx > mn) { f.mode = "autoscale"; f.minR = mn; f.maxR = mx; }
+  return f;
+}
 
 function app() {
   return {
@@ -67,7 +94,8 @@ function app() {
     // add model modal
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false },
     // deploy (new / edit) modal
-    form: { open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false },
+    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false }, scalingForm(null)),
+    sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
 
     // ================= lifecycle =================
     init: function () {
@@ -142,6 +170,7 @@ function app() {
         this.st = await this.api("GET", "/api/state");
         this.processEvents();
         if (this.view === "events") this.loadEvents();
+        this.refreshScaling();
       } catch (e) { /* offline or 401 already handled */ }
     },
 
@@ -173,8 +202,8 @@ function app() {
       var max = this.events().reduce(function (m, e) { return Math.max(m, e.id); }, 0);
       try { await this.api("POST", "/api/events/read", { up_to_id: max }); await this.refresh(); } catch (e) { this.fail(e); }
     },
-    evClass: function (e) { return e.level === "error" ? "red" : (e.level === "warning" ? "amber" : "blue"); },
-    evIcon: function (e) { return e.level === "info" ? "info" : "alert"; },
+    evClass: function (e) { var k = EV_KIND[e.kind]; return k ? k.cls : (e.level === "error" ? "red" : (e.level === "warning" ? "amber" : "blue")); },
+    evIcon: function (e) { var k = EV_KIND[e.kind]; return k ? k.icon : (e.level === "info" ? "info" : "alert"); },
     ago: function (ts) {
       var d = Math.max(0, Math.round(this.nowTs - ts));
       if (d < 60) return d + "s ago";
@@ -476,7 +505,38 @@ function app() {
       return base.replace(/\/+$/, "") + "/v1";
     },
     stateClass: function (m) {
-      return { running: "green", starting: "amber", stopping: "amber", failed: "red" }[m.state] || "";
+      return { running: "green", starting: "amber", stopping: "amber", failed: "red", idle: "blue" }[m.state] || "";
+    },
+    // ----- scaling (model card) -----
+    scalingOf: function (m) { return m.scaling || null; },
+    scaleRange: function (sc) { return sc.min === sc.max ? String(sc.min) : sc.min + "\u2013" + sc.max; },
+    busyPct: function (v) { return v == null ? this.dash : Math.round(v * 100) + "%"; },
+    scState: function (name) { return this.sc[name] || { open: false, busy: false, data: null, err: "" }; },
+    toggleScaling: async function (m) {
+      var n = m.spec.name, cur = this.sc[n] || { open: false, busy: false, data: null, err: "" };
+      cur.open = !cur.open;
+      this.sc[n] = cur;
+      if (cur.open) await this.loadScaling(n);
+    },
+    loadScaling: async function (n) {
+      var cur = this.sc[n];
+      if (!cur) return;
+      cur.busy = !cur.data;
+      try {
+        cur.data = await this.api("GET", "/api/models/" + encodeURIComponent(n) + "/scaling");
+        cur.err = "";
+      } catch (e) { if (e.status !== 401) cur.err = e.message; }
+      cur.busy = false;
+    },
+    refreshScaling: function () {
+      var self = this;
+      Object.keys(this.sc).forEach(function (n) { if (self.sc[n].open) self.loadScaling(n); });
+    },
+    scStateLabel: function (s) { return s ? String(s).replace(/_/g, " ") : this.dash; },
+    scStateClass: function (s) { return { scaling_up: "amber", scaling_down: "blue", unloaded: "blue", steady: "green" }[s] || ""; },
+    decisionText: function (d) {
+      if (!d) return "No scaling decision yet";
+      return d.action + " \u2014 " + (d.reason || "") + " (" + this.ago(d.ts) + ")";
     },
     modelError: function (m) {
       if (m.error) return m.error;
@@ -519,13 +579,13 @@ function app() {
     },
     openForm: function (m, file) {
       if (m) {
-        this.form = { open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
+        this.form = Object.assign({ open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
           priority: m.spec.priority == null ? 50 : m.spec.priority, spread: m.spec.spread || "gpu",
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false };
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false }, scalingForm(m.spec));
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = { open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false };
+        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false }, scalingForm(null));
       }
     },
     togglePin: function (key, on) {
@@ -535,16 +595,47 @@ function app() {
       this.form.plan = null;
       this.form.rec = null;
     },
+    // Scaling fields of the PUT body for the selected mode, or { error } when the inputs are invalid.
+    scalingBody: function (f) {
+      var num = function (v) { var n = parseFloat(v); return isNaN(n) ? null : n; };
+      var whole = function (v) { var n = num(v); return n != null && Math.floor(n) === n ? n : null; };
+      if (f.mode === "autoscale") {
+        var mn = whole(f.minR), mx = whole(f.maxR), tb = num(f.target), up = num(f.upAfter), dn = num(f.downAfter);
+        if (mn == null || mn < 0) return { error: "Min replicas must be a whole number, 0 or more" };
+        if (mx == null || mx < 1) return { error: "Max replicas must be at least 1" };
+        if (mn > mx) return { error: "Min replicas cannot be greater than max replicas" };
+        if (tb == null || tb <= 0 || tb > 100) return { error: "Target busy must be between 1 and 100 %" };
+        if (up == null || up < 0 || dn == null || dn < 0) return { error: "Scale up/down delays must be 0 seconds or more" };
+        return { body: { min_replicas: mn, max_replicas: mx, idle_unload_s: null,
+          autoscale: { target_busy: tb / 100, up_after_s: up, down_after_s: dn } } };
+      }
+      if (f.mode === "demand") {
+        var mx2 = whole(f.maxR), idle = num(f.idleMin);
+        if (mx2 == null || mx2 < 1) return { error: "Max replicas must be at least 1" };
+        if (idle == null || idle <= 0) return { error: "Unload after must be more than 0 minutes" };
+        return { body: { min_replicas: 0, max_replicas: mx2, idle_unload_s: Math.round(idle * 60),
+          autoscale: { target_busy: 0.7, up_after_s: 30, down_after_s: 300 } } };
+      }
+      var r = whole(f.replicas);
+      if (r == null || r < 1) return { error: "Replicas must be at least 1" };
+      return { body: { min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
+    },
+    startReplicas: function (f) {
+      var n = parseInt(f.mode === "autoscale" ? f.minR : f.replicas, 10);
+      return f.mode === "demand" || !(n >= 1) ? 1 : n;
+    },
     saveForm: async function () {
       var f = this.form;
       if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return false; }
+      var sb = this.scalingBody(f);
+      if (sb.error) { this.toast(sb.error, "error"); return false; }
       f.busy = true;
       try {
-        await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), {
+        await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), Object.assign({
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), spread: f.spread || "gpu",
           pin_devices: f.auto ? [] : f.pins
-        });
+        }, sb.body));
         await this.refresh();
         f.busy = false;
         return true;
@@ -556,11 +647,11 @@ function app() {
       if (await this.saveForm()) { this.toast("Saved " + this.form.name, "ok"); this.form.open = false; }
     },
     saveAndStart: async function () {
-      var name = this.form.name.trim();
+      var name = this.form.name.trim(), n = this.startReplicas(this.form);
       if (!(await this.saveForm())) return;
       this.form.open = false;
       try {
-        await this.api("POST", "/api/models/" + encodeURIComponent(name) + "/start", { replicas: 1 });
+        await this.api("POST", "/api/models/" + encodeURIComponent(name) + "/start", { replicas: n });
         this.toast("Starting " + name, "ok");
         await this.refresh();
       } catch (e) { this.fail(e); }

@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 
@@ -5,7 +7,7 @@ from gpupool.coordinator.app import create_app
 from gpupool.coordinator.library import Library
 from gpupool.coordinator.store import ServerRecord, Store
 from tests.test_coordinator_helpers import (
-    META, SPEC, FakeClient, make_cfg, make_planner, node, put_replica,
+    META, SPEC, FakeAutoscaler, FakeClient, make_cfg, make_planner, node, put_replica,
 )
 
 CT = {"Authorization": "Bearer ctok"}
@@ -226,3 +228,27 @@ async def test_admin_register_and_scale_wake_reconciler(env):
     assert len(woke) == 1
     assert (await c.post(f"/admin/models/{SPEC.name}/scale?replicas=2", headers=AD)).status_code == 200
     assert len(woke) == 2
+
+
+async def test_autoscaler_is_wired_started_and_closed(tmp_path):
+    cfg = make_cfg(tmp_path, cluster_token="ctok", admin_key="adm")
+    fake = FakeAutoscaler()
+    app = create_app(cfg, store=Store(":memory:"), client=FakeClient(), start_background=True,
+                     library=Library(":memory:", cfg.models_dir), autoscaler=fake)
+    assert app.state.autoscaler is fake and app.state.reconciler.autoscaler is fake
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0.05)
+        assert fake.ran and not fake.closed
+    assert fake.closed
+
+
+async def test_router_calls_note_request(tmp_path):
+    cfg = make_cfg(tmp_path, cluster_token="ctok", admin_key="adm")
+    fake = FakeAutoscaler()
+    store = Store(":memory:")
+    app = create_app(cfg, store=store, client=FakeClient(), start_background=False,
+                     library=Library(":memory:", cfg.models_dir), autoscaler=fake)
+    store.put_model(SPEC)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/v1/chat/completions", json={"model": "m", "messages": []})
+    assert r.status_code == 503 and fake.requests == ["m"]

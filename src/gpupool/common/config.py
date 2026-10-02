@@ -54,6 +54,8 @@ class CoordinatorConfig(BaseModel):
     heartbeat_timeout_s: float = 10.0
     reconcile_s: float = 2.0
     max_request_mb: int = 32  # cap on one /v1 request body; larger -> 413
+    # A request for a model scaled to zero waits this long for it to load, then gets 503.
+    cold_start_timeout_s: float = 120.0
     launch_timeout_s: float = 600.0
     low_free_mb: int = 256  # device free below this while hosting an engine -> move replica
     drain_timeout_s: float = 60.0

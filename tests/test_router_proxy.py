@@ -311,3 +311,78 @@ async def test_unauthenticated_big_body_is_401_not_413():
     async with env.client() as c:
         r = await c.post("/v1/chat/completions", content=b"x" * (BIG + 1))
     assert r.status_code == 401
+
+
+async def test_cold_start_waits_then_proxies_when_replica_appears():
+    seen = []
+    env = Env({"*": ok}, n=0, on_request=lambda m: seen.append(m) or True,
+              can_cold_start=lambda m: True, cold_start_timeout_s=5, cold_start_poll_s=0.01)
+
+    async def appear():
+        await asyncio.sleep(0.05)
+        env.cands.append(ep(0))
+
+    task = asyncio.create_task(appear())
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+    await task
+    assert r.status_code == 200 and env.hits == ["r0"]
+    assert seen == ["m"]  # once per request, not per poll
+
+
+async def test_cold_start_timeout_is_503_model_loading_with_retry_after():
+    env = Env({"*": ok}, n=0, can_cold_start=lambda m: True, cold_start_timeout_s=0.05,
+              cold_start_poll_s=0.01)
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+    assert r.status_code == 503 and r.headers["retry-after"] == "10"
+    assert r.json()["error"]["code"] == "model_loading" and "'m' is loading" in r.json()["error"]["message"]
+    assert env.metrics.requests[("m", 503)] == 1
+
+
+async def test_cold_start_not_possible_keeps_plain_503():
+    env = Env({"*": ok}, n=0, can_cold_start=lambda m: False, cold_start_timeout_s=5)
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+    assert r.status_code == 503 and r.json()["error"]["code"] == "no_replica"
+    assert "retry-after" not in r.headers
+
+
+async def test_no_callbacks_is_todays_503():
+    env = Env({"*": ok}, n=0)
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+    assert r.status_code == 503 and r.json()["error"]["code"] == "no_replica"
+
+
+async def test_on_request_not_called_for_unknown_model_and_called_once_with_replicas():
+    seen = []
+    env = Env({"*": ok}, on_request=lambda m: seen.append(m) or False)
+    async with env.client() as c:
+        await c.post("/v1/chat/completions", json={**chat(), "model": "nope"})
+        assert seen == []
+        await c.post("/v1/chat/completions", json=chat())
+    assert seen == ["m"]
+
+
+async def test_cold_start_stops_waiting_when_client_disconnects():
+    env = Env({"*": ok}, n=0, can_cold_start=lambda m: True, cold_start_timeout_s=30,
+              cold_start_poll_s=0.01)
+    body = json.dumps(chat()).encode()
+    sent = {"body": False}
+    out = []
+
+    async def receive():
+        if not sent["body"]:
+            sent["body"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}  # is_disconnected() only sees ready messages
+
+    async def send(msg):
+        out.append(msg)
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "raw_path": b"/v1/chat/completions",
+             "query_string": b"", "headers": [(b"content-type", b"application/json"),
+                                              (b"content-length", str(len(body)).encode())],
+             "server": ("t", 80), "client": ("c", 1), "scheme": "http", "http_version": "1.1", "root_path": ""}
+    await asyncio.wait_for(env.app(scope, receive, send), timeout=5)  # far below the 30 s timeout

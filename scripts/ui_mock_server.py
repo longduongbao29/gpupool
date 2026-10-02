@@ -9,6 +9,9 @@ CTG-Server-1 vanishes (gpu_missing). POST /api/_mock/kill/{node_id} triggers the
 Setting ctx_size above 32768 makes /plan answer 409 (does not fit). POST /api/recommend answers with
 ranked options normally and with `not_possible` when the estimated need exceeds the biggest server
 (e.g. ctx_size 131072 on the 8B file, about 3 MB per context token). GET /api/capacity mirrors the live GPU numbers.
+Autoscaling: the model "chat-demand" starts in state `idle` (unloaded; POST /start loads it), "chat-auto" is an
+autoscaled running model whose busy ratio oscillates; GET /api/models/{name}/scaling returns plausible data and a few
+scaled_up / cold_start / unloaded_idle events are seeded. PUT /api/models/{name} validates the scaling fields (422).
 """
 from __future__ import annotations
 
@@ -75,6 +78,18 @@ def reset() -> None:
     MODELS["qwen3b"] = {"spec": {"name": "qwen3b", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096,
         "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu"}, "file": "qwen2.5-3b-q4.gguf", "state": "stopped", "error": None,
         "replicas": [], "_t": 0.0}
+    MODELS["chat-auto"] = {"spec": {"name": "chat-auto", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 8192, "parallel": 4,
+        "replicas": 2, "pin_devices": [], "priority": 70, "spread": "gpu", "min_replicas": 1, "max_replicas": 4,
+        "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": None},
+        "file": "qwen2.5-3b-q4.gguf", "state": "running", "error": None, "replicas": [], "_t": 0.0}
+    _place(MODELS["chat-auto"], 2)
+    MODELS["chat-demand"] = {"spec": {"name": "chat-demand", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096, "parallel": 2,
+        "replicas": 1, "pin_devices": [], "priority": 30, "spread": "gpu", "min_replicas": 0, "max_replicas": 2,
+        "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": 600},
+        "file": "qwen2.5-3b-q4.gguf", "state": "idle", "error": None, "replicas": [], "_t": 0.0}
+    add_event("info", "unloaded_idle", "chat-demand unloaded after 10 min without requests", None, "chat-demand")
+    add_event("info", "cold_start", "chat-demand was unloaded; a request loaded it (cold start)", None, "chat-demand")
+    add_event("info", "scaled_up", "chat-auto scaled up to 2 replicas (busy 0.82 above target 0.70 for 30 s)", None, "chat-auto")
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
 
@@ -153,7 +168,7 @@ def tick() -> None:
                 it["status"] = "ready"
     for m in MODELS.values():
         if m["state"] == "starting" and m.get("_manual") and now - m["_t"] > 4 and not m["replicas"]:
-            _place(m)
+            _place(m, max(1, int(m["spec"].get("replicas") or 1)))
             add_event("info", "model_started", f"Model {m['spec']['name']} is running", None, m["spec"]["name"])
         if m["state"] == "stopping" and now - m["_t"] > 2:
             m["state"], m["replicas"] = "stopped", []
@@ -191,6 +206,26 @@ def _clean(d: dict) -> dict:
     return {k: v for k, v in d.items() if not k.startswith("_")}
 
 
+def _busy(m: dict) -> float | None:
+    """Fake average busy ratio: oscillates for running models, None when nothing runs."""
+    if not m["replicas"]:
+        return None
+    return round(0.5 + 0.4 * math.sin(time.time() / 7 + len(m["spec"]["name"])), 2)
+
+
+def _scaling(m: dict) -> dict:
+    sp = m["spec"]
+    mn, mx = sp.get("min_replicas"), sp.get("max_replicas")
+    n = max(1, int(sp.get("replicas") or 1))
+    lo, hi = (n, n) if mn is None or mx is None else (mn, mx)
+    desired = len(m["replicas"]) if m["replicas"] else (0 if m["state"] == "idle" else lo)
+    return {"min": lo, "max": hi, "desired": desired, "avg_busy": _busy(m), "unloaded": m["state"] == "idle"}
+
+
+def _state_model(m: dict) -> dict:
+    return {**_clean(m), "scaling": _scaling(m)}
+
+
 def auth(authorization: str = Header(default="")) -> None:
     if authorization != f"Bearer {ADMIN_KEY}":
         raise HTTPException(401, "Invalid admin key")
@@ -214,7 +249,7 @@ def state() -> dict:
                     "pool_total_mb": sum(g["total_mb"] for s in alive for g in s["gpus"]), "pool_usable_mb": usable,
                     "models_running": sum(1 for m in MODELS.values() if m["state"] == "running")},
         "servers": servers,
-        "models": [_clean(m) for m in MODELS.values()],
+        "models": [_state_model(m) for m in MODELS.values()],
         "library": [_clean(i) for i in LIBRARY.values()],
         "settings": dict(SETTINGS),
         "events": EVENTS[:50],
@@ -309,7 +344,31 @@ def put_model(name: str, body: dict) -> dict:
     m["spec"].update(source=f"coordinator://{file}", ctx_size=int(body.get("ctx_size", 4096)), parallel=int(body.get("parallel", 1)),
                      pin_devices=list(body.get("pin_devices", [])), priority=_int_in(body.get("priority", 50), 0, 100, "priority"),
                      spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
+    m["spec"].update(_scaling_fields(body))
     return m["spec"]
+
+
+def _scaling_fields(body: dict) -> dict:
+    mn, mx, idle, auto = body.get("min_replicas"), body.get("max_replicas"), body.get("idle_unload_s"), body.get("autoscale")
+    if mn is not None:
+        mn = _int_in(mn, 0, 64, "min_replicas")
+    if mx is not None:
+        mx = _int_in(mx, 1, 64, "max_replicas")
+    if mn is not None and mx is not None and mn > mx:
+        raise HTTPException(422, "min_replicas must not exceed max_replicas")
+    if idle is not None:
+        idle = _int_in(idle, 1, 10_000_000, "idle_unload_s")
+        if mn != 0:
+            raise HTTPException(422, "idle_unload_s requires min_replicas 0")
+    if auto is not None:
+        if not isinstance(auto, dict):
+            raise HTTPException(422, "autoscale must be an object")
+        tb = auto.get("target_busy", 0.7)
+        if not isinstance(tb, (int, float)) or not 0 < tb <= 1:
+            raise HTTPException(422, "autoscale.target_busy must be between 0 and 1")
+        auto = {"target_busy": tb, "up_after_s": _int_in(auto.get("up_after_s", 30), 0, 10_000_000, "autoscale.up_after_s"),
+                "down_after_s": _int_in(auto.get("down_after_s", 300), 0, 10_000_000, "autoscale.down_after_s")}
+    return {"min_replicas": mn, "max_replicas": mx, "autoscale": auto, "idle_unload_s": idle}
 
 
 def _int_in(v, lo: int, hi: int, field: str) -> int:
@@ -332,6 +391,31 @@ def _model(name: str) -> dict:
     if name not in MODELS:
         raise HTTPException(404, "unknown model")
     return MODELS[name]
+
+
+@app.get("/api/models/{name}/scaling", dependencies=[api])
+def model_scaling(name: str) -> dict:
+    tick()
+    m = _model(name)
+    sc = _scaling(m)
+    reps = m["replicas"]
+    avg = sc["avg_busy"]
+    state = {"stopped": "stopped", "failed": "stopped", "idle": "unloaded"}.get(m["state"], "fixed" if sc["min"] == sc["max"] else "steady")
+    if state == "steady" and avg is not None and avg > (m["spec"].get("autoscale") or {}).get("target_busy", 0.7):
+        state = "scaling_up"
+    rows = [{"replica_id": r["replica_id"], "busy": round(min(1.0, max(0.0, (avg or 0) + 0.08 * (i - 0.5))), 2),
+             "requests_processing": 1 + i, "requests_deferred": 0 if (avg or 0) < 0.7 else 2, "measured_decode_tps": round(88.0 - 6 * i, 1),
+             "est_decode_tps": r["placement"]["est_decode_tps"], "metrics_ok": not (i == 1 and name == "chat-auto" and int(time.time()) % 20 < 3)}
+            for i, r in enumerate(reps)]
+    decision = None
+    if name == "chat-auto":
+        decision = {"ts": time.time() - 42, "action": "scale_up", "reason": "avg busy 0.82 > target 0.70 for 30 s"}
+    elif name == "chat-demand":
+        decision = {"ts": time.time() - 600, "action": "unload", "reason": "no requests for 600 s"}
+    return {"model": name, "min": sc["min"], "max": sc["max"], "desired": sc["desired"], "ready": len(reps),
+            "launching": 1 if m["state"] == "starting" else 0, "avg_busy": avg, "queued": 0,
+            "idle_s": 0.0 if reps else (4200.0 if m["state"] == "idle" else None), "state": state,
+            "last_decision": decision, "replicas": rows}
 
 
 @app.post("/api/models/{name}/start", dependencies=[api])

@@ -9,7 +9,7 @@ from gpupool.coordinator.api import make_api_router
 from gpupool.coordinator.store import ServerRecord
 from gpupool.router.balancer import Balancer
 from tests.test_coordinator_helpers import (
-    SPEC, dev, make_cfg, make_planner, make_reconciler, node, put_replica,
+    SPEC, FakeAutoscaler, dev, make_cfg, make_planner, make_reconciler, node, put_replica,
 )
 
 AD = {"Authorization": "Bearer adm"}
@@ -42,13 +42,14 @@ class FakePoller:
 
 
 @pytest.fixture
-async def env():
+async def env(request):
     cfg = make_cfg(admin_key="adm", cluster_token="ctok", public_url="http://coord:8080", api_keys=["k"])
     rec, store, clock = make_reconciler(cfg=cfg)
     poller, balancer, lib = FakePoller(), Balancer(), FakeLibrary(item(), item("big.gguf", "downloading"))
     app = FastAPI()
     app.include_router(make_api_router(store=store, reconciler=rec, poller=poller, balancer=balancer,
-                                       library=lib, cfg=cfg, admin_dep=Depends(require_bearer("adm"))))
+                                       library=lib, cfg=cfg, admin_dep=Depends(require_bearer("adm")),
+                                       autoscaler=getattr(request, "param", None)))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", headers=AD) as c:
         yield c, store, rec, poller, clock, lib
     await rec.shutdown()
@@ -247,7 +248,8 @@ async def test_put_model_create_update_validation(env):
     r = await c.put("/api/models/qwen", json={"file": "x.gguf"})
     assert r.status_code == 200
     assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "ctx_size": 4096,
-                        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu"}
+                        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu",
+                        "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -467,3 +469,66 @@ async def test_recommend_errors(env):
     rec.meta_for = boom
     r = await c.post("/api/recommend", json={"file": "x.gguf"})
     assert r.status_code == 400 and "bad gguf" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------- autoscaling
+async def test_put_model_scaling_fields_validation_and_keep(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    body = {"file": "x.gguf", "min_replicas": 0, "max_replicas": 3, "idle_unload_s": 600,
+            "autoscale": {"target_busy": 0.5}}
+    r = await c.put("/api/models/q", json=body)
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["min_replicas"], j["max_replicas"], j["idle_unload_s"]) == (0, 3, 600)
+    assert j["autoscale"]["target_busy"] == 0.5
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "ctx_size": 8192})  # omitted -> kept
+    assert r.status_code == 200 and (r.json()["max_replicas"], r.json()["idle_unload_s"]) == (3, 600)
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "min_replicas": 5})
+    assert r.status_code == 422 and "max_replicas" in r.text
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "min_replicas": 1})  # idle_unload_s kept -> invalid
+    assert r.status_code == 422 and "idle_unload_s" in r.text
+    r = await c.put("/api/models/new", json={"file": "x.gguf", "idle_unload_s": 60})
+    assert r.status_code == 422
+
+
+async def test_start_keeps_scaling_policy(env):
+    c, store, *_ = env
+    store.put_model(SPEC.model_copy(update={"min_replicas": 0, "max_replicas": 4, "idle_unload_s": 90}))
+    r = await c.post("/api/models/m/start", json={"replicas": 2})
+    assert r.status_code == 200
+    s = store.get_model("m")
+    assert (s.replicas, s.min_replicas, s.max_replicas, s.idle_unload_s) == (2, 0, 4, 90)
+
+
+async def test_scaling_endpoint_404_without_autoscaler(env):
+    c, store, *_ = env
+    store.put_model(SPEC)
+    assert (await c.get("/api/models/m/scaling")).status_code == 404
+
+
+async def test_state_scaling_block_without_autoscaler(env):
+    c, store, *_ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 2, "min_replicas": 1, "max_replicas": 4}))
+    m = model_state((await c.get("/api/state")).json())
+    assert m["scaling"] == {"min": 1, "max": 4, "desired": 2, "avg_busy": None, "unloaded": False}
+
+
+@pytest.mark.parametrize("env", [FakeAutoscaler({"m": 0}, avg_busy=0.25)], indirect=True)
+async def test_state_idle_when_unloaded_and_scaling_view(env):
+    c, store, *_ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 0, "max_replicas": 2}))
+    m = model_state((await c.get("/api/state")).json())
+    assert m["state"] == "idle" and m["error"] is None
+    assert m["scaling"] == {"min": 0, "max": 2, "desired": 0, "avg_busy": 0.25, "unloaded": True}
+    r = await c.get("/api/models/m/scaling")
+    assert r.status_code == 200 and r.json()["avg_busy"] == 0.25
+    assert (await c.get("/api/models/nope/scaling")).status_code == 404
+
+
+@pytest.mark.parametrize("env", [FakeAutoscaler({"m": 0})], indirect=True)
+async def test_state_not_idle_while_a_replica_is_still_live(env):
+    c, store, _, _, clock, _ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 0}))
+    put_replica(store, "m-1", state="ready", now=clock())
+    assert model_state((await c.get("/api/state")).json())["state"] == "running"

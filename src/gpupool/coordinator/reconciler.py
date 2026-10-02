@@ -97,6 +97,7 @@ class Reconciler:
         self.meta_for = meta_for
         self.outstanding = outstanding
         self.clock = clock
+        self.autoscaler = None  # set by the app; None keeps the fixed `replicas` behaviour
         self.notifier = notifier or Notifier(store, getattr(cfg, "webhook_url", ""), clock=clock)
         self.poll_s = 0.5  # engine/health poll interval during launch
         self.planner: Callable | None = None  # tests inject; default is scheduler.placement.plan
@@ -492,8 +493,11 @@ class Reconciler:
         for rec in self.store.list_replicas(states=set(ACTIVE_STATES)):
             if rec.model not in specs:
                 await self.drain(rec.replica_id)
-        for m in [m for m in self._realloc if m not in specs or specs[m].replicas == 0]:
-            self._realloc.pop(m)  # stopped on purpose: nothing left to re-allocate
+        # Without an autoscaler the count is the spec's fixed `replicas`, as before.
+        wanted = {n: self.autoscaler.desired(s) if self.autoscaler is not None else s.replicas
+                  for n, s in specs.items()}
+        for m in [m for m in self._realloc if m not in specs or wanted[m] == 0]:
+            self._realloc.pop(m)  # stopped or unloaded on purpose: nothing left to re-allocate
 
         def has_active(name: str) -> bool:
             return bool(self.store.list_replicas(model=name, states=set(ACTIVE_STATES)))
@@ -505,7 +509,7 @@ class Reconciler:
             moving = [r for r in active if r.state == "ready" and self._low_free(r, nodes)]
             moving_ids = {r.replica_id for r in moving}
             normal = [r for r in active if r.replica_id not in moving_ids]
-            need = spec.replicas
+            need = wanted[spec.name]
 
             if len(normal) < need:
                 await self._maybe_launch(spec, now)

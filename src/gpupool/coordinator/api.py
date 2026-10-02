@@ -11,8 +11,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException, params
 from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
-from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, ModelSpec, Spread
+from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, AutoscalePolicy, ModelSpec, Spread
 from gpupool.coordinator.agent_client import AgentError
+from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.store import ServerRecord, gpu_key
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
@@ -39,6 +40,11 @@ class ModelBody(BaseModel):
     pin_devices: list[str] = Field(default_factory=list)
     priority: int | None = Field(default=None, ge=0, le=100)  # None: keep the stored value, else 50
     spread: Spread | None = None  # None: keep the stored value, else "gpu"
+    # Autoscaling: None keeps the stored value (else unset = fixed count).
+    min_replicas: int | None = Field(default=None, ge=0)
+    max_replicas: int | None = Field(default=None, ge=1)
+    autoscale: AutoscalePolicy | None = None
+    idle_unload_s: float | None = Field(default=None, gt=0)
 
 
 class RecommendBody(BaseModel):
@@ -90,7 +96,7 @@ async def drain_and_delete_model(store, reconciler, name: str) -> None:
 
 
 def make_api_router(*, store, reconciler, poller, balancer, library, cfg: CoordinatorConfig,
-                    admin_dep, notifier=None) -> APIRouter:
+                    admin_dep, notifier=None, autoscaler=None) -> APIRouter:
     """`admin_dep` may be a callable or an already-built Depends(...)."""
     dep = admin_dep if isinstance(admin_dep, params.Depends) else Depends(admin_dep)
     router = APIRouter(prefix="/api", dependencies=[dep])
@@ -125,7 +131,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         ready = any(r.state == "ready" for r in reps)
         launching = any(r.state in ("pending", "launching") for r in reps)
         error = None
-        if spec.replicas > 0:
+        desired = autoscaler.desired(spec) if autoscaler is not None else spec.replicas
+        if spec.replicas > 0 and desired == 0 and not active:
+            state = "idle"  # started but unloaded; the next request loads it
+        elif spec.replicas > 0:
             if ready:
                 state = "running"
             elif launching:
@@ -145,8 +154,12 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         listed = active + ([newest_failed] if newest_failed is not None else [])
         listed.sort(key=lambda r: (r.created_at, r.replica_id))
         file = spec.source[len(COORD_PREFIX):] if spec.source.startswith(COORD_PREFIX) else None
+        lo, hi = bounds(spec)
+        avg_busy = autoscaler.view(spec.name).get("avg_busy") if autoscaler is not None else None
         return {
             "spec": spec.model_dump(mode="json"), "file": file, "state": state, "error": error,
+            "scaling": {"min": lo, "max": hi, "desired": desired, "avg_busy": avg_busy,
+                        "unloaded": spec.replicas > 0 and desired == 0},
             "replicas": [{**r.model_dump(mode="json"), "outstanding": balancer.outstanding(r.replica_id)}
                          for r in listed],
         }
@@ -258,11 +271,22 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             if pin.split("/", 1)[0] not in registered:
                 raise HTTPException(422, f"pin_devices entry {pin!r} names an unregistered server")
         existing = store.get_model(name)
+
+        def keep(new, field: str):
+            return new if new is not None else getattr(existing, field) if existing else None
+
+        lo, hi = keep(body.min_replicas, "min_replicas"), keep(body.max_replicas, "max_replicas")
+        idle = keep(body.idle_unload_s, "idle_unload_s")
+        if lo is not None and hi is not None and lo > hi:
+            raise HTTPException(422, f"min_replicas ({lo}) must not exceed max_replicas ({hi})")
+        if idle is not None and lo != 0:
+            raise HTTPException(422, "idle_unload_s needs min_replicas == 0 (a model that may unload)")
         spec = ModelSpec(
             name=name, source=COORD_PREFIX + body.file, ctx_size=body.ctx_size, parallel=body.parallel,
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
-            spread=body.spread if body.spread is not None else existing.spread if existing else "gpu")
+            spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
+            min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle)
         store.put_model(spec)
         reconciler.wake()
         return spec.model_dump(mode="json")
@@ -275,6 +299,13 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         emit("info", "model_started", f"Model {name} started ({spec.replicas} replica(s) requested)", model=name)
         reconciler.wake()  # not tick(): that waits on the tick lock and agent HTTP calls
         return spec.model_dump(mode="json")
+
+    @router.get("/models/{name}/scaling")
+    async def model_scaling(name: str) -> dict:
+        if autoscaler is None:
+            raise HTTPException(404, "autoscaling not available")
+        spec_or_404(store, name)
+        return autoscaler.view(name)
 
     @router.post("/models/{name}/stop")
     async def stop_model(name: str) -> dict:

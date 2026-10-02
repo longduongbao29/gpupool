@@ -115,6 +115,20 @@ class ModelSpec(BaseModel):
     # Where replicas of this model should avoid each other: "gpu" (different GPUs), "node"
     # (different servers), "none". Soft: a shared GPU is still used when nothing else fits.
     spread: Spread = "gpu"
+    # Autoscaling bounds. None = `replicas` (fixed count, today's behaviour). `replicas` stays the
+    # on/off switch: 0 stops the model whatever these say.
+    min_replicas: int | None = Field(default=None, ge=0)
+    max_replicas: int | None = Field(default=None, ge=1)
+    autoscale: AutoscalePolicy | None = None  # None = default thresholds when max > min
+    # Only with min_replicas == 0: unload after this many seconds without a request; the next
+    # request loads it again (cold start).
+    idle_unload_s: float | None = Field(default=None, gt=0)
+
+
+class AutoscalePolicy(BaseModel):
+    target_busy: float = Field(default=0.7, gt=0, le=1)  # busy slots / slots that triggers scale-up
+    up_after_s: float = Field(default=30.0, ge=0)  # sustained this long before adding a replica
+    down_after_s: float = Field(default=300.0, ge=0)  # below target/2 this long before removing one
 
 
 class LibraryItem(BaseModel):

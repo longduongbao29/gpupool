@@ -3,9 +3,10 @@ import pytest
 import respx
 
 from gpupool.common.models import EngineStatus
+from gpupool.coordinator.reconciler import _Realloc
 from gpupool.coordinator.store import ServerRecord
 from tests.test_coordinator_helpers import (
-    SPEC, Clock, FakeClient, dev, make_cfg, make_planner, make_reconciler, node, put_replica, settle,
+    SPEC, Clock, FakeAutoscaler, FakeClient, dev, make_cfg, make_planner, make_reconciler, node, put_replica, settle,
 )
 
 HEALTH = r"http://10\.0\.0\.\d+:\d+/health"
@@ -715,4 +716,53 @@ async def test_rank_for_applies_pins_and_available_reports(mock_health):
     rec.ranker = ranker
     assert await rec.rank_for(SPEC.model_copy(update={"pin_devices": ["a/CUDA0"]}), 4) == []
     assert seen == {("a", "CUDA0"): 5000, ("a", "CUDA1"): 0, ("b", "CUDA0"): 0, "limit": 4}
+    await rec.shutdown()
+
+
+async def test_autoscaler_desired_replaces_spec_replicas(mock_health):
+    rec, store, clock = make_reconciler()
+    rec.autoscaler = FakeAutoscaler({"m": 2})
+    beat(store, clock, node("a", devices=[dev(usable=9000)]))
+    store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 2, "max_replicas": 3}))
+    for _ in range(3):
+        await rec.tick()
+        await settle(rec)
+    assert len(store.list_replicas(states={"ready", "launching"})) == 2  # desired, not replicas=1
+    await rec.shutdown()
+
+
+async def test_autoscaler_scale_down_drains_newest():
+    rec, store, clock = make_reconciler()
+    rec.autoscaler = FakeAutoscaler({"m": 1})
+    store.put_model(SPEC.model_copy(update={"replicas": 2, "min_replicas": 1, "max_replicas": 2}))
+    beat(store, clock, node("a"))
+    put_replica(store, "m-1", now=clock())
+    put_replica(store, "m-2", head_port=9001, now=clock() + 5)
+    await rec.tick()
+    assert store.get_replica("m-1").state == "ready" and store.get_replica("m-2").state == "draining"
+    await rec.shutdown()
+
+
+async def test_unloaded_model_drains_everything_and_clears_realloc():
+    rec, store, clock = make_reconciler()
+    fake = rec.autoscaler = FakeAutoscaler({"m": 1})
+    store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 0, "max_replicas": 1}))
+    beat(store, clock, node("a"))
+    put_replica(store, "m-1", now=clock())
+    rec._realloc["m"] = _Realloc(since=clock(), lost=None)
+    fake.want["m"] = 0  # idle unload
+    await rec.tick()
+    assert "m" not in rec._realloc
+    assert store.get_replica("m-1").state == "draining"
+    await rec.shutdown()
+
+
+async def test_no_autoscaler_keeps_fixed_replicas(mock_health):
+    rec, store, clock = make_reconciler()
+    assert rec.autoscaler is None
+    beat(store, clock, node("a"))
+    store.put_model(SPEC.model_copy(update={"replicas": 1, "min_replicas": 0}))
+    await rec.tick()
+    await settle(rec)
+    assert len(store.list_replicas()) == 1
     await rec.shutdown()

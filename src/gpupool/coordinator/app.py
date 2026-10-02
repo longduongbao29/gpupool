@@ -18,6 +18,7 @@ from gpupool.common.auth import require_bearer
 from gpupool.common.config import CoordinatorConfig, detect_local_ip, load_or_create_secrets
 from gpupool.common.models import ALL_REPLICA_STATES, ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
 from gpupool.coordinator.agent_client import AgentClient, AgentError
+from gpupool.coordinator.autoscaler import Autoscaler
 from gpupool.coordinator.api import (
     drain_and_delete_model,
     make_api_router,
@@ -97,6 +98,7 @@ def create_app(
     meta_for: Callable[[ModelSpec], Awaitable[ModelMeta]] | None = None,
     start_background: bool = True,
     library: Library | None = None,
+    autoscaler: Autoscaler | None = None,
 ) -> FastAPI:
     store = store or Store(cfg.db_path)
     client = client or AgentClient(cfg.cluster_token)
@@ -110,6 +112,9 @@ def create_app(
     reconciler = Reconciler(store, cfg, client, meta_for or make_meta_provider(cfg, library),
                             balancer.outstanding, notifier=notifier)
     poller = Poller(store, client, cfg.poll_s)
+    autoscaler = autoscaler or Autoscaler(store, cfg, balancer.outstanding, notifier,
+                                          clock=reconciler.clock, wake=reconciler.wake)
+    reconciler.autoscaler = autoscaler
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -117,13 +122,15 @@ def create_app(
         if start_background:
             library.resume()  # restart HF downloads interrupted by a previous run
             tasks = [asyncio.create_task(poller.run(), name="poller"),
-                     asyncio.create_task(reconciler.run(), name="reconciler")]
+                     asyncio.create_task(reconciler.run(), name="reconciler"),
+                     asyncio.create_task(autoscaler.run(), name="autoscaler")]
         try:
             yield
         finally:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await autoscaler.aclose()
             await reconciler.shutdown()
             await library.shutdown()
             await notifier.aclose()
@@ -133,6 +140,7 @@ def create_app(
     app = FastAPI(title="gpupool coordinator", lifespan=lifespan)
     app.state.store, app.state.reconciler, app.state.balancer = store, reconciler, balancer
     app.state.poller, app.state.library, app.state.notifier = poller, library, notifier
+    app.state.autoscaler = autoscaler
     cluster_auth = Depends(require_bearer(cfg.cluster_token))
     admin_auth = Depends(require_bearer(cfg.admin_key))
 
@@ -193,7 +201,8 @@ def create_app(
     app.include_router(make_library_router(library, require_bearer(cfg.admin_key), model_uses_file))
     app.include_router(make_api_router(store=store, reconciler=reconciler, poller=poller,
                                        balancer=balancer, library=library, cfg=cfg,
-                                       admin_dep=admin_auth, notifier=notifier))
+                                       admin_dep=admin_auth, notifier=notifier,
+                                       autoscaler=autoscaler))
 
     # ---- admin
     @app.post("/admin/models", dependencies=[admin_auth])
@@ -298,6 +307,8 @@ def create_app(
         balancer=balancer, metrics=metrics, api_keys=cfg.api_keys,
         on_replica_error=reconciler.note_error,
         max_body_bytes=cfg.max_request_mb * 1024 * 1024,
+        on_request=autoscaler.note_request, can_cold_start=autoscaler.can_cold_start,
+        cold_start_timeout_s=cfg.cold_start_timeout_s,
     ))
 
     @app.get("/metrics")

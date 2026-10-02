@@ -147,3 +147,35 @@ def put_replica(store, rid="m-1", model="m", state="ready", head="a", rpc_node=N
 
 
 SPEC = ModelSpec(name="m", source="http://x/m.gguf")
+
+
+class FakeAutoscaler:
+    """Stands in for coordinator.autoscaler.Autoscaler: fixed answers, records calls."""
+
+    def __init__(self, desired=None, cold=False, avg_busy=None):
+        self.want = desired if desired is not None else {}  # model -> count; missing = spec.replicas
+        self.cold = cold
+        self.avg_busy = avg_busy
+        self.requests: list[str] = []
+        self.ran = False
+        self.closed = False
+
+    def desired(self, spec) -> int:
+        return self.want.get(spec.name, spec.replicas)
+
+    def can_cold_start(self, model) -> bool:
+        return self.cold
+
+    def note_request(self, model) -> bool:
+        self.requests.append(model)
+        return False
+
+    def view(self, model) -> dict:
+        return {"model": model, "avg_busy": self.avg_busy}
+
+    async def run(self) -> None:
+        self.ran = True
+        await asyncio.Event().wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
