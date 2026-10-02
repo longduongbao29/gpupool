@@ -51,6 +51,11 @@ class CoordinatorConfig(BaseModel):
     admin_key: str = ""  # /admin/*
     api_keys: list[str] = Field(default_factory=list)  # /v1/*; empty = open
     models_dir: Path = Path(".gpupool/models")  # served at /files/<name> for coordinator:// sources
+    # Docker: {"<host dir>": "<dir inside the container>"} so users can type host paths.
+    # Env GPUPOOL_PATH_MAP is a JSON object.
+    path_map: dict[str, str] = Field(default_factory=dict)
+    # Folders the UI may browse for .gguf files (env: comma-separated). Empty = models_dir only.
+    model_roots: list[str] = Field(default_factory=list)
     heartbeat_timeout_s: float = 10.0
     reconcile_s: float = 2.0
     max_request_mb: int = 32  # cap on one /v1 request body; larger -> 413

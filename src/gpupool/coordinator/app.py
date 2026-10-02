@@ -126,7 +126,8 @@ def create_app(
     if library is None:
         if str(cfg.db_path) != ":memory:":
             Path(cfg.db_path).parent.mkdir(parents=True, exist_ok=True)
-        library = Library(cfg.db_path, cfg.models_dir, cfg.hf_token)
+        library = Library(cfg.db_path, cfg.models_dir, cfg.hf_token,
+                          path_map=cfg.path_map, model_roots=cfg.model_roots)
     balancer = Balancer()
     metrics = RouterMetrics(balancer)
     notifier = Notifier(store, cfg.webhook_url)

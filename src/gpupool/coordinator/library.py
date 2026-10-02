@@ -43,6 +43,17 @@ def _safe_basename(file: str) -> str:
     return base
 
 
+def _parts_of(path: str) -> list[str]:
+    """Path components with posix and Windows separators treated alike (host paths may be
+    either); empty and "." parts are dropped so "/srv//gguf/" matches "/srv/gguf"."""
+    return [c for c in path.replace("\\", "/").split("/") if c not in ("", ".")]
+
+
+def _is_abs(path: str) -> bool:
+    # A leading "/" counts everywhere: host paths from a Linux box are typed on any OS.
+    return os.path.isabs(path) or path.startswith(("/", "\\"))
+
+
 def _split_info(file: str) -> tuple[str, int, int] | None:
     m = _SPLIT_RE.match(os.path.basename(file))
     return (m["stem"], int(m["idx"]), int(m["total"])) if m else None
@@ -50,8 +61,11 @@ def _split_info(file: str) -> tuple[str, int, int] | None:
 
 class Library:
     def __init__(self, db_path: Path | str, models_dir: Path, hf_token: str = "",
-                 http: httpx.AsyncClient | None = None, clock: Callable[[], float] = time.time):
+                 http: httpx.AsyncClient | None = None, clock: Callable[[], float] = time.time,
+                 path_map: dict[str, str] | None = None, model_roots: list[str] | None = None):
         self.models_dir = Path(models_dir)
+        self.path_map = dict(path_map or {})  # host dir -> directory inside this process
+        self.model_roots = list(model_roots or [])
         self.hf_token = hf_token
         self._clock = clock
         self._own_http = http is None
@@ -196,16 +210,124 @@ class Library:
         self._start(name, repo, parts)
         return self.get(name)  # type: ignore[return-value]
 
+    # ---- path translation / browsing ---------------------------------------------------
+
+    def translate_path(self, path: str) -> str | None:
+        """Container path for a host path, via the longest matching path_map prefix (compared
+        by components, so /srv/gguf2 never matches /srv/gguf). None if nothing matches."""
+        comps = _parts_of(path)
+        best: tuple[int, str] | None = None
+        for host, cont in self.path_map.items():
+            hc = _parts_of(host)
+            if hc and comps[:len(hc)] == hc and (best is None or len(hc) > best[0]):
+                best = (len(hc), cont)
+        if best is None:
+            return None
+        return str(Path(best[1], *comps[best[0]:]))
+
+    def host_path(self, path: str) -> str | None:
+        """Inverse of translate_path: the host path of a container path, or None."""
+        comps = _parts_of(path)
+        best: tuple[int, str] | None = None
+        for host, cont in self.path_map.items():
+            cc = _parts_of(cont)
+            if cc and comps[:len(cc)] == cc and (best is None or len(cc) > best[0]):
+                best = (len(cc), host)
+        if best is None:
+            return None
+        rest = comps[best[0]:]
+        return "/".join([best[1].rstrip("/\\"), *rest]) if rest else best[1]
+
+    def _visible_roots(self) -> list[str]:
+        return list(self.model_roots) or [str(self.models_dir)]
+
+    def _not_found(self, path: str) -> LibraryError:
+        seen = [*self._visible_roots(), *(f"{c} \u2190 {h}" for h, c in self.path_map.items())]
+        return LibraryError(
+            f"no such file inside the coordinator: {path}. When the coordinator runs in Docker "
+            f"it only sees mounted folders ({', '.join(seen)}). Mount the folder "
+            "(GPUPOOL_HOST_MODELS_DIR) or use the path inside the container.")
+
+    def _locate(self, path: str) -> Path:
+        """The path as given if it exists here, else its path_map translation. Raises an
+        actionable error for a missing file or a symlink whose target is not visible."""
+        candidates = [path]
+        translated = self.translate_path(path)
+        if translated and translated != path:
+            candidates.append(translated)
+        broken: Path | None = None
+        for c in candidates:
+            p = Path(c)
+            if p.exists():
+                return p
+            if broken is None and p.is_symlink():
+                broken = p
+        if broken is not None:
+            try:
+                target = os.readlink(broken)
+            except OSError:
+                target = "?"
+            raise LibraryError(
+                f"{broken} is a symlink to {target}, which is not visible inside the coordinator "
+                "(it points outside the mounted folders); mount the folder that contains the "
+                "target too, or copy the file")
+        raise self._not_found(path)
+
+    def browse(self, max_depth: int = 6, max_files: int = 1000) -> dict:
+        """Blocking walk of the model roots for .gguf files (run it in a thread)."""
+        registered = {i.path for i in self.list()}
+        roots = self._visible_roots()
+        files: list[dict] = []
+        truncated = False
+
+        def walk(d: str, depth: int) -> None:
+            nonlocal truncated
+            try:
+                with os.scandir(d) as it:
+                    entries = sorted(it, key=lambda e: e.name)
+            except OSError:
+                return  # unreadable folder: skip, never fail the whole listing
+            for e in entries:
+                if truncated:
+                    return
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if depth < max_depth:
+                            walk(e.path, depth + 1)
+                        continue
+                    if not e.name.lower().endswith(".gguf"):
+                        continue
+                    broken = e.is_symlink() and not os.path.exists(e.path)
+                    if e.is_symlink() and not broken and os.path.isdir(e.path):
+                        continue  # a directory symlink: never followed (loops, escapes)
+                    if len(files) >= max_files:
+                        truncated = True
+                        return
+                    size = 0 if broken else e.stat().st_size
+                    split = _split_info(e.name)
+                    files.append({
+                        "path": e.path, "name": e.name, "bytes": size,
+                        "in_library": e.path in registered,
+                        "split_part": bool(split and split[2] > 1),
+                        "broken_link": broken, "host_path": self.host_path(e.path)})
+                except OSError:
+                    continue
+
+        for r in roots:
+            walk(r, 0)
+        files.sort(key=lambda f: f["path"])
+        return {"roots": [{"path": r, "exists": os.path.isdir(r), "host_path": self.host_path(r)}
+                          for r in roots],
+                "files": files, "truncated": truncated}
+
     def add_path(self, path: str) -> LibraryItem:
-        if not path or not os.path.isabs(path):
+        if not path or not _is_abs(path):
             raise LibraryError("path must be absolute")
-        p = Path(path)
-        if p.suffix.lower() != ".gguf":
+        if Path(path).suffix.lower() != ".gguf":
             raise LibraryError("path must point to a .gguf file")
-        if not p.exists():
-            raise LibraryError(f"no such file: {path}")
+        p = self._locate(path)
         if not p.is_file():
-            raise LibraryError(f"not a regular file: {path}")
+            raise LibraryError(f"not a regular file: {p}")
         name = p.name
         split = _split_info(name)
         if split and split[2] > 1:

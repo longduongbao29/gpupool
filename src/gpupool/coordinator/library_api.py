@@ -1,6 +1,7 @@
 """HTTP routers for the model library and for serving library files to head nodes."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -44,6 +45,11 @@ def make_library_router(library: Library, admin_dep, in_use: Callable[[str], boo
     @r.get("/api/library")
     def list_library():
         return [i.model_dump() for i in library.list()]
+
+    @r.get("/api/library/browse")
+    async def browse_library():
+        # A big tree can take seconds; walk in a thread so the router's event loop keeps serving.
+        return await asyncio.to_thread(library.browse)
 
     @r.post("/api/library")
     async def add_library(body: AddLibraryBody):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -513,3 +514,144 @@ async def test_delete_then_readd_same_name_keeps_new_download_intact(lib):
     assert done.downloaded == 300
     assert (lib.models_dir / "m.gguf").read_bytes() == b"new" * 100
     assert not list(lib.models_dir.glob("*.part"))
+
+
+# ---- host path translation / browsing ----------------------------------------------
+
+def _mapped(tmp_path, **kw):
+    return Library(":memory:", tmp_path / "models", http=httpx.AsyncClient(), **kw)
+
+
+BS = chr(92)
+
+
+def test_translate_longest_prefix_and_component_boundary(tmp_path):
+    lb = _mapped(tmp_path, path_map={"/srv/gguf": "/c/a", "/srv/gguf/big": "/c/b",
+                                     "C:" + BS + "models": "/c/win"})
+    assert lb.translate_path("/srv/gguf/x.gguf") == str(Path("/c/a/x.gguf"))
+    assert lb.translate_path("/srv/gguf/big/y/z.gguf") == str(Path("/c/b/y/z.gguf"))
+    assert lb.translate_path("/srv/gguf2/x.gguf") is None  # not a component match
+    assert lb.translate_path("C:" + BS + "models" + BS + "sub" + BS + "m.gguf") == str(Path("/c/win/sub/m.gguf"))
+    assert lb.translate_path("C:/models//m.gguf") == str(Path("/c/win/m.gguf"))
+    assert lb.host_path("/c/b/y/z.gguf") == "/srv/gguf/big/y/z.gguf"
+    assert lb.host_path("/c/a") == "/srv/gguf"
+    assert lb.host_path("/elsewhere/x.gguf") is None
+    lb._db.close()
+
+
+def test_add_path_translates_host_path_and_stores_container_path(tmp_path):
+    cont = tmp_path / "mounted"
+    cont.mkdir()
+    (cont / "m.gguf").write_bytes(b"abc")
+    lb = _mapped(tmp_path, path_map={"/srv/gguf": str(cont)})
+    item = lb.add_path("/srv/gguf/m.gguf")
+    assert item.path == str(cont / "m.gguf") and item.bytes == 3
+    # An existing path is used as given, even when it also matches a mapping.
+    lb2 = _mapped(tmp_path, path_map={str(tmp_path): str(cont)})
+    assert lb2.add_path(str(cont / "m.gguf")).path == str(cont / "m.gguf")
+    lb._db.close()
+    lb2._db.close()
+
+
+def test_add_path_not_found_message_lists_roots_and_map(tmp_path):
+    lb = _mapped(tmp_path, path_map={"/srv/gguf": "/models"}, model_roots=["/models"])
+    with pytest.raises(LibraryError) as ei:
+        lb.add_path("/srv/other/x.gguf")
+    msg = ei.value.message
+    assert "no such file inside the coordinator: /srv/other/x.gguf" in msg
+    assert "/models" in msg and "/models \u2190 /srv/gguf" in msg
+    assert "GPUPOOL_HOST_MODELS_DIR" in msg
+    lb._db.close()
+
+
+def _symlink(link, target):
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted here")
+
+
+def test_add_path_broken_symlink_message(tmp_path):
+    link = tmp_path / "m.gguf"
+    _symlink(link, tmp_path / "nowhere" / "blob")
+    lb = _mapped(tmp_path)
+    with pytest.raises(LibraryError) as ei:
+        lb.add_path(str(link))
+    assert "is a symlink to" in ei.value.message and "not visible inside the coordinator" in ei.value.message
+    # Same through a translated path.
+    lb2 = _mapped(tmp_path, path_map={"/host": str(tmp_path)})
+    with pytest.raises(LibraryError) as ei:
+        lb2.add_path("/host/m.gguf")
+    assert "is a symlink to" in ei.value.message
+    lb._db.close()
+    lb2._db.close()
+
+
+def test_browse_flags_depth_and_sorting(tmp_path):
+    root = tmp_path / "roots"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "one.gguf").write_bytes(b"1")
+    (root / "b.gguf").write_bytes(b"22")
+    (root / "notes.txt").write_bytes(b"x")
+    (root / "m-00001-of-00002.gguf").write_bytes(b"3")
+    (root / "m-00002-of-00002.gguf").write_bytes(b"3")
+    deep = root
+    for i in range(8):
+        deep = deep / f"d{i}"
+    deep.mkdir(parents=True)
+    (deep / "toodeep.gguf").write_bytes(b"x")
+    (root / "d0" / "d1" / "d2" / "d3" / "d4" / "d5").mkdir(exist_ok=True)
+    (root / "d0" / "d1" / "d2" / "d3" / "d4" / "d5" / "ok.gguf").write_bytes(b"x")
+    lb = _mapped(tmp_path, model_roots=[str(root), str(tmp_path / "gone")],
+                 path_map={"/srv": str(root)})
+    lb.add_path(str(root / "b.gguf"))
+    out = lb.browse()
+    names = [f["name"] for f in out["files"]]
+    assert names == sorted(names, key=lambda n: next(f["path"] for f in out["files"] if f["name"] == n))
+    assert "notes.txt" not in names and "toodeep.gguf" not in names and "ok.gguf" in names
+    by = {f["name"]: f for f in out["files"]}
+    assert by["b.gguf"]["in_library"] and not by["one.gguf"]["in_library"]
+    assert by["b.gguf"]["bytes"] == 2 and by["b.gguf"]["host_path"] == "/srv/b.gguf"
+    assert by["m-00002-of-00002.gguf"]["split_part"] and not by["b.gguf"]["split_part"]
+    assert [r["exists"] for r in out["roots"]] == [True, False]
+    assert out["roots"][0]["host_path"] == "/srv" and out["roots"][1]["host_path"] is None
+    assert out["truncated"] is False
+    lb._db.close()
+
+
+def test_browse_defaults_to_models_dir_and_truncates(tmp_path):
+    lb = _mapped(tmp_path)
+    (tmp_path / "models").mkdir()
+    for i in range(5):
+        (tmp_path / "models" / f"f{i}.gguf").write_bytes(b"x")
+    out = lb.browse(max_files=3)
+    assert [r["path"] for r in out["roots"]] == [str(tmp_path / "models")]
+    assert len(out["files"]) == 3 and out["truncated"] is True
+    assert lb.browse(max_files=5)["truncated"] is False
+    lb._db.close()
+
+
+def test_browse_broken_link_and_dir_symlink_loop(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "real.gguf").write_bytes(b"x")
+    _symlink(root / "dead.gguf", root / "missing")
+    _symlink(root / "loop", root)  # directory symlink back to the root: must not recurse
+    lb = _mapped(tmp_path, model_roots=[str(root)])
+    out = lb.browse()
+    by = {f["name"]: f for f in out["files"]}
+    assert set(by) == {"real.gguf", "dead.gguf"}
+    assert by["dead.gguf"]["broken_link"] and by["dead.gguf"]["bytes"] == 0
+    assert not by["real.gguf"]["broken_link"]
+    lb._db.close()
+
+
+def test_api_browse(client, tmp_path):
+    (client.lib.models_dir).mkdir()
+    (client.lib.models_dir / "a.gguf").write_bytes(b"x")
+    assert client.get("/api/library/browse").status_code == 401
+    r = client.get("/api/library/browse", headers=ADMIN)
+    assert r.status_code == 200
+    body = r.json()
+    assert [f["name"] for f in body["files"]] == ["a.gguf"] and body["truncated"] is False
+    assert body["roots"][0]["exists"] is True

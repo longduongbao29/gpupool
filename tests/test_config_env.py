@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from gpupool.common.config import AgentConfig, CoordinatorConfig, env_overrides
@@ -20,3 +21,14 @@ def test_env_overrides_agent_dict_and_bool():
            "GPUPOOL_BUDGET_MB": '{"CUDA0": 1000}', "GPUPOOL_INCLUDE_CPU": "true"}
     cfg = AgentConfig(**env_overrides(AgentConfig, env))
     assert cfg.budget_mb == {"CUDA0": 1000} and cfg.include_cpu is True
+
+
+def test_env_overrides_path_map_and_model_roots():
+    BS = chr(92)
+    env = {"GPUPOOL_PATH_MAP": json.dumps({"/srv/gguf": "/models", "C:" + BS + "m": "/m2"}),
+           "GPUPOOL_MODEL_ROOTS": "/models, /extra,"}
+    cfg = CoordinatorConfig(**env_overrides(CoordinatorConfig, env))
+    assert cfg.path_map == {"/srv/gguf": "/models", "C:" + BS + "m": "/m2"}
+    assert cfg.model_roots == ["/models", "/extra"]
+    empty = CoordinatorConfig(**env_overrides(CoordinatorConfig, {"GPUPOOL_PATH_MAP": ""}))
+    assert empty.path_map == {} and empty.model_roots == []
