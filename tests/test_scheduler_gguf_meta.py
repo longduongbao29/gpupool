@@ -88,3 +88,17 @@ def test_truncated_and_garbage(tmp_path):
     e.write_bytes(b"")
     with pytest.raises(ValueError):
         read_meta(str(e))
+
+
+def test_estimate_matches_measured_llama_cpp_buffers():
+    # llama.cpp b11342 on a GTX 1650, Qwen2.5-0.5B Q4_K_M, ctx 4096, verbose load log:
+    #   CUDA0 model buffer 373.73 MiB, KV 48.00 MiB, compute 37.76 MiB.
+    # The VRAM drop seen by NVML after load was 525 MB (incl. CUDA context).
+    from gpupool.scheduler.estimate import compute_mb, device_need_mb, kv_bytes_per_layer
+    meta = read_meta(str(MODEL))
+    weights_mib = (sum(meta.layer_bytes) + meta.output_bytes) / 2**20
+    assert abs(weights_mib - 373.73) < 0.5
+    assert kv_bytes_per_layer(meta, 4096) * meta.n_layers / 2**20 == 48.0
+    assert abs(compute_mb(meta) - 37.76) < 2
+    need = device_need_mb(meta, range(meta.n_layers), 4096, "cuda", True)
+    assert 525 <= need <= 525 * 1.2  # never under, at most 20% over

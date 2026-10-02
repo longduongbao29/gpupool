@@ -3,7 +3,7 @@ import itertools
 import pytest
 
 from gpupool.common.models import Device, ModelMeta, ModelSpec, NodeReport
-from gpupool.scheduler.estimate import OVERHEAD_MB, device_need_mb, total_need_mb
+from gpupool.scheduler.estimate import device_need_mb, overhead_mb, total_need_mb
 from gpupool.scheduler.placement import NoFit, plan
 
 MB = 2**20
@@ -87,8 +87,10 @@ def test_two_gpus_one_node():
 def test_three_nodes():
     meta = make_meta(32, layer_mb=120)  # ~ 4 GB of layers
     need = total_need_mb(meta, 512)
-    base = need - 300
-    sizes = [base * 20 // 100 + 400, base * 30 // 100 + 400, base * 65 // 100 + 400]
+    ov = overhead_mb(meta, "cuda")
+    base = need - ov
+    # each node: its share of the weights + its own overhead + a little slack; no two suffice
+    sizes = [base * 20 // 100 + ov + 100, base * 30 // 100 + ov + 100, base * 65 // 100 + ov + 100]
     nodes = [node(f"n{i}", dev("CUDA0", s)) for i, s in enumerate(sizes)]
     ports = Ports()
     pl = plan(meta, SPEC, nodes, "r1", ports)
@@ -164,7 +166,7 @@ def test_pool_exactly_total_still_fits_or_nofit_cleanly():
     nodes = [node(f"n{i}", dev("CUDA0", need // 4 + 10)) for i in range(4)]
     with pytest.raises(NoFit):
         plan(meta, SPEC, nodes, "r1", Ports())
-    assert OVERHEAD_MB["cuda"] == 300
+    assert overhead_mb(meta, "cuda") > 0
 
 
 def test_gpus_on_other_nodes_preferred_over_local_cpu():

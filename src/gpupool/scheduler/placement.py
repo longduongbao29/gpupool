@@ -16,7 +16,7 @@ from gpupool.common.models import (
     NodeReport,
     Placement,
 )
-from gpupool.scheduler.estimate import OVERHEAD_MB, device_need_mb, total_need_mb
+from gpupool.scheduler.estimate import device_need_mb, overhead_mb, total_need_mb
 
 
 class NoFit(Exception):
@@ -51,7 +51,7 @@ def _split(meta: ModelMeta, ctx: int, order: list[_Dev]) -> list[int] | None:
     n, L = len(order), meta.n_layers
     if n == 0 or n > L:
         return None
-    w = [max(1, d.dev.usable_mb - OVERHEAD_MB[d.dev.kind]) for d in order]
+    w = [max(1, d.dev.usable_mb - overhead_mb(meta, d.dev.kind)) for d in order]
     # every device gets at least one layer; distribute the rest proportionally
     spare = L - n
     raw = [spare * x / sum(w) for x in w]
