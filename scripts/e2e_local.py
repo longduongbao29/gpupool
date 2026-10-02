@@ -84,8 +84,8 @@ class Cluster:
         try:
             httpx.get(f"{COORD}/v1/models", timeout=2)
             raise RuntimeError(f"something already listens on {COORD}; stop the previous run")
-        except httpx.ConnectError:
-            pass
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            pass  # nothing listening (Windows may time out instead of refusing)
         if WORK.exists():
             shutil.rmtree(WORK)
         WORK.mkdir(parents=True)
