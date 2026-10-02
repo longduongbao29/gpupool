@@ -53,6 +53,8 @@ def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
 
 class Reconciler:
     READY_REPORT_GRACE_S = 5.0
+    STABLE_S = 300.0  # a replica ready this long counts as healthy: crashes before it feed the backoff
+    KEEP_TERMINAL_PER_MODEL = 10  # stopped/failed history rows kept per model
 
     def __init__(
         self,
@@ -159,7 +161,9 @@ class Reconciler:
                 for d in rep.devices:
                     if f"{rep.node_id}/{d.device_id}" not in pins:
                         d.usable_mb = 0
-        reported_ports = {r.node_id: {e.port for e in r.engines} for r in reports}
+        # Only live processes hold a port; exited/failed engines linger in reports until stopped.
+        reported_ports = {r.node_id: {e.port for e in r.engines if e.state in ("starting", "running")}
+                          for r in reports}
         handed: dict[str, set[int]] = {}
         lo, hi = self.cfg.port_range
         used_cache: dict[str, set[int]] = {}
@@ -213,7 +217,9 @@ class Reconciler:
             await self._detect_failures(nodes, now)
             await self._check_suspects(nodes)
             await self._process_drains(nodes, now)
+            self._clear_stable_backoff(now)
             await self._enforce_counts(nodes, now)
+            self.store.prune_replicas(self.KEEP_TERMINAL_PER_MODEL)
 
     async def run(self) -> None:
         while True:
@@ -264,8 +270,31 @@ class Reconciler:
                        node_id=node_id)
 
     # ------------------------------------------------------------------ failure detection
-    async def _fail(self, rec: ReplicaRecord, reason: str, nodes: dict[str, NodeRecord], now: float) -> None:
+    def _bump_backoff(self, model: str, now: float) -> tuple[int, float]:
+        n, _ = self._backoff.get(model, (0, 0.0))
+        n += 1
+        delay = min(300.0, 5.0 * 2 ** (n - 1))
+        self._backoff[model] = (n, now + delay)
+        return n, delay
+
+    def _clear_stable_backoff(self, now: float) -> None:
+        """A model whose replica has stayed ready for STABLE_S is healthy again: forget its backoff."""
+        for model in list(self._backoff):
+            if any(now - r.updated_at >= self.STABLE_S
+                   for r in self.store.list_replicas(model=model, states={"ready"})):
+                self._backoff.pop(model, None)
+
+    async def _fail(self, rec: ReplicaRecord, reason: str, nodes: dict[str, NodeRecord], now: float,
+                    model_fault: bool = False) -> None:
+        """`model_fault`: the model/engine caused it (not a dead node or missing GPU), so a
+        replica that dies soon after becoming ready backs the model off instead of reloading every tick."""
         log.warning("replica %s failed: %s", rec.replica_id, reason)
+        if model_fault and rec.state == "ready" and now - rec.updated_at < self.STABLE_S:
+            n, delay = self._bump_backoff(rec.model, now)
+            if n >= 2:
+                self._emit("warning", "crash_loop",
+                           f"{rec.model} crashed {n} times shortly after start; next attempt in {delay:.0f} s",
+                           model=rec.model)
         entry = self._realloc.get(rec.model)
         if entry is None:
             self._realloc[rec.model] = {"since": now, "lost": (rec.replica_id, reason), "started": False}
@@ -315,13 +344,15 @@ class Reconciler:
                     self._emit("error", "engine_crashed",
                                f"Engine {eid} on {node_id} {st.state} (exit code {st.exit_code}); "
                                f"last log: {tail or 'n/a'}", node_id=node_id, model=rec.model)
-                    await self._fail(rec, f"engine {eid} {st.state} (exit={st.exit_code}) {tail}".strip(), nodes, now)
+                    await self._fail(rec, f"engine {eid} {st.state} (exit={st.exit_code}) {tail}".strip(), nodes, now,
+                                     model_fault=True)
                     break
                 if st is None and nr.last_seen > rec.updated_at:
                     self._emit("error", "engine_crashed",
                                f"Engine {eid} vanished from the report of {node_id}", node_id=node_id,
                                model=rec.model)
-                    await self._fail(rec, f"engine {eid} missing from {node_id} report", nodes, now)
+                    await self._fail(rec, f"engine {eid} missing from {node_id} report", nodes, now,
+                                     model_fault=True)
                     break
 
     async def _check_suspects(self, nodes: dict[str, NodeRecord]) -> None:
@@ -341,7 +372,8 @@ class Reconciler:
             except httpx.HTTPError as e:
                 ok, why = False, f"health unreachable: {type(e).__name__}"
             if not ok:
-                await self._fail(rec, f"router reported errors and {why}", nodes, self.clock())
+                await self._fail(rec, f"router reported errors and {why}", nodes, self.clock(),
+                                 model_fault=True)
 
     # ------------------------------------------------------------------ drain
     async def drain(self, replica_id: str) -> None:
@@ -498,7 +530,6 @@ class Reconciler:
             if cur is None or cur.state != "launching":
                 raise asyncio.CancelledError  # drained/failed while launching: roll back
             self.store.set_replica_state(rid, "ready", None, now=self.clock())
-            self._backoff.pop(spec.name, None)
             log.info("replica %s ready", rid)
             entry = self._realloc.pop(spec.name, None)
             if entry is not None:
@@ -527,9 +558,7 @@ class Reconciler:
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
-            n, _ = self._backoff.get(spec.name, (0, 0.0))
-            n += 1
-            self._backoff[spec.name] = (n, self.clock() + min(300.0, 5.0 * 2 ** (n - 1)))
+            self._bump_backoff(spec.name, self.clock())
         finally:
             self._launches.pop(rid, None)
 

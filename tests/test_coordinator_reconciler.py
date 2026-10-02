@@ -245,7 +245,8 @@ async def test_ready_replica_stays_reserved_until_a_fresh_report(mock_health):
     # The replica just became ready, but the node's last report may predate the model
     # load: its memory must still count as taken, or the next plan double-books it.
     rec, store, clock = make_reconciler(planner=make_planner(est_mb=1000))
-    beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)]))
+    up = EngineStatus(engine_id="m-old-head", kind="server", state="running", port=9000)  # keeps it alive
+    beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)], engines=[up]))
     put_replica(store, rid="m-old", state="ready", now=clock())
     store.put_model(SPEC.model_copy(update={"replicas": 2}))
     await rec.tick()
@@ -253,7 +254,7 @@ async def test_ready_replica_stays_reserved_until_a_fresh_report(mock_health):
 
     # A report arriving well after 'ready' reflects the load; the reservation is dropped.
     clock.t += rec.READY_REPORT_GRACE_S + 1
-    beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)]))
+    beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)], engines=[up]))
     await rec.tick()
     assert len(store.list_replicas()) == 2
     await rec.shutdown()
@@ -349,3 +350,133 @@ async def test_remove_node_then_tick_replaces_replica_elsewhere(mock_health):
     new = [r for r in store.list_replicas() if r.replica_id != "m-1"]
     assert len(new) == 1 and new[0].placement.head_node == "b" and new[0].state == "ready"
     await rec.shutdown()
+
+
+async def test_ports_of_dead_engines_are_reused():
+    dead = EngineStatus(engine_id="old", kind="rpc", state="exited", port=9000, exit_code=1)
+    live = EngineStatus(engine_id="live", kind="rpc", state="running", port=9001)
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", engines=[dead, live]))
+    assert (await rec.plan_for(SPEC)).head_port == 9000  # exited holds nothing, running does
+
+
+# --- crash loop after ready (C4) ---------------------------------------------------------
+
+async def _ready_then_crash(rec, store, clock, after=10.0):
+    """Wait until a replica is ready, then make its head engine exit `after` s later."""
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas(states={"ready"})[0]
+    clock.t += after
+    exited = EngineStatus(engine_id=f"{r.replica_id}-head", kind="server", state="exited", port=9000, exit_code=1)
+    beat(store, clock, node("a", engines=[exited]))
+    await rec.tick()
+    assert store.get_replica(r.replica_id).state == "failed"
+    return r
+
+
+async def test_crash_after_ready_backs_off_then_relaunches(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await _ready_then_crash(rec, store, clock)
+    n = len(store.list_replicas())
+    clock.t += 4.0  # delay is 5 s
+    beat(store, clock, node("a"))
+    await rec.tick()
+    await settle(rec)
+    assert len(store.list_replicas()) == n  # no immediate relaunch
+    clock.t += 1.5
+    beat(store, clock, node("a"))
+    await rec.tick()
+    await settle(rec)
+    assert len(store.list_replicas()) == n + 1
+    await rec.shutdown()
+
+
+async def test_repeated_crashes_double_delay_up_to_cap(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    expected = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 300.0, 300.0]
+    for i, delay in enumerate(expected):
+        await _ready_then_crash(rec, store, clock)
+        n, not_before = rec._backoff["m"]
+        assert n == i + 1 and not_before == pytest.approx(clock.t + delay)
+        clock.t = not_before  # wait the backoff out; the next loop relaunches
+        beat(store, clock, node("a"))
+    await rec.shutdown()
+
+
+async def test_stable_replica_clears_backoff(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await _ready_then_crash(rec, store, clock)
+    clock.t = rec._backoff["m"][1]
+    beat(store, clock, node("a"))
+    await rec.tick()
+    await settle(rec)
+    assert "m" in rec._backoff  # becoming ready alone does not clear it
+    clock.t += rec.STABLE_S - 1
+    r = store.list_replicas(states={"ready"})[0]
+    running = EngineStatus(engine_id=f"{r.replica_id}-head", kind="server", state="running", port=9000)
+    beat(store, clock, node("a", engines=[running]))
+    await rec.tick()
+    assert "m" in rec._backoff
+    clock.t += 2
+    beat(store, clock, node("a", engines=[running]))
+    await rec.tick()
+    assert "m" not in rec._backoff
+    await rec.shutdown()
+
+
+async def test_node_death_does_not_set_backoff():
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    put_replica(store, "m-1", now=clock())
+    clock.t += 20  # node silent past heartbeat_timeout_s
+    await rec.tick()
+    assert store.get_replica("m-1").state == "failed"
+    assert "m" not in rec._backoff
+
+
+async def test_gpu_missing_does_not_set_backoff():
+    rec, store, clock = make_reconciler()
+    put_replica(store, "m-1", now=clock())
+    beat(store, clock, node("a", devices=[dev("CUDA9")]))
+    await rec.tick()
+    assert store.get_replica("m-1").state == "failed" and "m" not in rec._backoff
+
+
+async def test_late_crash_after_stable_period_sets_no_backoff():
+    rec, store, clock = make_reconciler()
+    put_replica(store, "m-1", now=clock())
+    clock.t += rec.STABLE_S + 1
+    exited = EngineStatus(engine_id="m-1-head", kind="server", state="exited", port=9000, exit_code=1)
+    beat(store, clock, node("a", engines=[exited]))
+    await rec.tick()
+    assert store.get_replica("m-1").state == "failed" and "m" not in rec._backoff
+
+
+async def test_crash_loop_event_on_second_crash(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await _ready_then_crash(rec, store, clock)
+    assert not [e for e in store.list_events() if e.kind == "crash_loop"]
+    clock.t = rec._backoff["m"][1]
+    beat(store, clock, node("a"))
+    await _ready_then_crash(rec, store, clock)
+    ev = [e for e in store.list_events() if e.kind == "crash_loop"]
+    assert len(ev) == 1 and ev[0].level == "warning" and ev[0].model == "m"
+    assert "2 times" in ev[0].message and "10 s" in ev[0].message
+    await rec.shutdown()
+
+
+async def test_tick_prunes_old_terminal_replicas():
+    rec, store, clock = make_reconciler()
+    for i in range(rec.KEEP_TERMINAL_PER_MODEL + 3):
+        put_replica(store, f"m-{i:02d}", state="failed", now=clock() + i)
+    await rec.tick()
+    assert len(store.list_replicas(model="m")) == rec.KEEP_TERMINAL_PER_MODEL

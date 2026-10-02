@@ -256,7 +256,16 @@ class ProcessManager:
                 eng.proc.kill()
                 eng.proc.wait()  # reap: no zombie
         self._clear_pid(engine_id)
-        return self._status(eng)
+        final = self._status(eng)
+        # Forget it: otherwise every /report lists every engine ever stopped and the
+        # coordinator keeps treating their ports as taken until the range is exhausted.
+        # Only stop() forgets; a crashed engine stays listed so the coordinator sees
+        # exited/failed and then calls stop. The identity check protects a concurrent
+        # start() that already replaced this entry. The log stays on disk.
+        with self._lock:
+            if self._engines.get(engine_id) is eng:
+                del self._engines[engine_id]
+        return final
 
     def stop_all(self) -> None:
         with self._lock:

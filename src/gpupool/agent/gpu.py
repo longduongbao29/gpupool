@@ -99,6 +99,7 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
         driver = _text(_best_effort(pynvml.nvmlSystemGetDriverVersion))
         cuda = _cuda_version(_best_effort(pynvml.nvmlSystemGetCudaDriverVersion_v2))
         found = []
+        lost = False
         for i in range(pynvml.nvmlDeviceGetCount()):
             try:
                 h = pynvml.nvmlDeviceGetHandleByIndex(i)
@@ -108,6 +109,7 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
                 # Skip only that GPU: raising here would report the node with no GPUs at all
                 # and fail replicas on its healthy GPUs too.
                 log.warning("NVML device %d unavailable, not reported: %s", i, e)
+                lost = True
                 continue
             if isinstance(pci, bytes):
                 pci = pci.decode()
@@ -122,6 +124,7 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(h)
             except Exception as e:  # lost between enumeration and query: skip it alone
                 log.warning("NVML device %s unavailable, not reported: %s", pci, e)
+                lost = True
                 continue
             if isinstance(name, bytes):
                 name = name.decode()
@@ -138,6 +141,16 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
                               usable_mb=_usable(cfg, did, "cuda", total, free), util_pct=util,
                               temp_c=temp, power_w=power, processes=_gpu_processes(pynvml, h),
                               driver=driver, cuda=cuda))
+        if lost:
+            # The CUDA runtime behind llama.cpp may or may not still count the lost GPU, so
+            # "CUDA<i>" -> physical card is no longer trustworthy: a per-device flag or a new
+            # placement could land on the wrong card. Block new placements on the whole node
+            # (existing replicas are untouched: the coordinator uses usable_mb only for new ones).
+            log.error("a GPU on this node is lost; CUDA device numbering is unreliable, so new "
+                      "placements are blocked (usable_mb=0) until the GPU recovers or the node "
+                      "is rebooted")
+            for d in out:
+                d.usable_mb = 0
         return out
     finally:
         try:

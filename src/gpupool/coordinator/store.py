@@ -222,6 +222,19 @@ class Store:
                 (rec.state, rec.updated_at, rec.model_dump_json(), replica_id),
             )
 
+    def prune_replicas(self, keep_per_model: int) -> int:
+        """Delete terminal replicas (state 'stopped' or 'failed') of each model beyond the
+        newest `keep_per_model` (order: created_at, replica_id). Never deletes any other state."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM replicas WHERE replica_id IN ("
+                " SELECT replica_id FROM ("
+                "  SELECT replica_id, ROW_NUMBER() OVER ("
+                "   PARTITION BY model ORDER BY created_at DESC, replica_id DESC) AS rn"
+                "  FROM replicas WHERE state IN ('stopped', 'failed')) WHERE rn > ?)",
+                (max(0, keep_per_model),))
+            return cur.rowcount
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

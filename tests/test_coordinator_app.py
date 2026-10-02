@@ -138,3 +138,21 @@ async def test_ui_and_healthz_served(env):
     assert r.status_code == 200 and "<html" in r.text.lower()
     # the UI mount at "/" must not shadow the API
     assert (await c.get("/api/state")).status_code == 401
+
+
+async def test_meta_provider_sums_split_parts(tmp_path):
+    # Reading only part 1 of a split GGUF would under-count layer bytes (silent VRAM under-estimate).
+    from gpupool.coordinator.app import make_meta_provider
+    from tests.test_scheduler_gguf_meta import _split_files
+    cfg = make_cfg(tmp_path)
+    cfg.models_dir.mkdir()
+    whole, parts = _split_files(cfg.models_dir)
+    lib = Library(":memory:", cfg.models_dir)
+    lib._exec(
+        "INSERT INTO library(name,path,source,bytes,downloaded,status,created_at)"
+        " VALUES(?,?,'hf',1,1,'ready',0)", ("m-00001-of-00003.gguf", parts[0]))
+    meta_for = make_meta_provider(cfg, lib)
+    meta = await meta_for(SPEC.model_copy(update={"source": "coordinator://m-00001-of-00003.gguf"}))
+    from gpupool.scheduler.gguf_meta import read_meta
+    assert meta.layer_bytes == read_meta(whole).layer_bytes and sum(meta.layer_bytes) > 0
+    lib._db.close()

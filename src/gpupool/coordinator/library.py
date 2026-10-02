@@ -91,12 +91,36 @@ class Library:
             row = self._db.execute("SELECT * FROM library WHERE name=?", (name,)).fetchone()
         return self._item(row) if row else None
 
-    def resolve(self, name: str) -> Path | None:
+    def part_paths(self, name: str) -> list[Path] | None:
+        """Ordered paths of every file of a READY item: [path] for a single file, all parts for
+        a split HF item. None if the item is missing, not ready, or any file is missing."""
         item = self.get(name)
         if item is None or item.status != "ready":
             return None
-        p = Path(item.path)
-        return p if p.is_file() else None
+        if item.source == "hf":
+            paths = [self.models_dir / n for n in self._part_names(item)]
+        else:
+            paths = [Path(item.path)]
+        return paths if all(p.is_file() for p in paths) else None
+
+    def resolve(self, name: str) -> Path | None:
+        """Path of a ready item, or of a part file (idx >= 2) of a ready split item.
+
+        Never joins `name` to a directory: a part is found through its item's own part list."""
+        paths = self.part_paths(name)
+        if paths is not None:
+            return paths[0]
+        m = _SPLIT_RE.match(name)
+        if not m or int(m["idx"]) < 2 or "/" in name or "\\" in name:
+            return None
+        first = self.get(f"{m['stem']}-00001-of-{m['total']}.gguf")
+        if first is None or first.source != "hf":
+            return None
+        paths = self.part_paths(first.name)
+        idx = int(m["idx"])
+        if paths is None or idx > len(paths) or paths[idx - 1].name != name:
+            return None
+        return paths[idx - 1]
 
     def _parts(self, name: str) -> list[dict]:
         with self._lock:
@@ -183,6 +207,12 @@ class Library:
         if not p.is_file():
             raise LibraryError(f"not a regular file: {path}")
         name = p.name
+        split = _split_info(name)
+        if split and split[2] > 1:
+            # Parts are only served and measured together; add split models from Hugging Face.
+            raise LibraryError(
+                "split GGUF files cannot be registered by path; add the model from "
+                "Hugging Face (first part) instead, or merge it with llama-gguf-split --merge")
         try:
             self._exec(
                 "INSERT INTO library(name,path,source,bytes,downloaded,status,created_at)"

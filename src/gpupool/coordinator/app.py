@@ -49,14 +49,22 @@ def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
         source = spec.source
         if source in cache:
             return cache[source]
-        resolved = source
+        from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts  # lazy: other module
+
         if source.startswith("coordinator://"):
             name = source[len("coordinator://"):]
-            found = library.resolve(name) if library is not None else None
-            resolved = str(found) if found is not None else str(_safe_file(cfg.models_dir, name))
-        from gpupool.scheduler.gguf_meta import read_meta  # lazy: owned by another module
-
-        meta = await asyncio.to_thread(read_meta, resolved)
+            paths = library.part_paths(name) if library is not None else None
+            if paths is None:
+                paths = [_safe_file(cfg.models_dir, name)]
+        else:
+            paths = None
+        if paths is None:
+            meta = await asyncio.to_thread(read_meta, source)
+        elif len(paths) == 1:
+            meta = await asyncio.to_thread(read_meta, str(paths[0]))
+        else:
+            # Split GGUF: every part holds some tensors; reading part 1 alone under-counts VRAM.
+            meta = await asyncio.to_thread(read_meta_parts, [str(p) for p in paths])
         cache[source] = meta
         return meta
 

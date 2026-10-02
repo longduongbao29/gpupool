@@ -179,17 +179,17 @@ def _build(kv: dict, tensors: list[tuple[str, int]], file_bytes: int | None) -> 
     )
 
 
-def read_meta(source: str, *, headers: dict | None = None) -> ModelMeta:
-    """Read ModelMeta from a local path or http(s) URL, touching only the header."""
+def _load(source: str, headers: dict | None) -> tuple[dict, list[tuple[str, int]], int | None]:
+    """Parse one GGUF header (local path or http(s) URL): (kv, tensors, file size or None)."""
     if source.startswith(("http://", "https://")):
-        return _read_url(source, headers)
+        return _load_url(source, headers)
     with open(source, "rb") as f:
         size = os.fstat(f.fileno()).st_size
         kv, tensors = _parse(_Stream(f))
-    return _build(kv, tensors, size)
+    return kv, tensors, size
 
 
-def _read_url(url: str, headers: dict | None) -> ModelMeta:
+def _load_url(url: str, headers: dict | None) -> tuple[dict, list[tuple[str, int]], int | None]:
     with httpx.Client(follow_redirects=True, timeout=httpx.Timeout(30.0),
                       **external_sync_kwargs()) as client:
         with client.stream("GET", url, headers=headers or {}) as resp:
@@ -198,4 +198,45 @@ def _read_url(url: str, headers: dict | None) -> ModelMeta:
             size = int(cl) if cl and cl.isdigit() else None
             kv, tensors = _parse(_Stream(resp.iter_raw(64 * 1024)))
         # leaving the stream context closes the connection: the body is not downloaded
+    return kv, tensors, size
+
+
+def _split_count(kv: dict) -> int:
+    # gguf.Keys.Split.LLM_KV_SPLIT_COUNT; written by llama.cpp's gguf-split into every part
+    v = kv.get("split.count")
+    return int(v) if isinstance(v, int) else 0
+
+
+def read_meta(source: str, *, headers: dict | None = None) -> ModelMeta:
+    """Read ModelMeta from a local path or http(s) URL, touching only the header.
+
+    Single-file GGUFs only: a split GGUF's part holds just some of the tensors, so its layer
+    sizes would silently be too small (an under-estimate of VRAM).
+    """
+    kv, tensors, size = _load(source, headers)
+    if _split_count(kv) > 1:
+        raise ValueError(
+            f"split GGUF ({_split_count(kv)} parts): its tensors are spread over several files, "
+            "use read_meta_parts with every part")
     return _build(kv, tensors, size)
+
+
+def read_meta_parts(sources: list[str], *, headers: dict | None = None) -> ModelMeta:
+    """ModelMeta of a split GGUF: KV (architecture, block_count, ...) from the first part,
+    tensors summed over all parts, file_bytes = sum of part sizes (None if any is unknown).
+    sources are local paths or http(s) URLs, in part order."""
+    if not sources:
+        raise ValueError("no GGUF parts given")
+    kv: dict = {}
+    tensors: list[tuple[str, int]] = []
+    total: int | None = 0
+    for i, src in enumerate(sources):
+        pkv, ptensors, size = _load(src, headers)
+        if i == 0:
+            kv = pkv
+            declared = _split_count(kv)
+            if declared and declared != len(sources):
+                raise ValueError(f"split GGUF declares {declared} parts, got {len(sources)}")
+        tensors.extend(ptensors)
+        total = None if total is None or size is None else total + size
+    return _build(kv, tensors, total)

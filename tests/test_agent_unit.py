@@ -168,7 +168,8 @@ def test_lifecycle(pm, monkeypatch):
         pm.start(EngineSpec(engine_id="e2", kind="rpc", port=port, devices=["CPU"]))
     st = pm.stop("e1")
     assert st.state == "exited" and st.exit_code is not None
-    assert pm.list()[0].engine_id == "e1"  # dead engines stay visible
+    assert pm.list() == [] and pm.get("e1") is None  # a stopped engine is forgotten
+    assert (pm.log_dir / "e1.log").is_file()  # ...but its log stays on disk
     assert pm.stop("nope") is None and pm.get("nope") is None
 
 
@@ -182,6 +183,34 @@ def test_failed_exit_code_and_replace(pm, monkeypatch):
     pm.start(spec)  # replaces the dead entry
     st = wait_state(pm, "e1", "exited")
     assert st.exit_code == 0 and st.log_tail == ["ok"]
+
+
+def test_crashed_engine_stays_listed_until_stopped(pm, monkeypatch):
+    # The coordinator detects a crash by seeing exited/failed in the report, then calls stop.
+    patch_cmd(monkeypatch, "import sys; sys.exit(3)")
+    pm.start(EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"]))
+    wait_state(pm, "e1", "failed")
+    assert [s.engine_id for s in pm.list()] == ["e1"]
+    assert pm.stop("e1").state == "failed"
+    assert pm.list() == [] and pm.get("e1") is None
+
+
+def test_stop_does_not_forget_a_replacement(pm, monkeypatch):
+    patch_cmd(monkeypatch, "import sys; sys.exit(0)")
+    pm.start(EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"]))
+    old = pm._engines["e1"]
+    wait_state(pm, "e1", "exited")
+    new_spec = EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"])
+    orig_status = pm._status
+
+    def status_then_replace(eng):
+        st = orig_status(eng)
+        if eng is old:  # a concurrent start() lands between the status and the removal
+            pm.start(new_spec)
+        return st
+    monkeypatch.setattr(pm, "_status", status_then_replace)
+    pm.stop("e1")
+    assert pm._engines["e1"] is not old
 
 
 def test_kill_when_terminate_ignored(pm, monkeypatch):
@@ -274,6 +303,56 @@ def test_ensure_concurrent_downloads_once(tmp_path, http_server):
     [t.start() for t in ts]
     [t.join() for t in ts]
     assert len(res) == 4 and len(_Handler.hits) == 1
+
+
+def _split_names(stem, total):
+    return [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+
+
+def test_ensure_split_downloads_all_parts(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    names = _split_names("model", 3)
+    p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    assert p == cache / names[0]
+    assert n == 3 * 4100
+    assert all((cache / x).stat().st_size == 4100 for x in names)
+    assert sorted(_Handler.hits) == sorted(f"/files/{x}" for x in names)
+    assert _Handler.hits[-1] == f"/files/{names[0]}"  # part 1 last
+    _Handler.hits.clear()
+    p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    assert (p, n) == (cache / names[0], 3 * 4100) and _Handler.hits == []
+
+
+def test_ensure_split_fetches_only_missing_part(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    names = _split_names("model", 3)
+    ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    (cache / names[1]).unlink()
+    _Handler.hits.clear()
+    p, n = ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    assert n == 3 * 4100 and _Handler.hits == [f"/files/{names[1]}"]
+
+
+def test_ensure_split_http_source_swaps_last_segment(tmp_path, http_server):
+    names = _split_names("model", 2)
+    p, n = ensure_model("m", f"{http_server}/dir/{names[0]}", tmp_path / "cache", "x", "t")
+    assert n == 2 * 4100
+    assert sorted(_Handler.hits) == sorted(f"/dir/{x}" for x in names)
+
+
+def test_ensure_split_failed_part_leaves_no_part_files(tmp_path, http_server):
+    cache = tmp_path / "cache"
+    names = _split_names("bad", 2)  # the stub truncates every path containing "bad"
+    with pytest.raises(Exception):
+        ensure_model("m", f"coordinator://{names[0]}", cache, http_server, "tok")
+    assert list(cache.glob("*.part")) == []
+    assert not (cache / names[0]).exists()  # part 1 never looks complete
+
+
+def test_ensure_non_first_part_is_a_plain_file(tmp_path, http_server):
+    name = _split_names("model", 3)[1]
+    p, n = ensure_model("m", f"coordinator://{name}", tmp_path / "cache", http_server, "tok")
+    assert n == 4100 and _Handler.hits == [f"/files/{name}"]
 
 
 def test_ensure_missing_local(tmp_path):
@@ -411,3 +490,64 @@ def test_lost_gpu_is_skipped_alone(tmp_path, monkeypatch):
     m.nvmlDeviceGetPciInfo = pci
     devs = g._cuda_devices(make_cfg(tmp_path))
     assert [d.device_id for d in devs] == ["CUDA0"]
+    assert devs[0].usable_mb == 0  # numbering is no longer trustworthy, see below
+
+
+def _three_gpus(monkeypatch):
+    from types import SimpleNamespace as NS
+    m = _stub_nvml(monkeypatch)
+    m.nvmlDeviceGetCount = lambda: 3
+    m.nvmlDeviceGetHandleByIndex = lambda i: f"h{i}"
+    m.nvmlDeviceGetPciInfo = lambda h: NS(busId=f"0000:0{h[1]}:00.0")
+    return m
+
+
+def test_all_healthy_gpus_are_usable(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    _three_gpus(monkeypatch)
+    devs = g._cuda_devices(make_cfg(tmp_path))
+    assert [d.device_id for d in devs] == ["CUDA0", "CUDA1", "CUDA2"]
+    assert all(d.usable_mb > 0 for d in devs)
+
+
+def test_lost_gpu_in_handle_query_blocks_node(tmp_path, monkeypatch, caplog):
+    import gpupool.agent.gpu as g
+    m = _three_gpus(monkeypatch)
+
+    def handle(i):
+        if i == 1:
+            raise _NvmlErr("GPU_IS_LOST")
+        return f"h{i}"
+    m.nvmlDeviceGetHandleByIndex = handle
+    with caplog.at_level("ERROR"):
+        devs = g._cuda_devices(make_cfg(tmp_path))
+    assert len(devs) == 2 and all(d.usable_mb == 0 for d in devs)
+    assert sum(r.levelname == "ERROR" for r in caplog.records) == 1
+
+
+def test_lost_gpu_in_pci_query_blocks_node(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    import gpupool.agent.gpu as g
+    m = _three_gpus(monkeypatch)
+
+    def pci(h):
+        if h == "h1":
+            raise _NvmlErr("GPU_IS_LOST")
+        return NS(busId=f"0000:0{h[1]}:00.0")
+    m.nvmlDeviceGetPciInfo = pci
+    devs = g._cuda_devices(make_cfg(tmp_path))
+    assert len(devs) == 2 and all(d.usable_mb == 0 for d in devs)
+
+
+def test_lost_gpu_in_memory_query_blocks_node(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+    import gpupool.agent.gpu as g
+    m = _three_gpus(monkeypatch)
+
+    def mem(h):
+        if h == "h1":
+            raise _NvmlErr("GPU_IS_LOST")
+        return NS(total=4000 * 1024 * 1024, free=3000 * 1024 * 1024)
+    m.nvmlDeviceGetMemoryInfo = mem
+    devs = g._cuda_devices(make_cfg(tmp_path))
+    assert len(devs) == 2 and all(d.usable_mb == 0 for d in devs)

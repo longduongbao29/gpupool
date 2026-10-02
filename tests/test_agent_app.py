@@ -138,7 +138,8 @@ async def test_shutdown_stops_engines(cfg, monkeypatch, tmp_path):
     async with app.router.lifespan_context(app):
         pm.start(__import__("gpupool.common.models", fromlist=["EngineSpec"]).EngineSpec(
             engine_id="e1", kind="rpc", port=port, devices=["CPU"]))
-    assert pm._engines["e1"].proc.poll() is not None
+        proc = pm._engines["e1"].proc  # stop() forgets the entry, keep the process
+    assert proc.poll() is not None and pm.list() == []
 
 
 async def test_heartbeat_off_by_default_and_report_has_host_telemetry(cfg):

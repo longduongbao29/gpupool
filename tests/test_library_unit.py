@@ -337,6 +337,65 @@ def test_resolve_requires_ready_and_existing_file(lib, tmp_path):
     assert lib.resolve("m.gguf") is None
 
 
+def _ready_split(lib, total=3):
+    lib.models_dir.mkdir(parents=True, exist_ok=True)
+    names = [f"m-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+    for n in names:
+        (lib.models_dir / n).write_bytes(n.encode())
+    lib._exec(
+        "INSERT INTO library(name,path,source,hf_repo,hf_file,bytes,downloaded,status,created_at,parts)"
+        " VALUES(?,?,'hf',?,?,1,1,'ready',0,?)",
+        (names[0], str(lib.models_dir / names[0]), REPO, names[0], "[]"))
+    return names
+
+
+def test_part_paths_single_and_split(lib, tmp_path):
+    f = tmp_path / "s.gguf"
+    f.write_bytes(b"x")
+    lib.add_path(str(f))
+    assert lib.part_paths("s.gguf") == [f]
+    assert lib.part_paths("nope.gguf") is None
+    names = _ready_split(lib)
+    assert lib.part_paths(names[0]) == [lib.models_dir / n for n in names]
+    (lib.models_dir / names[1]).unlink()
+    assert lib.part_paths(names[0]) is None  # a missing part makes the item unusable
+    assert lib.resolve(names[0]) is None
+
+
+def test_part_paths_none_while_downloading(lib):
+    names = _ready_split(lib)
+    lib._exec("UPDATE library SET status='downloading'")
+    assert lib.part_paths(names[0]) is None
+    assert lib.resolve(names[1]) is None
+
+
+def test_resolve_part_of_ready_split_only(lib):
+    names = _ready_split(lib)
+    assert lib.resolve(names[1]) == lib.models_dir / names[1]
+    assert lib.resolve(names[2]) == lib.models_dir / names[2]
+    assert lib.resolve("m-00004-of-00003.gguf") is None  # beyond the part list
+    assert lib.resolve("other-00002-of-00003.gguf") is None  # unknown item
+    assert lib.resolve("m-00002-of-00005.gguf") is None  # foreign total
+    assert lib.resolve("../m-00002-of-00003.gguf") is None
+    assert lib.resolve("sub/m-00002-of-00003.gguf") is None
+
+
+def test_resolve_part_of_path_item_is_not_served(lib, tmp_path):
+    # a path item is never split: sibling files next to it are not reachable by part name
+    f = tmp_path / "x.gguf"
+    f.write_bytes(b"x")
+    (tmp_path / "x-00002-of-00003.gguf").write_bytes(b"y")
+    lib.add_path(str(f))
+    assert lib.resolve("x-00002-of-00003.gguf") is None
+
+
+def test_add_path_rejects_split_part(lib, tmp_path):
+    f = tmp_path / "m-00001-of-00003.gguf"
+    f.write_bytes(b"x")
+    with pytest.raises(LibraryError, match="split"):
+        lib.add_path(str(f))
+
+
 # ---- HTTP --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -347,6 +406,7 @@ def client(lib):
     app.include_router(make_files_router(lib, require_bearer("cluster")))
     c = TestClient(app)
     c.used = used
+    c.lib = lib
     return c
 
 
@@ -402,6 +462,14 @@ def test_files_serves_known_rejects_unknown(client, tmp_path):
     assert r.status_code == 200 and r.content == b"hello"
     assert client.get("/files/unknown.gguf", headers=CLUSTER).status_code == 404
     assert client.get("/files/..%2Fm.gguf", headers=CLUSTER).status_code == 404
+
+
+def test_files_serves_split_parts(client):
+    names = _ready_split(client.lib)
+    for n in names:
+        r = client.get(f"/files/{n}", headers=CLUSTER)
+        assert r.status_code == 200 and r.content == n.encode()
+    assert client.get("/files/m-00004-of-00003.gguf", headers=CLUSTER).status_code == 404
 
 
 # ---- real --------------------------------------------------------------------------

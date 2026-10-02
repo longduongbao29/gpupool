@@ -72,7 +72,7 @@ def make_files_router(library: Library, cluster_dep) -> APIRouter:
 
     @r.get("/files/{name}")
     def get_file(name: str):
-        path = library.resolve(name)  # lookup by item name only: no path joining
+        path = library.resolve(name)  # item name or a part of a split item: no path joining
         if path is None:
             raise HTTPException(status_code=404, detail="no such model file")
         return FileResponse(path, filename=name, media_type="application/octet-stream")

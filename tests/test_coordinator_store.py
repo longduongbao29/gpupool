@@ -96,3 +96,30 @@ def test_events_order_filter_read_and_prune(store, monkeypatch):
     for i in range(5):
         store.add_event(float(i), "info", "k", f"m{i}")
     assert len(store.list_events(limit=100)) == 3
+
+
+def test_prune_replicas_keeps_newest_terminal_per_model(store):
+    for i in range(5):
+        put_replica(store, f"m-{i}", "m", "failed" if i % 2 else "stopped", now=1000.0 + i)
+    for i in range(3):
+        put_replica(store, f"o-{i}", "other", "stopped", now=2000.0 + i)
+    assert store.prune_replicas(2) == 3 + 1
+    assert [r.replica_id for r in store.list_replicas(model="m")] == ["m-3", "m-4"]
+    assert [r.replica_id for r in store.list_replicas(model="other")] == ["o-1", "o-2"]
+    assert store.prune_replicas(2) == 0
+
+
+def test_prune_replicas_never_deletes_non_terminal(store):
+    for i, st in enumerate(["pending", "launching", "ready", "draining"]):
+        put_replica(store, f"m-{i}", "m", st, now=1000.0 + i)
+    for i in range(3):
+        put_replica(store, f"m-old{i}", "m", "failed", now=10.0 + i)  # older than the live ones
+    assert store.prune_replicas(0) == 3
+    assert {r.state for r in store.list_replicas()} == {"pending", "launching", "ready", "draining"}
+
+
+def test_prune_replicas_tie_breaks_on_replica_id(store):
+    for rid in ("m-a", "m-b", "m-c"):
+        put_replica(store, rid, "m", "failed", now=1000.0)
+    assert store.prune_replicas(1) == 2
+    assert [r.replica_id for r in store.list_replicas()] == ["m-c"]
