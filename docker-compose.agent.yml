@@ -1,0 +1,35 @@
+# Agent (every GPU server). Needs the NVIDIA Container Toolkit. Set in .env:
+#   GPUPOOL_NODE_ID      unique name of this server, e.g. server-a
+#   GPUPOOL_HOST         this server's IP that the coordinator and other servers can reach
+#   GPUPOOL_CLUSTER_TOKEN, GPUPOOL_COORDINATOR_URL (same values as on the coordinator)
+# then:  docker compose -f docker-compose.agent.yml up -d --build
+# and add http://<GPUPOOL_HOST>:7070 in the UI (Servers > Add Server).
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+      args:
+        CUDA_ARCHS: ${CUDA_ARCHS:-61;70;75;80;86;89;90}
+    image: gpupool-agent:latest
+    restart: unless-stopped
+    network_mode: host   # engines listen on ports the coordinator picks, on this server's IP
+    pid: host            # NVML reports host PIDs; needed for correct GPU process names
+    environment:
+      GPUPOOL_NODE_ID: ${GPUPOOL_NODE_ID:?set GPUPOOL_NODE_ID in .env}
+      GPUPOOL_HOST: ${GPUPOOL_HOST:?set GPUPOOL_HOST in .env}
+      GPUPOOL_CLUSTER_TOKEN: ${GPUPOOL_CLUSTER_TOKEN:?set GPUPOOL_CLUSTER_TOKEN in .env}
+      GPUPOOL_COORDINATOR_URL: ${GPUPOOL_COORDINATOR_URL:?set GPUPOOL_COORDINATOR_URL in .env}
+      GPUPOOL_MARGIN_PCT: ${GPUPOOL_MARGIN_PCT:-0.10}
+    volumes:
+      - gpupool-agent:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+
+volumes:
+  gpupool-agent:

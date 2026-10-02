@@ -1,0 +1,104 @@
+# Builds both images on every push/PR so a broken Dockerfile is caught early.
+# Images are pushed to GHCR only for version tags (v*), e.g. `git tag v0.2.0 && git push --tags`.
+name: docker
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  coordinator:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/gpupool-coordinator
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/coordinator.Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          load: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=coordinator
+          cache-to: type=gha,mode=max,scope=coordinator
+      - name: Smoke test (starts, serves the UI and health)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          img=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          docker run -d --name c -p 8080:8080 -e GPUPOOL_ADMIN_KEY=k -e GPUPOOL_CLUSTER_TOKEN=t "$img"
+          for i in $(seq 30); do curl -fsS localhost:8080/healthz && break; sleep 1; done
+          curl -fsS localhost:8080/ | grep -qi "<html"
+          curl -fsS -H "Authorization: Bearer k" localhost:8080/api/state | python3 -m json.tool | head -20
+          docker logs c
+
+  agent:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space (CUDA devel image is large)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/gpupool-agent
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/agent.Dockerfile
+          # Untagged builds compile one CUDA arch to stay within CI time; releases build all.
+          build-args: |
+            CUDA_ARCHS=${{ startsWith(github.ref, 'refs/tags/v') && '61;70;75;80;86;89;90' || '75' }}
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          load: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+      - name: Smoke test (binaries load without a GPU)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          img=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          docker run --rm --entrypoint /opt/llama/llama-server "$img" --version
+          docker run --rm --entrypoint /opt/llama/ggml-rpc-server "$img" --help | head -5
+          docker run --rm --entrypoint gpupool "$img" --help

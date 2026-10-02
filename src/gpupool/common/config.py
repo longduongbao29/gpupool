@@ -1,7 +1,10 @@
 """Configuration for agent and coordinator. Loaded from TOML, overridable from the CLI."""
 from __future__ import annotations
 
+import json
+import os
 import tomllib
+import typing
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -53,3 +56,31 @@ class CoordinatorConfig(BaseModel):
 def load_toml(path: Path) -> dict:
     with open(path, "rb") as f:
         return tomllib.load(f)
+
+
+def env_overrides(cls: type[BaseModel], environ: dict[str, str] | None = None,
+                  prefix: str = "GPUPOOL_") -> dict:
+    """Config values from environment variables: field `api_keys` <- GPUPOOL_API_KEYS.
+
+    Lists are comma-separated, dicts are JSON, tuples are "a-b" or comma-separated,
+    booleans accept 1/0/true/false. HF_TOKEN is also read for `hf_token`. Used by the
+    Docker images, where a config file is awkward.
+    """
+    env = os.environ if environ is None else environ
+    out: dict = {}
+    for name, field in cls.model_fields.items():
+        raw = env.get(prefix + name.upper())
+        if raw is None and name == "hf_token":
+            raw = env.get("HF_TOKEN")
+        if raw is None:
+            continue
+        origin = typing.get_origin(field.annotation)
+        if origin is list:
+            out[name] = [x.strip() for x in raw.split(",") if x.strip()]
+        elif origin is dict:
+            out[name] = json.loads(raw) if raw.strip() else {}
+        elif origin is tuple:
+            out[name] = tuple(int(x) for x in raw.replace("-", ",").split(","))
+        else:
+            out[name] = raw  # pydantic coerces str -> int/float/bool/Path
+    return out

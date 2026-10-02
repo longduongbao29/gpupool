@@ -1,0 +1,12 @@
+.git
+.venv
+.cache
+.gpupool
+.pytest_cache
+**/__pycache__
+tests
+scripts
+docs
+data
+models
+.env

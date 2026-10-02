@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 
 from gpupool.common.auth import bearer_headers
-from gpupool.common.config import AgentConfig, CoordinatorConfig, load_toml
+from gpupool.common.config import AgentConfig, CoordinatorConfig, env_overrides, load_toml
 
 
 def _merge(base: dict, overrides: dict) -> dict:
@@ -35,7 +35,9 @@ def _merge(base: dict, overrides: dict) -> dict:
 def _cmd_agent(args: argparse.Namespace) -> int:
     from gpupool.agent.app import run_agent
 
+    # precedence: CLI flags > GPUPOOL_* environment > TOML file > defaults
     data = load_toml(Path(args.config)) if args.config else {}
+    data = _merge(data, env_overrides(AgentConfig))
     data = _merge(data, {"node_id": args.node_id, "host": args.host, "port": args.port,
                          "coordinator_url": args.coordinator, "llama_dir": args.llama_dir})
     run_agent(AgentConfig(**data))
@@ -46,6 +48,7 @@ def _cmd_coordinator(args: argparse.Namespace) -> int:
     from gpupool.coordinator.app import run_coordinator
 
     data = load_toml(Path(args.config)) if args.config else {}
+    data = _merge(data, env_overrides(CoordinatorConfig))
     data = _merge(data, {"host": args.host, "port": args.port})
     run_coordinator(CoordinatorConfig(**data))
     return 0
