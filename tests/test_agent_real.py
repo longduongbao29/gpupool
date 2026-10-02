@@ -44,3 +44,29 @@ def test_real_rpc_server_lifecycle(tmp_path):
         assert not psutil.pid_exists(pid)
     finally:
         pm.stop_all()
+
+
+def test_real_split_command_is_accepted_by_llama_server(tmp_path):
+    # Feed the exact split command build_command produces to the real argument parser.
+    # Regression: "--device CUDA0,RPC0" before "--rpc" made llama-server exit with a usage
+    # error, which every mocked test missed and the first real multi-node launch hit.
+    import subprocess
+
+    from gpupool.agent.procs import build_command, find_binaries
+
+    pm = ProcessManager(LLAMA_DIR, tmp_path / "logs", "127.0.0.1")
+    port = free_port()
+    pm.start(EngineSpec(engine_id="rpc", kind="rpc", port=port, devices=["CPU"]))
+    try:
+        end = time.time() + 30
+        while time.time() < end and pm.get("rpc").state != "running":
+            time.sleep(0.2)
+        spec = EngineSpec(engine_id="head", kind="server", port=free_port(),
+                          devices=["CUDA0", "RPC0"], model="m",
+                          rpc_endpoints=[f"127.0.0.1:{port}"], tensor_split=[1, 1])
+        cmd = build_command(spec, find_binaries(LLAMA_DIR), "127.0.0.1", "unused.gguf")
+        r = subprocess.run(cmd + ["--list-devices"], capture_output=True, text=True, timeout=60)
+        out = r.stdout + r.stderr
+        assert r.returncode == 0 and "RPC0" in out, out[-2000:]
+    finally:
+        pm.stop_all()

@@ -59,6 +59,8 @@ def test_build_server_split():
     assert cmd[cmd.index("--device") + 1] == "CUDA0,RPC0,RPC1"
     assert cmd[cmd.index("--rpc") + 1] == "a:1,b:2"
     assert cmd[cmd.index("--tensor-split") + 1] == "10,0.5,2.25"
+    # llama.cpp resolves --device names at parse time: RPC devices exist only after --rpc
+    assert cmd.index("--rpc") < cmd.index("--device")
 
 
 def test_build_server_requires_model_path():

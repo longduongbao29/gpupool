@@ -61,12 +61,16 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
         raise ValueError("server engine needs a model_path")
     cmd = [str(bins["server"]), "-m", model_path, "--host", bind_host, "--port", str(spec.port),
            "--alias", spec.model or "", "-c", str(spec.ctx_size), "-np", str(spec.parallel),
-           "-ngl", "999", "--device", ",".join(spec.devices), "--split-mode", "layer",
-           "--cache-reuse", "256", "--metrics",
-           # the scheduler computed the layer split; llama.cpp auto-fit must not change it
-           "--fit", "off"]
+           "-ngl", "999"]
+    # --rpc MUST precede --device: llama.cpp resolves device names while parsing arguments,
+    # so "RPC0" in --device only exists once --rpc has registered the servers (b11342 exits
+    # with a usage error otherwise).
     if spec.rpc_endpoints:
         cmd += ["--rpc", ",".join(spec.rpc_endpoints)]
+    cmd += ["--device", ",".join(spec.devices), "--split-mode", "layer",
+            "--cache-reuse", "256", "--metrics",
+            # the scheduler computed the layer split; llama.cpp auto-fit must not change it
+            "--fit", "off"]
     if len(spec.devices) > 1:
         cmd += ["--tensor-split", ",".join(f"{x:g}" for x in spec.tensor_split)]
     return cmd + list(spec.extra_args)
