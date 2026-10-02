@@ -155,7 +155,7 @@ Replica state trong store: `pending → launching → ready → draining → sto
 - `kv_bytes_per_layer = 2 * ctx_size * n_head_kv * head_dim * 2` (K và V, f16).
 - Device giữ `L` layer cần `sum(layer_bytes của L layer) + L * kv_bytes_per_layer + overhead`.
 - `overhead` = 300 MB / CUDA device (context + compute buffer), 150 MB / CPU device.
-- `other_bytes` (embedding/output) tính vào device đầu tiên (head).
+- `output_bytes` (output.weight hoặc token_embd khi tied + output_norm) tính vào **device cuối** theo thứ tự --device; token_embd nằm ở RAM host, không tính vào GPU.
 
 **Luật chọn** (`placement.py`, thuần hàm `plan(meta, spec, nodes, exclude) -> Placement`, raise `NoFit`):
 

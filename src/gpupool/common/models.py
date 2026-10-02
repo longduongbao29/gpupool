@@ -86,6 +86,10 @@ class ModelMeta(BaseModel):
     head_dim: int
     layer_bytes: list[int]  # total tensor bytes of block "blk.{i}." for i in range(n_layers)
     other_bytes: int  # every tensor not in a block: token_embd, output, output_norm...
+    # Bytes llama.cpp puts on the LAST offload device: output.weight (or token_embd.weight
+    # when the model ties embeddings and has no output.weight) + output_norm.*.
+    # token_embd itself stays in host RAM, so it is not counted against any GPU.
+    output_bytes: int
     file_bytes: int | None = None
 
 
