@@ -161,12 +161,12 @@ async def test_meta_provider_sums_split_parts(tmp_path):
 @pytest.fixture
 def routing(tmp_path, monkeypatch):
     """App built with start_background=False; captures the router's callables."""
-    from gpupool.router import proxy
+    from gpupool.coordinator import app as app_module
     from tests.test_coordinator_helpers import Clock
 
     captured = {}
-    real = proxy.make_router
-    monkeypatch.setattr(proxy, "make_router", lambda **kw: captured.update(kw) or real(**kw))
+    real = app_module.make_router
+    monkeypatch.setattr(app_module, "make_router", lambda **kw: captured.update(kw) or real(**kw))
     store = Store(":memory:")
     calls = {"nodes": 0, "models": 0}
     for name in ("list_nodes", "list_models"):

@@ -11,16 +11,16 @@ from fastapi import APIRouter, Body, Depends, HTTPException, params
 from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
-from gpupool.common.models import ModelSpec
+from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, ModelSpec
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.store import ServerRecord
+from gpupool.scheduler.placement import NoFit
 
 log = logging.getLogger("gpupool.api")
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 PIN_RE = re.compile(r"^[^/\s]+/[^/\s]+$")
 COORD_PREFIX = "coordinator://"
-LIVE = {"pending", "launching", "ready", "draining"}
 
 
 class AddServerBody(BaseModel):
@@ -46,12 +46,34 @@ class ReadBody(BaseModel):
     up_to_id: int
 
 
-def _normalize_url(raw: str) -> str:
+def normalize_agent_url(raw: str) -> str:
     url = raw.strip().rstrip("/")
     u = urlparse(url)
     if u.scheme not in ("http", "https") or not u.netloc:
         raise HTTPException(400, "agent_url must look like http://host:port")
     return url
+
+
+def spec_or_404(store, name: str) -> ModelSpec:
+    spec = store.get_model(name)
+    if spec is None:
+        raise HTTPException(404, f"unknown model {name}")
+    return spec
+
+
+def plan_http_error(e: Exception) -> HTTPException:
+    """Map a planning failure to an HTTP error: no capacity is a conflict, a missing model file
+    is not found, anything else a bad request."""
+    code = 409 if isinstance(e, NoFit) else 404 if isinstance(e, FileNotFoundError) else 400
+    return HTTPException(code, f"{type(e).__name__}: {e}")
+
+
+async def drain_and_delete_model(store, reconciler, name: str) -> None:
+    """Drain the model's replicas, then drop its spec. Shared by /api and /admin so they cannot drift."""
+    spec_or_404(store, name)
+    for r in store.list_replicas(model=name, states=set(ACTIVE_STATES)):
+        await reconciler.drain(r.replica_id)
+    store.delete_model(name)
 
 
 def make_api_router(*, store, reconciler, poller, balancer, library, cfg: CoordinatorConfig,
@@ -71,23 +93,20 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             log.exception("emitting event failed")
 
     # ------------------------------------------------------------------ state helpers
-    def alive(last_seen: float) -> bool:
-        return now() - last_seen <= cfg.heartbeat_timeout_s
-
     def server_entry(s: ServerRecord, nodes: dict, flags: dict) -> dict:
         n = nodes.get(s.node_id)
         devices = n.report.devices if n else []
         return {
             "node_id": s.node_id, "agent_url": s.agent_url, "added_at": s.added_at,
-            "alive": bool(n and alive(n.last_seen)),
+            "alive": bool(n and n.alive(now(), cfg.heartbeat_timeout_s)),
             "last_seen": n.last_seen if n else 0.0,
             "report": n.report.model_dump(mode="json") if n else None,
             "gpu_enabled": {d.device_id: flags.get((s.node_id, d.device_id), True) for d in devices},
         }
 
-    def model_entry(spec: ModelSpec) -> dict:
-        reps = store.list_replicas(model=spec.name)  # oldest first
-        active = [r for r in reps if r.state in LIVE]
+    def model_entry(spec: ModelSpec, reps: list) -> dict:
+        """`reps`: this model's replicas, oldest first."""
+        active = [r for r in reps if r.state in LIVE_STATES]
         failed = [r for r in reps if r.state == "failed"]
         newest_failed = failed[-1] if failed else None
         ready = any(r.state == "ready" for r in reps)
@@ -100,8 +119,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 state = "starting"
             elif newest_failed is not None:
                 state, error = "failed", newest_failed.error or "replica failed"
-            elif reconciler._nofit.get(spec.name):
-                state, error = "failed", reconciler._nofit[spec.name]
+            elif (nofit := reconciler.nofit_reason(spec.name)):
+                state, error = "failed", nofit
             else:
                 state = "starting"  # desired > 0, the next reconcile tick will launch it
         elif any(r.state in ("draining", "ready", "launching", "pending") for r in reps):
@@ -118,12 +137,6 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "replicas": [{**r.model_dump(mode="json"), "outstanding": balancer.outstanding(r.replica_id)}
                          for r in listed],
         }
-
-    def spec_or_404(name: str) -> ModelSpec:
-        spec = store.get_model(name)
-        if spec is None:
-            raise HTTPException(404, f"unknown model {name}")
-        return spec
 
     def server_or_404(node_id: str) -> ServerRecord:
         s = store.get_server(node_id)
@@ -151,7 +164,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                     if s["alive"]:
                         pool_total += d["total_mb"]
                         pool_usable += d["usable_mb"]
-        models = [model_entry(m) for m in store.list_models()]
+        by_model: dict[str, list] = {}
+        for r in store.list_replicas():  # one query, not one per model; oldest first
+            by_model.setdefault(r.model, []).append(r)
+        models = [model_entry(m, by_model.get(m.name, [])) for m in store.list_models()]
         return {
             "summary": {
                 "servers_total": len(servers), "servers_online": sum(1 for s in servers if s["alive"]),
@@ -171,7 +187,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     # ------------------------------------------------------------------ servers
     @router.post("/servers")
     async def add_server(body: AddServerBody) -> dict:
-        url = _normalize_url(body.agent_url)
+        url = normalize_agent_url(body.agent_url)
         try:
             report = await poller.probe(url)
         except AgentError as e:
@@ -233,7 +249,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
     @router.post("/models/{name}/start")
     async def start_model(name: str, body: StartBody | None = Body(default=None)) -> dict:
-        spec = spec_or_404(name)
+        spec = spec_or_404(store, name)
         spec = spec.model_copy(update={"replicas": (body or StartBody()).replicas})
         store.put_model(spec)
         emit("info", "model_started", f"Model {name} started ({spec.replicas} replica(s) requested)", model=name)
@@ -245,30 +261,26 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
     @router.post("/models/{name}/stop")
     async def stop_model(name: str) -> dict:
-        spec = spec_or_404(name).model_copy(update={"replicas": 0})
+        spec = spec_or_404(store, name).model_copy(update={"replicas": 0})
         store.put_model(spec)
         emit("info", "model_stopped", f"Model {name} stopped", model=name)
         return spec.model_dump(mode="json")
 
     @router.delete("/models/{name}")
     async def delete_model(name: str) -> dict:
-        spec_or_404(name)
-        for r in store.list_replicas(model=name, states={"pending", "launching", "ready"}):
-            await reconciler.drain(r.replica_id)
-        store.delete_model(name)
+        await drain_and_delete_model(store, reconciler, name)
         emit("info", "model_stopped", f"Model {name} removed", model=name)
         return {"ok": True}
 
     @router.post("/models/{name}/plan")
     async def plan_model(name: str) -> Any:
-        spec = spec_or_404(name)
+        spec = spec_or_404(store, name)
         try:
             return (await reconciler.plan_for(spec)).model_dump(mode="json")
         except HTTPException:
             raise
         except Exception as e:
-            code = 409 if type(e).__name__ == "NoFit" else 400
-            raise HTTPException(code, f"{type(e).__name__}: {e}")
+            raise plan_http_error(e) from e
 
     # ------------------------------------------------------------------ events
     @router.get("/events")

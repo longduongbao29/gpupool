@@ -121,8 +121,7 @@ async def test_500_then_success_on_other_replica():
     text = env.metrics.render()
     assert 'gpupool_retries_total{model="m"} 1' in text
     assert 'gpupool_requests_total{model="m",code="200"} 1' in text
-    assert 'gpupool_ttft_seconds_count{model="m"} 1' in text
-    assert "gpupool_ttft_seconds_sum" in text
+    assert "gpupool_ttft_seconds_count" not in text  # buffered replies are not TTFT samples
 
 
 async def test_connect_error_retried():

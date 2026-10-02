@@ -8,9 +8,9 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
 import httpx
+from pydantic import BaseModel
 
 from gpupool.common.net import external_client
-from pydantic import BaseModel
 
 if TYPE_CHECKING:  # store imports Event from here; avoid the cycle at runtime
     from gpupool.coordinator.store import Store

@@ -15,6 +15,12 @@ EngineState = Literal["starting", "running", "exited", "failed"]
 ReplicaState = Literal["pending", "launching", "ready", "draining", "stopped", "failed"]
 Tier = Literal["single_gpu", "single_node", "multi_node"]
 
+# Replica state groups (not part of the wire format).
+ALL_REPLICA_STATES: tuple[str, ...] = ("pending", "launching", "ready", "draining", "stopped", "failed")
+ACTIVE_STATES = frozenset({"pending", "launching", "ready"})  # count toward the desired replicas
+LIVE_STATES = ACTIVE_STATES | {"draining"}  # still hold ports/engines: everything but stopped/failed
+TERMINAL_STATES = frozenset({"stopped", "failed"})
+
 
 class GpuProcess(BaseModel):
     pid: int

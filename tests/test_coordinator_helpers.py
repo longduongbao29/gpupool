@@ -17,13 +17,10 @@ from gpupool.common.models import (
 )
 from gpupool.coordinator.reconciler import Reconciler
 from gpupool.coordinator.store import Store
+from gpupool.scheduler.placement import NoFit
 
 META = ModelMeta(arch="llama", n_layers=4, n_embd=64, n_head=4, n_head_kv=4, head_dim=16,
                  layer_bytes=[1] * 4, other_bytes=1, output_bytes=1)
-
-
-class NoFit(Exception):
-    pass
 
 
 def dev(device_id="CUDA0", free=8000, usable=7000) -> Device:

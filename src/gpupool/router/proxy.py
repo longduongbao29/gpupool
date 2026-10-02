@@ -7,18 +7,17 @@ from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 
 import httpx
-
-from gpupool.common.net import internal_client
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from gpupool.common.auth import require_bearer
+from gpupool.common.net import internal_client
 from gpupool.common.models import ReplicaEndpoint
 from gpupool.router.balancer import Balancer, prefix_key
 
 
-def _esc(v: str) -> str:
+def prom_label_escape(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
@@ -44,18 +43,18 @@ class RouterMetrics:
         bal = balancer or self.balancer
         out = ["# TYPE gpupool_requests_total counter"]
         for (m, c), n in sorted(self.requests.items()):
-            out.append(f'gpupool_requests_total{{model="{_esc(m)}",code="{c}"}} {n}')
+            out.append(f'gpupool_requests_total{{model="{prom_label_escape(m)}",code="{c}"}} {n}')
         out.append("# TYPE gpupool_retries_total counter")
         for m, n in sorted(self.retries.items()):
-            out.append(f'gpupool_retries_total{{model="{_esc(m)}"}} {n}')
+            out.append(f'gpupool_retries_total{{model="{prom_label_escape(m)}"}} {n}')
         out.append("# TYPE gpupool_ttft_seconds summary")
         for m in sorted(self.ttft_count):
-            out.append(f'gpupool_ttft_seconds_sum{{model="{_esc(m)}"}} {self.ttft_sum[m]}')
-            out.append(f'gpupool_ttft_seconds_count{{model="{_esc(m)}"}} {self.ttft_count[m]}')
+            out.append(f'gpupool_ttft_seconds_sum{{model="{prom_label_escape(m)}"}} {self.ttft_sum[m]}')
+            out.append(f'gpupool_ttft_seconds_count{{model="{prom_label_escape(m)}"}} {self.ttft_count[m]}')
         out.append("# TYPE gpupool_outstanding gauge")
         if bal is not None:
             for r, n in sorted(bal.snapshot().items()):
-                out.append(f'gpupool_outstanding{{replica="{_esc(r)}"}} {n}')
+                out.append(f'gpupool_outstanding{{replica="{prom_label_escape(r)}"}} {n}')
         return "\n".join(out) + "\n"
 
 
@@ -158,7 +157,7 @@ def make_router(
                     ctype = resp.headers.get("content-type", "application/json")
                     if not stream or resp.status_code >= 400:
                         data = await resp.aread()
-                        metrics.observe_ttft(model, time.monotonic() - started)
+                        # No TTFT here: a buffered reply's duration is not time-to-first-token.
                         metrics.observe_request(model, resp.status_code)
                         status = resp.status_code
                         await resp.aclose()

@@ -39,6 +39,9 @@ class NodeRecord(BaseModel):
     report: NodeReport
     last_seen: float
 
+    def alive(self, now: float, timeout_s: float) -> bool:
+        return now - self.last_seen <= timeout_s
+
 
 class ServerRecord(BaseModel):
     """A registered agent: the coordinator polls it and plans onto it."""
@@ -59,6 +62,8 @@ class Store:
         with self._lock:
             if not memory:
                 self._conn.execute("PRAGMA journal_mode=WAL")
+                # Same as Library (own connection, same file): wait for its writes, don't fail.
+                self._conn.execute("PRAGMA busy_timeout=5000")
             with self._conn:
                 self._conn.executescript(_SCHEMA)
 

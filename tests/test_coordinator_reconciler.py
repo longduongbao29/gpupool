@@ -1,6 +1,5 @@
 import httpx
 import pytest
-import pytest
 import respx
 
 from gpupool.common.models import EngineStatus
@@ -480,3 +479,46 @@ async def test_tick_prunes_old_terminal_replicas():
         put_replica(store, f"m-{i:02d}", state="failed", now=clock() + i)
     await rec.tick()
     assert len(store.list_replicas(model="m")) == rec.KEEP_TERMINAL_PER_MODEL
+
+
+async def test_keyboard_interrupt_in_launch_propagates_without_failure_or_backoff():
+    class Interrupting(FakeClient):
+        async def start_engine(self, url, spec):
+            raise KeyboardInterrupt
+
+    rec, store, clock = make_reconciler(client=Interrupting())
+    beat(store, clock, node("a"))
+    r = put_replica(store, "m-1", state="launching", now=clock())
+    with pytest.raises(KeyboardInterrupt):
+        await rec._launch(r, SPEC)
+    assert "m" not in rec._backoff
+    assert store.get_replica("m-1").state == "launching"  # not recorded as a launch failure
+    assert not any(e.kind == "launch_failed" for e in store.list_events())
+
+
+async def test_replica_drained_while_launching_rolls_back_quietly(mock_health):
+    class DrainOnHead(FakeClient):
+        def __init__(self, store):
+            super().__init__()
+            self.store = store
+
+        async def start_engine(self, url, spec):
+            st = await super().start_engine(url, spec)
+            if spec.engine_id.endswith("-head"):
+                rid = spec.engine_id[: -len("-head")]
+                self.store.set_replica_state(rid, "draining", None, now=1.0)
+            return st
+
+    client = DrainOnHead(None)
+    rec, store, clock = make_reconciler(client=client)
+    client.store = store
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "draining"
+    assert client.engines == {}  # engines rolled back
+    assert "m" not in rec._backoff
+    assert not any(e.kind == "launch_failed" for e in store.list_events())
+    await rec.shutdown()

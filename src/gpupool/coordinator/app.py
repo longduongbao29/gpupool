@@ -16,15 +16,24 @@ from pydantic import BaseModel, ValidationError
 
 from gpupool.common.auth import require_bearer
 from gpupool.common.config import CoordinatorConfig, detect_local_ip, load_or_create_secrets
-from gpupool.common.models import ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
+from gpupool.common.models import ALL_REPLICA_STATES, ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
 from gpupool.coordinator.agent_client import AgentClient, AgentError
-from gpupool.coordinator.api import _normalize_url, make_api_router
+from gpupool.coordinator.api import (
+    drain_and_delete_model,
+    make_api_router,
+    normalize_agent_url,
+    plan_http_error,
+    spec_or_404,
+)
 from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.library import Library
 from gpupool.coordinator.library_api import make_files_router, make_library_router
 from gpupool.coordinator.poller import Poller
 from gpupool.coordinator.reconciler import Reconciler
 from gpupool.coordinator.store import ServerRecord, Store
+from gpupool.router.balancer import Balancer
+from gpupool.router.proxy import RouterMetrics, make_router, prom_label_escape
+from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
 
 log = logging.getLogger("gpupool.coordinator")
 
@@ -32,13 +41,6 @@ UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 
 class JoinBody(BaseModel):
     agent_url: str
-
-
-ALL_STATES = ["pending", "launching", "ready", "draining", "stopped", "failed"]
-
-
-def _esc(v: str) -> str:
-    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
@@ -49,8 +51,6 @@ def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
         source = spec.source
         if source in cache:
             return cache[source]
-        from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts  # lazy: other module
-
         if source.startswith("coordinator://"):
             name = source[len("coordinator://"):]
             paths = library.part_paths(name) if library is not None else None
@@ -72,16 +72,20 @@ def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
 
 
 def _safe_file(models_dir: Path, name: str) -> Path:
-    """Resolve `name` to a regular file directly inside models_dir, else raise HTTPException."""
+    """Resolve `name` to a regular file directly inside models_dir.
+
+    Raises ValueError for an invalid name and FileNotFoundError for a missing file; this runs
+    in the reconciler's meta provider, not in a route, so it must not raise HTTP errors.
+    """
     if (not name or name in (".", "..") or "/" in name or "\\" in name or "\x00" in name
             or Path(name).name != name):
-        raise HTTPException(status_code=400, detail="invalid file name")
+        raise ValueError("invalid file name")
     base = models_dir.resolve()
     p = (base / name).resolve()
     if p.parent != base:
-        raise HTTPException(status_code=400, detail="invalid file name")
+        raise ValueError("invalid file name")
     if not p.is_file():
-        raise HTTPException(status_code=404, detail="no such file")
+        raise FileNotFoundError(f"no such file: {name}")
     return p
 
 
@@ -94,9 +98,6 @@ def create_app(
     start_background: bool = True,
     library: Library | None = None,
 ) -> FastAPI:
-    from gpupool.router.balancer import Balancer
-    from gpupool.router.proxy import RouterMetrics, make_router
-
     store = store or Store(cfg.db_path)
     client = client or AgentClient(cfg.cluster_token)
     if library is None:
@@ -149,8 +150,6 @@ def create_app(
         store.upsert_node(report, reconciler.clock())
         return {"ok": True}
 
-
-
     @app.post("/internal/join", dependencies=[cluster_auth])
     async def join(body: JoinBody) -> dict:
         """Self-registration of an agent (`gpupool agent --join ...`).
@@ -158,7 +157,7 @@ def create_app(
         Same probe as the UI's manual add, so only a reachable, correctly-tokened agent can
         register. Servers the operator removed get 403 so removal sticks.
         """
-        url = _normalize_url(body.agent_url)
+        url = normalize_agent_url(body.agent_url)
         try:
             report = await poller.probe(url)
         except AgentError as e:
@@ -197,12 +196,6 @@ def create_app(
                                        admin_dep=admin_auth, notifier=notifier))
 
     # ---- admin
-    def _spec_or_404(name: str) -> ModelSpec:
-        spec = store.get_model(name)
-        if spec is None:
-            raise HTTPException(404, f"unknown model {name}")
-        return spec
-
     @app.post("/admin/models", dependencies=[admin_auth])
     def put_model(spec: ModelSpec) -> ModelSpec:
         store.put_model(spec)
@@ -210,29 +203,25 @@ def create_app(
 
     @app.delete("/admin/models/{name}", dependencies=[admin_auth])
     async def delete_model(name: str) -> dict:
-        _spec_or_404(name)
-        for r in store.list_replicas(model=name, states={"pending", "launching", "ready"}):
-            await reconciler.drain(r.replica_id)
-        store.delete_model(name)
+        await drain_and_delete_model(store, reconciler, name)  # no event here, unlike /api
         return {"ok": True}
 
     @app.post("/admin/models/{name}/scale", dependencies=[admin_auth])
     def scale(name: str, replicas: int) -> ModelSpec:
         if replicas < 0:
             raise HTTPException(422, "replicas must be >= 0")
-        spec = _spec_or_404(name).model_copy(update={"replicas": replicas})
+        spec = spec_or_404(store, name).model_copy(update={"replicas": replicas})
         store.put_model(spec)
         return spec
 
     @app.post("/admin/deploy/{model}", dependencies=[admin_auth])
     async def deploy(model: str, dry_run: int = 0):
-        spec = _spec_or_404(model)
+        spec = spec_or_404(store, model)
         if dry_run:
             try:
                 return await reconciler.plan_for(spec)
             except Exception as e:
-                code = 409 if type(e).__name__ == "NoFit" else 400
-                raise HTTPException(code, f"{type(e).__name__}: {e}")
+                raise plan_http_error(e) from e
         await reconciler.tick()
         return [r.model_dump() for r in store.list_replicas(model=model)]
 
@@ -250,7 +239,7 @@ def create_app(
             "nodes": [
                 {
                     "node_id": n.report.node_id,
-                    "alive": now - n.last_seen <= cfg.heartbeat_timeout_s,
+                    "alive": n.alive(now, cfg.heartbeat_timeout_s),
                     "last_seen": n.last_seen,
                     "agent_url": n.report.agent_url,
                     "host": n.report.host,
@@ -313,11 +302,11 @@ def create_app(
         lines.append("# TYPE gpupool_device_free_mb gauge")
         free, usable, alive = [], [], []
         for n in store.list_nodes():
-            nid = _esc(n.report.node_id)
+            nid = prom_label_escape(n.report.node_id)
             alive.append(f'gpupool_node_alive{{node="{nid}"}} '
-                         f'{int(now - n.last_seen <= cfg.heartbeat_timeout_s)}')
+                         f'{int(n.alive(now, cfg.heartbeat_timeout_s))}')
             for d in n.report.devices:
-                lab = f'node="{nid}",device="{_esc(d.device_id)}"'
+                lab = f'node="{nid}",device="{prom_label_escape(d.device_id)}"'
                 free.append(f"gpupool_device_free_mb{{{lab}}} {d.free_mb}")
                 usable.append(f"gpupool_device_usable_mb{{{lab}}} {d.usable_mb}")
         lines += free
@@ -330,10 +319,10 @@ def create_app(
         for r in store.list_replicas():
             counts[(r.model, r.state)] = counts.get((r.model, r.state), 0) + 1
         for m in store.list_models():
-            for s in ALL_STATES:
+            for s in ALL_REPLICA_STATES:
                 counts.setdefault((m.name, s), 0)
         for (m, s), c in sorted(counts.items()):
-            lines.append(f'gpupool_replicas{{model="{_esc(m)}",state="{s}"}} {c}')
+            lines.append(f'gpupool_replicas{{model="{prom_label_escape(m)}",state="{s}"}} {c}')
         return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     # The web UI. Mounted last: a mount at "/" would otherwise shadow the API routes.

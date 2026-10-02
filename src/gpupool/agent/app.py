@@ -8,8 +8,6 @@ import time
 from pathlib import Path
 
 import httpx
-
-from gpupool.common.net import internal_client
 import psutil
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -21,6 +19,7 @@ from gpupool.agent.procs import EngineExists, PortInUse, ProcessManager, llama_v
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
 from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
+from gpupool.common.net import internal_client
 
 log = logging.getLogger(__name__)
 
