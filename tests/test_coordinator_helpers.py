@@ -23,9 +23,9 @@ META = ModelMeta(arch="llama", n_layers=4, n_embd=64, n_head=4, n_head_kv=4, hea
                  layer_bytes=[1] * 4, other_bytes=1, output_bytes=1)
 
 
-def dev(device_id="CUDA0", free=8000, usable=7000, uuid=None) -> Device:
+def dev(device_id="CUDA0", free=8000, usable=7000, uuid=None, budget=None) -> Device:
     return Device(device_id=device_id, kind="cuda", name=device_id, total_mb=10000, free_mb=free, usable_mb=usable,
-                  uuid=uuid)
+                  uuid=uuid, budget_mb=budget)
 
 
 def node(node_id="a", host=None, devices=None, engines=None, ts=0.0) -> NodeReport:
@@ -39,7 +39,7 @@ def make_planner(est_mb=1000, rpc=False):
     """Fake scheduler.plan: first device with enough usable_mb is the head; with rpc=True a
     second device on another node is added as RPC0."""
 
-    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset()):
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset(), **kw):
         for n in nodes:
             for d in n.devices:
                 if d.usable_mb >= est_mb:

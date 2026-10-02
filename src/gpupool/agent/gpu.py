@@ -36,11 +36,13 @@ def _fake_devices(cfg: AgentConfig, raw: str) -> list[Device]:
             device_id=d["device_id"], kind=kind, name=d.get("name", d["device_id"]),
             total_mb=total, free_mb=free,
             usable_mb=_usable(cfg, d["device_id"], kind, total, free),
+            budget_mb=cfg.budget_mb.get(d["device_id"]),
             util_pct=d.get("util_pct"),
             temp_c=d.get("temp_c"), power_w=d.get("power_w"),
             processes=[GpuProcess(**p) for p in d.get("processes", [])],
             driver=d.get("driver"), cuda=d.get("cuda"),
             uuid=d.get("uuid"), pci_bus_id=d.get("pci_bus_id"),
+            bandwidth_gbps=d.get("bandwidth_gbps"),
         ))
     return out
 
@@ -57,6 +59,18 @@ def _text(v) -> str | None:
     if v is None:
         return None
     return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def _bandwidth_gbps(pynvml, h) -> float | None:
+    """Peak memory bandwidth in GB/s: bus width (bits) x max memory clock (MHz) x 2 (DDR) / 8."""
+    try:
+        width = int(pynvml.nvmlDeviceGetMemoryBusWidth(h))
+        clock = int(pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_MEM))
+        if width <= 0 or clock <= 0:
+            return None
+        return round(width * clock * 2 / 8 / 1000, 1)
+    except Exception:
+        return None
 
 
 def _cuda_version(raw) -> str | None:
@@ -179,11 +193,14 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
             power = _best_effort(lambda: int(round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000)))
             # Stable identity across reboots/bus loss; "CUDA<i>" shifts when a card drops.
             uuid = _text(_best_effort(lambda: pynvml.nvmlDeviceGetUUID(h)))
+            bandwidth = _bandwidth_gbps(pynvml, h)
             did = f"CUDA{idx}"
             out.append(Device(device_id=did, kind="cuda", name=name, total_mb=total, free_mb=free,
-                              usable_mb=_usable(cfg, did, "cuda", total, free), util_pct=util,
+                              usable_mb=_usable(cfg, did, "cuda", total, free),
+                              budget_mb=cfg.budget_mb.get(did), util_pct=util,
                               temp_c=temp, power_w=power, processes=_gpu_processes(pynvml, h),
-                              driver=driver, cuda=cuda, uuid=uuid, pci_bus_id=pci))
+                              driver=driver, cuda=cuda, uuid=uuid, pci_bus_id=pci,
+                              bandwidth_gbps=bandwidth))
         if lost:
             # The CUDA runtime behind llama.cpp may or may not still count the lost GPU, so
             # "CUDA<i>" -> physical card is no longer trustworthy: a per-device flag or a new
@@ -204,7 +221,8 @@ def _cpu_device(cfg: AgentConfig) -> Device:
     vm = psutil.virtual_memory()
     total, free = int(vm.total // _MB), int(vm.available // _MB)
     return Device(device_id="CPU", kind="cpu", name="CPU", total_mb=total, free_mb=free,
-                  usable_mb=_usable(cfg, "CPU", "cpu", total, free))
+                  usable_mb=_usable(cfg, "CPU", "cpu", total, free),
+                  budget_mb=cfg.budget_mb.get("CPU"))
 
 
 def probe_devices(cfg: AgentConfig) -> list[Device]:

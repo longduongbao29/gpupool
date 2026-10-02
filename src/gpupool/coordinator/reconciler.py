@@ -23,6 +23,7 @@ from gpupool.common.models import (
     ModelMeta,
     ModelSpec,
     NodeReport,
+    Occupant,
     Placement,
     ReplicaRecord,
 )
@@ -30,7 +31,7 @@ from gpupool.common.net import internal_client
 from gpupool.coordinator.agent_client import AgentClient
 from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store, gpu_key
-from gpupool.scheduler.placement import NoFit, plan
+from gpupool.scheduler.placement import NoFit, plan, rank
 
 log = logging.getLogger("gpupool.reconciler")
 
@@ -99,6 +100,7 @@ class Reconciler:
         self.notifier = notifier or Notifier(store, getattr(cfg, "webhook_url", ""), clock=clock)
         self.poll_s = 0.5  # engine/health poll interval during launch
         self.planner: Callable | None = None  # tests inject; default is scheduler.placement.plan
+        self.ranker: Callable | None = None  # tests inject; default is scheduler.placement.rank
         self._http: httpx.AsyncClient | None = None
         self._launches: dict[str, asyncio.Task] = {}
         self._suspect: set[str] = set()
@@ -127,6 +129,9 @@ class Reconciler:
         if self.planner is not None:
             return self.planner
         return plan
+
+    def _ranker(self) -> Callable:
+        return self.ranker if self.ranker is not None else rank
 
     def note_error(self, replica_id: str) -> None:
         self._suspect.add(replica_id)
@@ -162,6 +167,7 @@ class Reconciler:
                 key = (a.node_id, a.device_id)
                 reserved[key] = reserved.get(key, 0) + a.est_mb
         flags = self.store.gpu_flags()
+        live = list(self.store.list_replicas(states=set(LIVE_STATES)))
         out = []
         for n in nodes.values():
             if not self._alive(n, now):
@@ -173,20 +179,58 @@ class Reconciler:
                     d.usable_mb = 0
                     continue
                 d.usable_mb = max(0, d.usable_mb - reserved.get((rep.node_id, d.device_id), 0))
+                if d.budget_mb is not None:
+                    # The budget caps everything we hold, however long ago it loaded: free memory
+                    # stops showing our own share once the grace above has passed.
+                    own = sum(a.est_mb for r in live for a in r.placement.assignments
+                              if a.node_id == rep.node_id and _find_device(rep.devices, a) is d)
+                    d.usable_mb = min(d.usable_mb, max(0, d.budget_mb - own))
             out.append(rep)
         return out
 
-    async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
-        """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
-        now = self.clock()
+    def available_reports(self) -> list[NodeReport]:
+        """What a new replica could use: alive registered nodes, disabled GPUs at usable 0,
+        launching replicas' reservations subtracted. Private copies, safe to edit."""
+        return self._reserved_nodes(self._node_map(), self.clock())
+
+    def occupants(self) -> list[Occupant]:
+        """Every assignment of every live replica (draining still holds memory), on the device's
+        current id: stored device_ids are positions that shift, so they are resolved by uuid."""
         nodes = self._node_map()
-        reports = self._reserved_nodes(nodes, now)
+        specs = {s.name: s for s in self.store.list_models()}
+        out: list[Occupant] = []
+        for r in self.store.list_replicas(states=set(LIVE_STATES)):
+            spec = specs.get(r.model)
+            busy = min(1.0, self.outstanding(r.replica_id) / max(1, spec.parallel if spec else 1))
+            for a in r.placement.assignments:
+                n = nodes.get(a.node_id)
+                d = _find_device(n.report.devices, a) if n is not None else None
+                if d is None:
+                    continue
+                out.append(Occupant(node_id=a.node_id, device_id=d.device_id, model=r.model,
+                                    replica_id=r.replica_id, est_mb=a.est_mb, busy=busy))
+        return out
+
+    @staticmethod
+    def _apply_pins(spec: ModelSpec, reports: list[NodeReport]) -> None:
         if spec.pin_devices:
             pins = set(spec.pin_devices)
-            for rep in reports:  # reports are private copies, safe to edit
+            for rep in reports:
                 for d in rep.devices:
                     if f"{rep.node_id}/{d.device_id}" not in pins:
                         d.usable_mb = 0
+
+    async def rank_for(self, spec: ModelSpec, limit: int) -> list[Placement]:
+        """Best placements for `spec` right now, without ports or a replica id. No side effects."""
+        meta = await self.meta_for(spec)
+        reports = self.available_reports()
+        self._apply_pins(spec, reports)
+        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit)
+
+    async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
+        """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
+        reports = self.available_reports()
+        self._apply_pins(spec, reports)
         # Only live processes hold a port; exited/failed engines linger in reports until stopped.
         reported_ports = {r.node_id: {e.port for e in r.engines if e.state in ("starting", "running")}
                           for r in reports}
@@ -206,7 +250,7 @@ class Reconciler:
 
         rid = replica_id or self._new_replica_id(spec.name)
         meta = await self.meta_for(spec)
-        return self._planner()(meta, spec, reports, rid, port_alloc)
+        return self._planner()(meta, spec, reports, rid, port_alloc, occupants=self.occupants())
 
     @staticmethod
     def _new_replica_id(model: str) -> str:
@@ -451,7 +495,12 @@ class Reconciler:
         for m in [m for m in self._realloc if m not in specs or specs[m].replicas == 0]:
             self._realloc.pop(m)  # stopped on purpose: nothing left to re-allocate
 
-        for spec in specs.values():
+        def has_active(name: str) -> bool:
+            return bool(self.store.list_replicas(model=name, states=set(ACTIVE_STATES)))
+
+        # Scarce VRAM goes to high priority first; among equals every model gets a first replica
+        # before any gets a second, then name order keeps ticks deterministic.
+        for spec in sorted(specs.values(), key=lambda s: (-s.priority, has_active(s.name), s.name)):
             active = self.store.list_replicas(model=spec.name, states=set(ACTIVE_STATES))
             moving = [r for r in active if r.state == "ready" and self._low_free(r, nodes)]
             moving_ids = {r.replica_id for r in moving}

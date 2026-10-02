@@ -66,7 +66,8 @@ async def test_auth_required_on_every_route(env):
                          ("PUT", "/api/servers/a/gpus/CUDA0"), ("PUT", "/api/models/m"),
                          ("POST", "/api/models/m/start"), ("POST", "/api/models/m/stop"),
                          ("DELETE", "/api/models/m"), ("POST", "/api/models/m/plan"),
-                         ("GET", "/api/events"), ("POST", "/api/events/read")]:
+                         ("GET", "/api/events"), ("POST", "/api/events/read"),
+                         ("GET", "/api/capacity"), ("POST", "/api/recommend")]:
         r = await c.request(method, path, headers={"Authorization": "Bearer wrong"})
         assert r.status_code == 401, (method, path)
 
@@ -246,7 +247,7 @@ async def test_put_model_create_update_validation(env):
     r = await c.put("/api/models/qwen", json={"file": "x.gguf"})
     assert r.status_code == 200
     assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "ctx_size": 4096,
-                        "parallel": 1, "replicas": 0, "pin_devices": []}
+                        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu"}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -354,3 +355,115 @@ async def test_events_endpoints_and_unread(env):
     assert r.json() == {"unread": 1}
     assert (await c.get("/api/state")).json()["unread_events"] == 1
     assert (await c.post("/api/events/read", json={})).status_code == 422
+
+
+# ---------------------------------------------------------------- policy fields, capacity, recommend
+async def test_put_model_policy_fields_stored_and_defaulted(env):
+    c, store, *_ = env
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "priority": 80, "spread": "node"})
+    assert r.status_code == 200 and r.json()["priority"] == 80 and r.json()["spread"] == "node"
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "ctx_size": 8192})  # omitted: keep stored
+    assert r.json()["priority"] == 80 and r.json()["spread"] == "node"
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "priority": 0, "spread": "none"})
+    assert store.get_model("q").priority == 0 and store.get_model("q").spread == "none"
+    r = await c.put("/api/models/fresh", json={"file": "x.gguf"})
+    assert r.json()["priority"] == 50 and r.json()["spread"] == "gpu"
+    for bad in ({"priority": 101}, {"priority": -1}, {"spread": "rack"}):
+        assert (await c.put("/api/models/q", json={"file": "x.gguf", **bad})).status_code == 422, bad
+
+
+async def test_capacity_reserved_disabled_and_dead(env):
+    c, store, rec, _, clock, _ = env
+    cfg_timeout = rec.cfg.heartbeat_timeout_s
+    a = node("a", devices=[dev("CUDA0", usable=5000, free=6000), dev("CUDA1", usable=3000)])
+    a.devices[0].bandwidth_gbps = 900.0
+    b = node("b", devices=[dev("CUDA0", usable=8000)])
+    register(store, clock, a, b)
+    store.put_model(SPEC)
+    put_replica(store, "m-1", model="m", state="launching", head="a", now=clock())  # reserves 1000 on a/CUDA0
+    store.set_gpu_enabled("a", "CUDA1", False)
+    clock.t += cfg_timeout + 1
+    store.upsert_node(a, clock())  # a stays fresh, b goes silent
+    j = (await c.get("/api/capacity")).json()
+    g = {(x["node_id"], x["device_id"]): x for x in j["gpus"]}
+    a0, a1, b0 = g[("a", "CUDA0")], g[("a", "CUDA1")], g[("b", "CUDA0")]
+    assert (a0["usable_mb"], a0["free_for_new_mb"], a0["reserved_mb"]) == (5000, 4000, 1000)
+    assert a0["bandwidth_gbps"] == 900.0 and a0["alive"] and a0["enabled"]
+    assert a0["replicas"] == [{"replica_id": "m-1", "model": "m", "est_mb": 1000, "busy": 0.0}]
+    assert (a1["enabled"], a1["free_for_new_mb"], a1["reserved_mb"], a1["usable_mb"]) == (False, 0, 0, 3000)
+    assert (b0["alive"], b0["free_for_new_mb"], b0["reserved_mb"]) == (False, 0, 0)
+    assert j["summary"] == {"gpus": 3, "free_for_new_mb": 4000, "largest_single_gpu_mb": 4000,
+                            "largest_single_node_mb": 4000}
+
+
+async def test_capacity_subtracts_own_replicas_from_a_budget(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a", devices=[dev("CUDA0", free=8000, usable=2500, budget=2500)]))
+    store.put_model(SPEC)
+    put_replica(store, "m-1", model="m", state="ready", head="a", now=clock())
+    clock.t += rec.READY_REPORT_GRACE_S + 1
+    store.upsert_node(node("a", devices=[dev("CUDA0", free=8000, usable=2500, budget=2500)]), clock())
+    g = (await c.get("/api/capacity")).json()["gpus"][0]
+    assert (g["usable_mb"], g["free_for_new_mb"]) == (2500, 1500)
+
+
+def placement(tier="single_gpu", node_id="a", est=1000):
+    from gpupool.common.models import DeviceAssignment, Placement
+    asg = [DeviceAssignment(node_id=node_id, device_id="CUDA0", llama_device="CUDA0", layers=4, est_mb=est)]
+    return Placement(model="x", replica_id="", tier=tier, head_node=node_id, head_port=0, assignments=asg,
+                     tensor_split=[1.0], est_total_mb=est, score=0.9, est_decode_tps=42.0, reasons=["fast"])
+
+
+async def test_recommend_passthrough_and_max_ctx(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    calls = []
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5):
+        calls.append((spec.name, spec.priority, spec.spread, limit))
+        if spec.ctx_size <= 2048:
+            return [placement()]
+        if spec.ctx_size <= 8192:
+            return [placement("single_node")] * 5
+        return []
+
+    rec.ranker = ranker
+    r = await c.post("/api/recommend", json={"file": "x.gguf", "ctx_size": 4096, "priority": 70,
+                                             "spread": "node", "limit": 2})
+    assert r.status_code == 200
+    j = r.json()
+    assert calls[0] == ("x", 70, "node", 2)
+    assert j["need_mb"] > 0 and j["not_possible"] is None and len(j["options"]) == 2
+    assert j["options"][0] == {
+        "rank": 1, "score": 0.9, "tier": "single_node", "fits_now": True,
+        "assignments": [{"node_id": "a", "device_id": "CUDA0", "layers": 4, "est_mb": 1000}],
+        "est_decode_tps": 42.0, "est_total_mb": 1000, "reasons": ["fast"]}
+    assert j["max_ctx_single_gpu"] == 2048
+
+
+async def test_recommend_not_possible_reports_largest_fitting_ctx(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a", devices=[dev(usable=3000)]))
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: [placement()] if spec.ctx_size <= 3000 else []
+    j = (await c.post("/api/recommend", json={"file": "x.gguf", "ctx_size": 16384})).json()
+    assert j["options"] == [] and j["max_ctx_single_gpu"] == 2816
+    np = j["not_possible"]
+    assert np["max_ctx_that_fits"] == 2816 and np["need_mb"] == j["need_mb"]
+    assert np["largest_single_gpu_mb"] == 3000 and np["largest_single_node_mb"] == 3000
+    rec.ranker = lambda *a, **k: []
+    j = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()
+    assert j["not_possible"]["max_ctx_that_fits"] is None and j["max_ctx_single_gpu"] is None
+
+
+async def test_recommend_errors(env):
+    c, store, rec, *_ = env
+    assert (await c.post("/api/recommend", json={"file": "nope.gguf"})).status_code == 422
+    assert (await c.post("/api/recommend", json={"file": "big.gguf"})).status_code == 422
+    assert (await c.post("/api/recommend", json={"file": "x.gguf", "limit": 11})).status_code == 422
+
+    async def boom(spec):
+        raise ValueError("bad gguf")
+
+    rec.meta_for = boom
+    r = await c.post("/api/recommend", json={"file": "x.gguf"})
+    assert r.status_code == 400 and "bad gguf" in r.json()["detail"]

@@ -237,7 +237,7 @@
       <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
       <div class="tbl-scroll" x-show="allGpuRows().length > 0">
       <table>
-        <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
+        <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
         <tbody>
           <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
             <tr :style="r.s.alive ? '' : 'opacity:.55'">
@@ -246,6 +246,7 @@
               <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
               <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
               <td x-text="mem(r.d)"></td>
+              <td x-text="bw(r.d)"></td>
               <td x-text="val(r.d.temp_c, '°C')"></td>
               <td x-text="val(r.d.power_w, ' W')"></td>
               <td x-text="(r.d.processes || []).map(function (p) { return (p.name || p.pid); }).join(', ') || dash" class="ellipsis proc-list"></td>
@@ -311,7 +312,8 @@
 
               <div class="place" x-show="placementLines(m).length">
                 <template x-for="p in placementLines(m)" :key="p.id">
-                  <div>Replica <b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span></div>
+                  <div>Replica <b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
+                    <div class="rnote" x-show="p.note" :title="p.note" x-text="p.note"></div></div>
                 </template>
               </div>
               <div class="place" x-show="(m.spec.pin_devices || []).length">Pinned to: <b x-text="(m.spec.pin_devices || []).join(', ')"></b></div>
@@ -457,8 +459,14 @@
         </select></label>
       <label class="field"><span>Name (served as the model id)</span><input type="text" x-model="form.name" :disabled="form.edit"></label>
       <div class="row">
-        <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" style="width:100%"></label>
-        <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" style="width:100%"></label>
+        <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" @input="form.rec = null" style="width:100%"></label>
+        <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
+      </div>
+      <div class="row">
+        <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" style="width:100%"></label>
+        <label class="field grow"><span>Spread replicas across</span>
+          <select x-model="form.spread" @change="form.rec = null" style="width:100%">
+            <option value="gpu">Different GPUs</option><option value="node">Different servers</option><option value="none">No preference</option></select></label>
       </div>
       <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.auto" @change="form.plan = null"><span></span></label>
         <div><div>Auto placement</div><div class="muted small">Let the scheduler pick GPUs. Turn off to choose GPUs yourself.</div></div></div>
@@ -482,8 +490,43 @@
         </template>
       </div></template>
       <div class="result bad" x-show="form.plan && !form.plan.ok"><b>Does not fit.</b> <span x-text="form.plan && form.plan.msg"></span></div>
+
+      <!-- recommendation -->
+      <template x-if="form.rec">
+        <div class="rec">
+          <div class="muted small" x-show="form.rec.max_ctx_single_gpu != null">Largest context that fits on a single GPU: <b x-text="form.rec.max_ctx_single_gpu"></b></div>
+          <template x-if="form.rec.not_possible">
+            <div class="result bad"><b>No placement possible.</b> Needs <span x-text="gb(form.rec.not_possible.need_mb)"></span> GB;
+              largest single GPU <span x-text="gb(form.rec.not_possible.largest_single_gpu_mb)"></span> GB,
+              largest single server <span x-text="gb(form.rec.not_possible.largest_single_node_mb)"></span> GB.
+              <template x-if="form.rec.not_possible.max_ctx_that_fits">
+                <div style="margin-top:6px">It fits with context &le; <b x-text="form.rec.not_possible.max_ctx_that_fits"></b>.
+                  <button class="btn sm" @click="useCtx(form.rec.not_possible.max_ctx_that_fits)" :disabled="form.recBusy">Use ctx <span x-text="form.rec.not_possible.max_ctx_that_fits"></span></button></div>
+              </template></div>
+          </template>
+          <div class="muted small" x-show="!form.rec.not_possible && !(form.rec.options || []).length">No options returned.</div>
+          <template x-for="o in (form.rec.options || [])" :key="o.rank">
+            <div class="opt">
+              <div class="row wrap">
+                <b>#<span x-text="o.rank"></span></b>
+                <span class="pill" :class="o.fits_now ? 'green' : 'amber'" x-text="o.fits_now ? 'fits now' : 'needs room'"></span>
+                <span class="pill" x-text="String(o.tier).replace('_', ' ')"></span>
+                <span class="muted small">score <b x-text="o.score"></b> &middot; <span x-text="gb(o.est_total_mb) + ' GB'"></span> &middot; <span x-text="tps(o.est_decode_tps)"></span></span>
+                <button class="btn sm right" @click="pinOption(o)" title="Pin the form to exactly these GPUs">Pin to these GPUs</button>
+              </div>
+              <template x-for="a in (o.assignments || [])" :key="a.node_id + '/' + a.device_id">
+                <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
+              </template>
+              <ul class="reasons" x-show="(o.reasons || []).length">
+                <template x-for="(r, i) in (o.reasons || [])" :key="i"><li x-text="r"></li></template>
+              </ul>
+            </div>
+          </template>
+        </div>
+      </template>
     </div>
     <div class="modal-foot">
+      <button class="btn" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement</button>
       <button class="btn" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
       <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
       <button class="btn green" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>

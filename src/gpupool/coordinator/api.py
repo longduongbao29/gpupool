@@ -11,9 +11,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException, params
 from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
-from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, ModelSpec
+from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, ModelSpec, Spread
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.store import ServerRecord, gpu_key
+from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
 
 log = logging.getLogger("gpupool.api")
@@ -36,6 +37,18 @@ class ModelBody(BaseModel):
     ctx_size: int = Field(default=4096, ge=1)
     parallel: int = Field(default=1, ge=1)
     pin_devices: list[str] = Field(default_factory=list)
+    priority: int | None = Field(default=None, ge=0, le=100)  # None: keep the stored value, else 50
+    spread: Spread | None = None  # None: keep the stored value, else "gpu"
+
+
+class RecommendBody(BaseModel):
+    file: str
+    ctx_size: int = Field(default=4096, ge=1)
+    parallel: int = Field(default=1, ge=1)
+    priority: int = Field(default=50, ge=0, le=100)
+    spread: Spread = "gpu"
+    pin_devices: list[str] = Field(default_factory=list)
+    limit: int = Field(default=3, ge=1, le=10)
 
 
 class StartBody(BaseModel):
@@ -247,7 +260,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         existing = store.get_model(name)
         spec = ModelSpec(
             name=name, source=COORD_PREFIX + body.file, ctx_size=body.ctx_size, parallel=body.parallel,
-            replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)))
+            replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
+            priority=body.priority if body.priority is not None else existing.priority if existing else 50,
+            spread=body.spread if body.spread is not None else existing.spread if existing else "gpu")
         store.put_model(spec)
         reconciler.wake()
         return spec.model_dump(mode="json")
@@ -285,6 +300,100 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             raise
         except Exception as e:
             raise plan_http_error(e) from e
+
+    # ------------------------------------------------------------------ capacity
+    async def capacity_view() -> dict:
+        registered = {s.node_id for s in store.list_servers()}
+        nodes = {n.report.node_id: n for n in store.list_nodes() if n.report.node_id in registered}
+        flags = store.gpu_flags()
+        t = now()
+        free = {(r.node_id, d.device_id): d.usable_mb for r in reconciler.available_reports() for d in r.devices}
+        occ: dict[tuple[str, str], list] = {}
+        for o in reconciler.occupants():
+            occ.setdefault((o.node_id, o.device_id), []).append(o)
+        gpus = []
+        for node_id in sorted(nodes):
+            n = nodes[node_id]
+            alive = n.alive(t, cfg.heartbeat_timeout_s)
+            for d in n.report.devices:
+                enabled = flags.get((node_id, gpu_key(d)), True)
+                live = enabled and alive
+                free_mb = free.get((node_id, d.device_id), 0) if live else 0
+                here = occ.get((node_id, d.device_id), [])
+                gpus.append({
+                    "node_id": node_id, "device_id": d.device_id, "uuid": d.uuid, "name": d.name,
+                    "kind": d.kind, "enabled": enabled, "alive": alive,
+                    "total_mb": d.total_mb, "usable_mb": d.usable_mb, "free_for_new_mb": free_mb,
+                    "reserved_mb": max(0, d.usable_mb - free_mb) if live else 0,
+                    "bandwidth_gbps": d.bandwidth_gbps,
+                    "busy": min(1.0, sum(o.busy for o in here)),
+                    "replicas": [{"replica_id": o.replica_id, "model": o.model, "est_mb": o.est_mb,
+                                  "busy": o.busy} for o in here],
+                })
+        cuda = [g for g in gpus if g["kind"] == "cuda"]
+        per_node: dict[str, int] = {}
+        for g in cuda:
+            per_node[g["node_id"]] = per_node.get(g["node_id"], 0) + g["free_for_new_mb"]
+        return {"gpus": gpus, "summary": {
+            "gpus": len(cuda), "free_for_new_mb": sum(g["free_for_new_mb"] for g in cuda),
+            "largest_single_gpu_mb": max((g["free_for_new_mb"] for g in cuda), default=0),
+            "largest_single_node_mb": max(per_node.values(), default=0)}}
+
+    @router.get("/capacity")
+    async def capacity() -> dict:
+        return await capacity_view()
+
+    # ------------------------------------------------------------------ recommend
+    @router.post("/recommend")
+    async def recommend(body: RecommendBody) -> dict:
+        item = library.get(body.file)
+        if item is None or item.status != "ready":
+            raise HTTPException(422, f"file {body.file!r} is not a ready library item")
+        stem = re.sub(r"[^A-Za-z0-9._-]", "-", body.file.rsplit("/", 1)[-1].rsplit(".", 1)[0])[:64]
+
+        def spec_for(ctx: int) -> ModelSpec:
+            return ModelSpec(
+                name=stem or "recommend", source=COORD_PREFIX + body.file, ctx_size=ctx, parallel=body.parallel,
+                replicas=1, pin_devices=body.pin_devices, priority=body.priority, spread=body.spread)
+
+        try:
+            meta = await reconciler.meta_for(spec_for(body.ctx_size))
+        except Exception as e:
+            raise HTTPException(400, f"cannot read model metadata: {type(e).__name__}: {e}") from e
+
+        async def largest_ctx(hi_ctx: int, ok) -> int | None:
+            # Binary search over multiples of 256; assumes a bigger context never needs less memory.
+            lo, hi, best = 1, hi_ctx // 256, None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if ok(await reconciler.rank_for(spec_for(mid * 256), 10)):
+                    best, lo = mid * 256, mid + 1
+                else:
+                    hi = mid - 1
+            return best
+
+        need = total_need_mb(meta, body.ctx_size)
+        try:
+            ranked = (await reconciler.rank_for(spec_for(body.ctx_size), body.limit))[: body.limit]
+            max_single = await largest_ctx(131072, lambda opts: any(o.tier == "single_gpu" for o in opts))
+            not_possible = None
+            if not ranked:
+                cap = (await capacity_view())["summary"]
+                not_possible = {"need_mb": need, "largest_single_gpu_mb": cap["largest_single_gpu_mb"],
+                                "largest_single_node_mb": cap["largest_single_node_mb"],
+                                "max_ctx_that_fits": await largest_ctx(body.ctx_size - 1, bool)}
+        except Exception as e:
+            raise plan_http_error(e) from e
+        return {
+            "need_mb": need,
+            "options": [{"rank": i + 1, "score": p.score, "tier": p.tier, "fits_now": True,
+                         "assignments": [{"node_id": a.node_id, "device_id": a.device_id, "layers": a.layers,
+                                          "est_mb": a.est_mb} for a in p.assignments],
+                         "est_decode_tps": p.est_decode_tps, "est_total_mb": p.est_total_mb,
+                         "reasons": p.reasons} for i, p in enumerate(ranked)],
+            "max_ctx_single_gpu": max_single,
+            "not_possible": not_possible,
+        }
 
     # ------------------------------------------------------------------ events
     @router.get("/events")

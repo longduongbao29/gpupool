@@ -1,11 +1,12 @@
 """Placement: choose devices and a layer split for one replica (design section 6).
 
-Pure function of (meta, spec, nodes). Tiers in order: single_gpu, single_node,
-multi_node. Ports are allocated only for the final plan.
+Pure function of (meta, spec, nodes, occupants): enumerate feasible candidates (single_gpu,
+single_node, multi_node only when needed), score them, pick the best.
+Ports are allocated only for the final plan.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 from gpupool.common.models import (
@@ -14,9 +15,11 @@ from gpupool.common.models import (
     ModelMeta,
     ModelSpec,
     NodeReport,
+    Occupant,
     Placement,
 )
 from gpupool.scheduler.estimate import device_need_mb, overhead_mb, total_need_mb
+from gpupool.scheduler.scoring import default_cuda_bw, est_decode_tps
 
 
 class NoFit(Exception):
@@ -122,15 +125,131 @@ def _solve(meta, ctx, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str] | N
     return order, counts, max(per, key=lambda k: (per[k], k))
 
 
-def plan(
-    meta: ModelMeta,
-    spec: ModelSpec,
-    nodes: list[NodeReport],
-    replica_id: str,
-    port_alloc: Callable[[str], int],
-    exclude_nodes: frozenset[str] | set[str] = frozenset(),
-) -> Placement:
-    ctx = spec.ctx_size
+# Score weights (design section 4.3); higher score wins.
+W_PERF = 100.0  # x tps / best tps among the candidates
+W_SHARE = 10.0  # per engine already on a chosen GPU
+W_BUSY = 30.0  # x busy (0..1) of that engine
+W_SAME_GPU = 40.0  # per replica of the same model on a chosen GPU (spread gpu/node)
+W_SAME_NODE = 20.0  # per replica of the same model on a chosen node (spread node)
+W_WASTE = 15.0  # x mean(usable / biggest usable): keeps big GPUs free (best-fit among equals)
+W_DEVICE = 5.0  # per extra device
+W_RPC = 10.0  # per network hop
+_TIER_ORDER = {"single_gpu": 0, "single_node": 1, "multi_node": 2}
+
+
+class _Cand(NamedTuple):
+    tier: str
+    order: list[_Dev]
+    counts: list[int]
+    head_id: str
+
+
+class _Scored(NamedTuple):
+    score: float
+    tps: float
+    reasons: list[str]
+    cand: _Cand
+
+
+def _fits_single(meta, ctx, pool) -> list[_Dev]:
+    return [d for d in pool
+            if device_need_mb(meta, range(meta.n_layers), ctx, d.dev.kind, True) <= d.dev.usable_mb]
+
+
+def _candidates(meta, ctx, pool, allow_single=True) -> list[_Cand]:
+    """Every feasible placement; multi_node only when no single GPU / single node fits."""
+    out = []
+    if allow_single:
+        out += [_Cand("single_gpu", [d], [meta.n_layers], d.node.node_id)
+                for d in _fits_single(meta, ctx, pool)]
+    out += [_Cand("single_node", *s) for s in _tier_single_node(meta, ctx, pool)]
+    if not out:
+        s = _tier_multi_node(meta, ctx, pool)
+        if s:
+            out.append(_Cand("multi_node", *s))
+    return out
+
+
+def _all_candidates(meta, ctx, pool: list[_Dev]) -> tuple[list[_Cand], list[_Dev]]:
+    """GPU-only first. Only when the GPUs of the pool cannot hold the model do CPU devices
+    join: within a tier they count as capacity like any GPU, so mixing them in from the
+    start would put layers in host RAM (10x+ slower) even when spare VRAM exists elsewhere.
+    Returns the candidates and the pool they were built from."""
+    gpu_pool = [d for d in pool if d.dev.kind == "cuda"]
+    if gpu_pool and len(gpu_pool) < len(pool):
+        cands = _candidates(meta, ctx, gpu_pool)
+        if cands:
+            return cands, gpu_pool
+        # CPU-inclusive pass: a lone CPU device must not win "single_gpu" (GPU+CPU split
+        # beats CPU-only), so single-device candidates are skipped.
+        return _candidates(meta, ctx, pool, allow_single=False), pool
+    return _candidates(meta, ctx, pool), pool
+
+
+def _is_local(d: _Dev, head_id: str) -> bool:
+    return d.node.node_id == head_id and d.dev.kind == "cuda"
+
+
+def _n_rpc(c: _Cand) -> int:
+    return sum(1 for d in c.order if not _is_local(d, c.head_id))
+
+
+def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
+    cuda_bw = default_cuda_bw(nodes)
+    tps_of = [
+        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw)
+        for c in cands
+    ]
+    best_tps = max(tps_of, default=0.0) or 1.0
+    biggest = max((d.dev.usable_mb for d in pool), default=1) or 1
+    by_dev: dict[tuple[str, str], list[Occupant]] = {}
+    by_node: dict[str, list[Occupant]] = {}
+    for o in occupants:
+        by_dev.setdefault((o.node_id, o.device_id), []).append(o)
+        by_node.setdefault(o.node_id, []).append(o)
+    out = []
+    for c, tps in zip(cands, tps_of):
+        n_dev, n_rpc = len(c.order), _n_rpc(c)
+        perf = 100 * tps / best_tps
+        score = W_PERF * tps / best_tps
+        share_reasons, same_reasons = [], []
+        for d in c.order:
+            key = (d.node.node_id, d.dev.device_id)
+            for o in by_dev.get(key, []):
+                score -= W_SHARE + W_BUSY * o.busy
+                share_reasons.append(
+                    f"shares {key[0]}/{key[1]} with {o.model} (busy {round(o.busy * 100)}%)")
+                if o.model == spec.name and spec.spread != "none":
+                    score -= W_SAME_GPU
+                    same_reasons.append(
+                        f"another replica of this model is already on {key[0]}/{key[1]}")
+        if spec.spread == "node":
+            for nid in dict.fromkeys(d.node.node_id for d in c.order):
+                for o in by_node.get(nid, []):
+                    if o.model == spec.name:
+                        score -= W_SAME_NODE
+                        same_reasons.append(f"another replica of this model is on node {nid}")
+        score -= W_WASTE * sum(d.dev.usable_mb / biggest for d in c.order) / n_dev
+        score -= W_DEVICE * (n_dev - 1) + W_RPC * n_rpc
+        if len(cands) == 1:
+            speed = f"only feasible placement, ~{tps:.0f} tok/s"
+        elif perf >= 99.95:
+            speed = f"fastest option, ~{tps:.0f} tok/s"
+        else:
+            speed = f"~{tps:.0f} tok/s ({perf:.0f}% of the fastest)"
+        reasons = [speed] + list(dict.fromkeys(same_reasons)) + share_reasons
+        if n_dev > 1:
+            reasons.append(f"split over {n_dev} GPUs")
+        if n_rpc:
+            reasons.append(f"{n_rpc} network hop{'s' if n_rpc > 1 else ''} (RPC)")
+        out.append(_Scored(score, tps, reasons[:4], c))
+    # deterministic: score, then smaller tier, then the first device's name
+    out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier],
+                            s.cand.order[0].node.node_id, s.cand.order[0].dev.device_id))
+    return out
+
+
+def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset()) -> list[_Scored]:
     pool = [
         _Dev(n, d)
         for n in nodes
@@ -138,62 +257,67 @@ def plan(
         for d in n.devices
         if d.usable_mb > 0
     ]
-    # GPU-only first, across all tiers. Only when the GPUs of the pool cannot hold the
-    # model do CPU devices join: within a tier they count as capacity like any GPU,
-    # so mixing them in from the start would put layers in host RAM (10x+ slower)
-    # even when spare VRAM exists on another node.
-    gpu_pool = [d for d in pool if d.dev.kind == "cuda"]
-    solved, tier = None, "single_gpu"
-    passes = [(gpu_pool, True), (pool, False)] if gpu_pool and len(gpu_pool) < len(pool) \
-        else [(pool, True)]
-    for candidates, allow_single in passes:
-        # In the CPU-inclusive pass a lone CPU device must not win "single_gpu":
-        # GPU+CPU split beats CPU-only. CPU-only is allowed when there is no GPU at all.
-        if allow_single:
-            solved, tier = _tier_single_gpu(meta, ctx, candidates), "single_gpu"
-        if solved is None:
-            solved, tier = _tier_single_node(meta, ctx, candidates), "single_node"
-        if solved is None:
-            solved, tier = _tier_multi_node(meta, ctx, candidates), "multi_node"
-        if solved is not None:
-            break
-    if solved is None:
+    cands, used = _all_candidates(meta, spec.ctx_size, pool)
+    if not cands:
+        return []
+    return _score_all(meta, spec, cands, used, nodes, occupants)
+
+
+def _finish(meta, spec, s: _Scored, replica_id, port_alloc) -> Placement:
+    c = s.cand
+    pl = _build(meta, spec, replica_id, port_alloc, c.tier, c.order, c.counts, c.head_id)
+    pl.score = round(s.score, 1)
+    pl.est_decode_tps = round(s.tps, 1)
+    pl.reasons = s.reasons
+    return pl
+
+
+def plan(
+    meta: ModelMeta,
+    spec: ModelSpec,
+    nodes: list[NodeReport],
+    replica_id: str,
+    port_alloc: Callable[[str], int],
+    exclude_nodes: frozenset[str] | set[str] = frozenset(),
+    occupants: Sequence[Occupant] = (),
+) -> Placement:
+    """The best-scored feasible placement; ports are allocated only for the winner."""
+    ranked = _ranked(meta, spec, nodes, occupants, exclude_nodes)
+    if not ranked:
+        ctx = spec.ctx_size
+        pool = [d for n in nodes if n.node_id not in exclude_nodes for d in n.devices
+                if d.usable_mb > 0]
         raise NoFit(
             f"model {spec.name!r} needs about {total_need_mb(meta, ctx)} MB at ctx {ctx}, "
-            f"pool has {sum(d.dev.usable_mb for d in pool)} MB usable "
+            f"pool has {sum(d.usable_mb for d in pool)} MB usable "
             f"across {len(pool)} devices (no feasible layer split)"
         )
-    order, counts, head_id = solved
-    return _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id)
+    return _finish(meta, spec, ranked[0], replica_id, port_alloc)
 
 
-def _tier_single_gpu(meta, ctx, pool):
-    cands = []
-    for d in pool:
-        need = device_need_mb(meta, range(meta.n_layers), ctx, d.dev.kind, True)
-        if need <= d.dev.usable_mb:
-            cands.append(d)
-    if not cands:
-        return None
-    best = min(cands, key=lambda d: (d.dev.kind != "cuda", d.dev.usable_mb, d.node.node_id, d.dev.device_id))
-    return [best], [meta.n_layers], best.node.node_id
+def rank(
+    meta: ModelMeta,
+    spec: ModelSpec,
+    nodes: list[NodeReport],
+    occupants: Sequence[Occupant] = (),
+    limit: int = 5,
+) -> list[Placement]:
+    """Feasible candidates, best first. Ports are dummies: these are for display/simulation."""
+    dummy = lambda _nid: 0  # noqa: E731
+    return [_finish(meta, spec, s, "", dummy) for s in _ranked(meta, spec, nodes, occupants)[:limit]]
 
 
 def _tier_single_node(meta, ctx, pool):
-    best = None  # (n_devices, -leftover, node_id, solved)
+    """One solved split per node: the first k devices (by usable) that admit a feasible one."""
+    out = []
     for node_id in sorted({d.node.node_id for d in pool}):
         devs = sorted((d for d in pool if d.node.node_id == node_id), key=lambda d: -d.dev.usable_mb)
         for k in range(2, len(devs) + 1):
             solved = _solve(meta, ctx, devs[:k])
-            if solved is None:
-                continue
-            order, counts, _ = solved
-            left = sum(_check(meta, ctx, order, counts))
-            key = (k, -left, node_id)
-            if best is None or key < best[0]:
-                best = (key, solved)
-            break
-    return best[1] if best else None
+            if solved is not None:
+                out.append(solved)
+                break
+    return out
 
 
 def _tier_multi_node(meta, ctx, pool):

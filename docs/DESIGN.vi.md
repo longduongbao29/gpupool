@@ -50,7 +50,7 @@ Nguồn chuẩn: `src/gpupool/common/models.py` (pydantic v2). Tóm tắt:
 
 | Model | Hướng | Nội dung chính |
 | --- | --- | --- |
-| `Device` | agent → coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free − margin, budget)), `uuid` / `pci_bus_id` (định danh cố định của GPU vật lý; `device_id` chỉ là vị trí, bị dịch khi một GPU rớt khỏi bus) |
+| `Device` | agent → coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free − margin, budget)), `uuid` / `pci_bus_id` (định danh cố định của GPU vật lý; `device_id` chỉ là vị trí, bị dịch khi một GPU rớt khỏi bus), `budget_mb` (mức giới hạn đã cấu hình, nếu có: coordinator còn trừ thêm ước lượng của chính các replica đang chạy của nó khỏi mức này, vì bộ nhớ trống không phản ánh phần các replica đó đang giữ) |
 | `NodeReport` | heartbeat | `node_id`, `agent_url`, `host` (IP node khác dùng cho RPC), devices, engines, `llama_version`, models |
 | `EngineSpec` | coordinator → agent | `engine_id`, `kind` rpc/server, `port`, `devices` (thứ tự = `--device`), `rpc_endpoints`, `tensor_split`, `ctx_size`, `parallel` |
 | `EngineStatus` | agent → coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (≤ 50 dòng) |

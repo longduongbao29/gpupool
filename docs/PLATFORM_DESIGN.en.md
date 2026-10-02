@@ -278,6 +278,8 @@ cluster.
 | 3. Preemption | preemption + cooldown; `POST /api/simulate` | medium: removes serving replicas, draining must be right |
 | 4. Rebalancing | make-before-break rebalance; `POST /api/rebalance` | highest: reloading large models takes time |
 
+**Status:** phase 1 is implemented. Real run on a GTX 1650: a `priority` 80 model wins over one whose name sorts first; replicas and new models spread to other GPUs (simulated with the real scheduler); estimated vs measured decode 41.6 vs 51.8 tok/s (3B) and 204 vs 182 (0.5B). `budget_mb` now also subtracts the VRAM gpupool's own replicas hold. Spreading has not been checked on real multi-GPU hardware.
+
 Each phase is checked on a real cluster, with at least 2 servers and 2 models, before the next one starts.
 
 ## 9. Open questions

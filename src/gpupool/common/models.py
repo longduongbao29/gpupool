@@ -14,6 +14,7 @@ EngineKind = Literal["rpc", "server"]
 EngineState = Literal["starting", "running", "exited", "failed"]
 ReplicaState = Literal["pending", "launching", "ready", "draining", "stopped", "failed"]
 Tier = Literal["single_gpu", "single_node", "multi_node"]
+Spread = Literal["gpu", "node", "none"]
 
 # Replica state groups (not part of the wire format).
 ALL_REPLICA_STATES: tuple[str, ...] = ("pending", "launching", "ready", "draining", "stopped", "failed")
@@ -35,6 +36,11 @@ class Device(BaseModel):
     total_mb: int
     free_mb: int  # measured (NVML / psutil)
     usable_mb: int  # max(0, min(free_mb - margin, budget_mb))
+    # The cap configured on the agent for this device, None when uncapped. usable_mb alone cannot
+    # enforce it: free memory does not show what our own engines hold (no per-process NVML on
+    # WDDM), so the coordinator subtracts its replicas' estimates from this itself. Optional: old
+    # agents do not send it.
+    budget_mb: int | None = None
     util_pct: int | None = None
     # Optional telemetry for the UI (agents before 0.2 do not send them).
     temp_c: int | None = None
@@ -46,6 +52,9 @@ class Device(BaseModel):
     # shifts when a GPU disappears. None for CPU devices and agents before 0.3.
     uuid: str | None = None  # "GPU-8f2c..."
     pci_bus_id: str | None = None  # "00000000:01:00.0"
+    # Peak memory bandwidth (NVML bus width x memory clock). Decode speed is bandwidth-bound, so
+    # this ranks GPUs; None for CPU devices and older agents.
+    bandwidth_gbps: float | None = None
 
 
 class EngineSpec(BaseModel):
@@ -101,6 +110,11 @@ class ModelSpec(BaseModel):
     replicas: int = 1  # desired count; 0 = stopped
     # "node_id/device_id" entries the replicas may use; empty = the scheduler chooses freely.
     pin_devices: list[str] = Field(default_factory=list)
+    # Higher places first each tick, so it gets scarce VRAM before lower priorities.
+    priority: int = Field(default=50, ge=0, le=100)
+    # Where replicas of this model should avoid each other: "gpu" (different GPUs), "node"
+    # (different servers), "none". Soft: a shared GPU is still used when nothing else fits.
+    spread: Spread = "gpu"
 
 
 class LibraryItem(BaseModel):
@@ -155,6 +169,21 @@ class Placement(BaseModel):
     assignments: list[DeviceAssignment]  # order == --device order == tensor_split order
     tensor_split: list[float]
     est_total_mb: int
+    # Why the scheduler chose this placement (absent on placements made before 0.3).
+    score: float | None = None
+    est_decode_tps: float | None = None  # bandwidth-based estimate, None when unknown
+    reasons: list[str] = Field(default_factory=list)
+
+
+class Occupant(BaseModel):
+    """An engine already holding a GPU, as the scheduler sees it when scoring a new placement."""
+
+    node_id: str
+    device_id: str  # current device_id on its node (the reconciler resolves shifts by uuid)
+    model: str
+    replica_id: str
+    est_mb: int
+    busy: float = 0.0  # 0..1: outstanding requests / parallel slots
 
 
 class ReplicaRecord(BaseModel):

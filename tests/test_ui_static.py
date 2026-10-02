@@ -84,6 +84,58 @@ def test_mock_state_matches_contract(client):
     assert {"name", "path", "source", "bytes", "downloaded", "status", "error", "created_at"} <= st["library"][0].keys()
 
 
+def test_mock_state_has_bandwidth_and_policy(client):
+    st = client.get("/api/state", headers=HEAD).json()
+    cuda = [d for s in st["servers"] for d in s["report"]["devices"] if d["kind"] == "cuda"]
+    assert cuda and all(d["bandwidth_gbps"] for d in cuda)
+    assert {"priority", "spread"} <= st["models"][0]["spec"].keys()
+
+
+def test_mock_model_put_accepts_priority_spread(client):
+    body = {"file": "qwen2.5-3b-q4.gguf", "ctx_size": 2048, "parallel": 1, "pin_devices": [], "priority": 80, "spread": "node"}
+    spec = client.put("/api/models/m2", json=body, headers=HEAD).json()
+    assert (spec["priority"], spec["spread"]) == (80, "node")
+    assert client.put("/api/models/m2", json={**body, "priority": 101}, headers=HEAD).status_code == 422
+    assert client.put("/api/models/m2", json={**body, "spread": "x"}, headers=HEAD).status_code == 422
+
+
+def test_mock_recommend_options_and_not_possible(client):
+    req = {"file": "llama-8b.gguf", "ctx_size": 4096, "parallel": 1, "priority": 50, "spread": "gpu", "pin_devices": [], "limit": 3}
+    r = client.post("/api/recommend", json=req, headers=HEAD).json()
+    assert {"need_mb", "options", "max_ctx_single_gpu", "not_possible"} <= r.keys()
+    assert r["not_possible"] is None and 1 <= len(r["options"]) <= 3
+    o = r["options"][0]
+    assert {"rank", "score", "tier", "fits_now", "assignments", "est_decode_tps", "est_total_mb", "reasons"} <= o.keys()
+    assert {"node_id", "device_id", "layers", "est_mb"} <= o["assignments"][0].keys()
+    r = client.post("/api/recommend", json={**req, "ctx_size": 200_000}, headers=HEAD).json()
+    assert r["options"] == []
+    assert {"need_mb", "largest_single_gpu_mb", "largest_single_node_mb", "max_ctx_that_fits"} <= r["not_possible"].keys()
+    assert client.post("/api/recommend", json={**req, "file": "nope.gguf"}, headers=HEAD).status_code == 404
+
+
+def test_mock_capacity_contract(client):
+    r = client.get("/api/capacity", headers=HEAD).json()
+    assert {"gpus", "summary"} <= r.keys() and len(r["gpus"]) == 8
+    assert {"node_id", "device_id", "uuid", "name", "kind", "enabled", "alive", "total_mb", "usable_mb", "free_for_new_mb",
+            "reserved_mb", "bandwidth_gbps", "busy", "replicas"} <= r["gpus"][0].keys()
+    assert {"gpus", "free_for_new_mb", "largest_single_gpu_mb", "largest_single_node_mb"} <= r["summary"].keys()
+
+
+def test_ui_uses_recommend_and_policy_fields():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    assert "/api/recommend" in js and "priority" in js and "spread" in js
+    for needle in ("Recommend placement", "Pin to these GPUs", "Different GPUs", "Different servers", "Bandwidth"):
+        assert needle in html, needle
+
+
+def test_html_never_renders_server_data_as_html():
+    # x-html is only for the static icon() helper; data fields must use x-text.
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for expr in re.findall(r'x-html="([^"]*)"', html):
+        assert expr.startswith("icon("), expr
+
+
 def test_mock_events_contract(client, mock):
     mock.kill("CTG-Server-2")
     evs = client.get("/api/events?limit=10", headers=HEAD).json()

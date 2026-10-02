@@ -203,6 +203,10 @@ h3.sec { font-size: 13px; margin: 16px 0 8px; }
 .gpu-pick label:hover { background: rgba(255, 255, 255, 0.03); }
 .result { margin-top: 10px; padding: 10px 12px; border-radius: 9px; font-size: 13px; }
 .result.ok { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.35); }
+.rnote { font-size: 12px; color: var(--muted); opacity: 0.85; margin-top: 2px; }
+.rec { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.opt { border: 1px solid var(--border); border-radius: 9px; background: var(--bg); padding: 9px 12px; display: flex; flex-direction: column; gap: 4px; }
+.opt .reasons { margin: 2px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
 .result.bad { background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.35); color: #fca5a5; }
 
 /* ---------- modal / toast / login ---------- */

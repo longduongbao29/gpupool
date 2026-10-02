@@ -275,6 +275,8 @@ gì trên cụm.
 | 3. Giành chỗ | preemption + cooldown; `POST /api/simulate` | trung bình: gỡ replica đang phục vụ, cần drain đúng |
 | 4. Cân bằng lại | rebalance make-before-break; `POST /api/rebalance` | cao nhất: load lại model lớn tốn thời gian |
 
+**Trạng thái:** giai đoạn 1 đã triển khai. Chạy thật trên GTX 1650: model `priority` 80 thắng model có tên đứng trước; replica và model mới dàn sang GPU khác (mô phỏng với scheduler thật); tok/s ước lượng 41.6 so với đo thật 51.8 (model 3B) và 204 so với 182 (0.5B). `budget_mb` giờ trừ cả VRAM do chính các replica của gpupool đang giữ. Chưa có cụm thật nhiều GPU để kiểm phần dàn replica trên phần cứng.
+
 Mỗi giai đoạn được kiểm trên cụm thật, ít nhất 2 server và 2 model, trước khi sang giai đoạn sau.
 
 ## 9. Câu hỏi mở

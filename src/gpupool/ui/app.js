@@ -67,7 +67,7 @@ function app() {
     // add model modal
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false },
     // deploy (new / edit) modal
-    form: { open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, auto: true, pins: [], busy: false, plan: null },
+    form: { open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false },
 
     // ================= lifecycle =================
     init: function () {
@@ -484,13 +484,14 @@ function app() {
       return errs.join("\n");
     },
     placementLines: function (m) {
-      var out = [];
+      var out = [], self = this;
       (m.replicas || []).forEach(function (r) {
         if (!r.placement) return;
         var parts = r.placement.assignments.map(function (a) {
           return a.node_id + "/" + a.device_id + ": " + a.layers + " layers";
         });
-        out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", ") });
+        out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
+          note: self.replicaNote(r) });
       });
       return out;
     },
@@ -519,11 +520,12 @@ function app() {
     openForm: function (m, file) {
       if (m) {
         this.form = { open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null };
+          priority: m.spec.priority == null ? 50 : m.spec.priority, spread: m.spec.spread || "gpu",
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false };
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = { open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, auto: true, pins: [], busy: false, plan: null };
+        this.form = { open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false };
       }
     },
     togglePin: function (key, on) {
@@ -531,6 +533,7 @@ function app() {
       if (on && i < 0) this.form.pins.push(key);
       if (!on && i >= 0) this.form.pins.splice(i, 1);
       this.form.plan = null;
+      this.form.rec = null;
     },
     saveForm: async function () {
       var f = this.form;
@@ -539,6 +542,7 @@ function app() {
       try {
         await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), {
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+          priority: this.priorityOf(f), spread: f.spread || "gpu",
           pin_devices: f.auto ? [] : f.pins
         });
         await this.refresh();
@@ -576,6 +580,54 @@ function app() {
       f.busy = false;
     },
     pinLabel: function (s, d) { return s.node_id + "/" + d.device_id; },
+    priorityOf: function (f) {
+      var p = parseInt(f.priority, 10);
+      return isNaN(p) ? 50 : Math.max(0, Math.min(100, p));
+    },
+
+    // ================= recommendation =================
+    recommend: async function () {
+      var f = this.form;
+      if (!f.file) { this.toast("Pick a file first", "error"); return; }
+      f.recBusy = true;
+      f.rec = null;
+      try {
+        f.rec = await this.api("POST", "/api/recommend", {
+          file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+          priority: this.priorityOf(f), spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins, limit: 3
+        });
+      } catch (e) { this.fail(e); }
+      f.recBusy = false;
+    },
+    optionPins: function (o) {
+      var out = [];
+      (o.assignments || []).forEach(function (a) {
+        var k = a.node_id + "/" + a.device_id;
+        if (out.indexOf(k) < 0) out.push(k);
+      });
+      return out;
+    },
+    pinOption: function (o) {
+      this.form.auto = false;
+      this.form.pins = this.optionPins(o);
+      this.form.plan = null;
+      this.toast("Pinned to " + this.form.pins.join(", "), "ok");
+    },
+    useCtx: async function (n) {
+      this.form.ctx = n;
+      this.form.plan = null;
+      await this.recommend();
+    },
+    tps: function (v) { return v == null ? this.dash : (v >= 100 ? Math.round(v) : v.toFixed(1)) + " tok/s"; },
+    bw: function (d) { return d && d.bandwidth_gbps != null ? Math.round(d.bandwidth_gbps) + " GB/s" : this.dash; },
+    replicaNote: function (r) {
+      var p = r && r.placement;
+      if (!p) return "";
+      var bits = [];
+      if (p.est_decode_tps != null) bits.push("~" + this.tps(p.est_decode_tps));
+      if (p.reasons && p.reasons.length) bits.push(p.reasons.join("; "));
+      return bits.join(" · ");
+    },
 
     // ================= snippets =================
     curlSnippet: function () {

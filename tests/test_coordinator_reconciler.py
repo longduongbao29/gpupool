@@ -263,7 +263,7 @@ async def test_ready_replica_stays_reserved_until_a_fresh_report(mock_health):
 def spy_planner(seen, inner=None):
     inner = inner or make_planner()
 
-    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset()):
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset(), **kw):
         seen.append({(n.node_id, d.device_id): d.usable_mb for n in nodes for d in n.devices})
         return inner(meta, spec, nodes, rid, port_alloc)
 
@@ -575,4 +575,144 @@ async def test_replica_drained_while_launching_rolls_back_quietly(mock_health):
     assert client.engines == {}  # engines rolled back
     assert "m" not in rec._backoff
     assert not any(e.kind == "launch_failed" for e in store.list_events())
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- priority, fairness, occupants, views
+async def test_higher_priority_gets_scarce_vram_despite_name(mock_health):
+    rec, store, clock = make_reconciler(planner=make_planner(est_mb=1000))
+    beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)]))  # room for one
+    store.put_model(SPEC.model_copy(update={"name": "aaa", "replicas": 1, "priority": 50}))
+    store.put_model(SPEC.model_copy(update={"name": "zzz", "replicas": 1, "priority": 80}))
+    await rec.tick()
+    await settle(rec)
+    assert [r.model for r in store.list_replicas()] == ["zzz"]
+    await rec.shutdown()
+
+
+async def test_every_model_gets_first_replica_before_a_second(mock_health):
+    rec, store, clock = make_reconciler(planner=make_planner(est_mb=1000))
+    # CUDA0 is taken by a's first replica; CUDA1 is the only room left.
+    beat(store, clock, node("a", devices=[dev("CUDA0", free=500, usable=500), dev("CUDA1", usable=1500)]))
+    put_replica(store, "a-1", model="a", now=clock())
+    store.put_model(SPEC.model_copy(update={"name": "a", "replicas": 2}))
+    store.put_model(SPEC.model_copy(update={"name": "b", "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    by_model = {}
+    for r in store.list_replicas():
+        by_model.setdefault(r.model, []).append(r)
+    assert len(by_model["a"]) == 1 and len(by_model["b"]) == 1  # name order would have given it to a
+    await rec.shutdown()
+
+
+async def test_occupants_resolve_device_ids_busy_and_include_draining():
+    load = {"m-1": 3, "d-1": 1, "gone-1": 0}
+    rec, store, clock = make_reconciler(outstanding=lambda rid: load.get(rid, 0))
+    # uuid moved from CUDA0 to CUDA1 on node a; the stored assignment still says CUDA0
+    beat_nodes = node("a", devices=[dev("CUDA0", uuid="U0"), dev("CUDA1", uuid="U1")])
+    store.add_server(ServerRecord(node_id="a", agent_url=beat_nodes.agent_url, added_at=clock()))
+    store.upsert_node(beat_nodes, clock())
+    store.put_model(SPEC.model_copy(update={"parallel": 2}))
+    put_replica(store, "m-1", model="m", head_device="CUDA0", head_uuid="U1")
+    put_replica(store, "d-1", model="m", state="draining", head_device="CUDA0", head_uuid="U0", head_port=9100)
+    put_replica(store, "gone-1", model="m", head_device="CUDA0", head_uuid="UX", head_port=9200)  # card lost
+    put_replica(store, "old-1", model="m", state="stopped", head_port=9300)  # terminal: holds nothing
+    occ = {o.replica_id: o for o in rec.occupants()}
+    assert set(occ) == {"m-1", "d-1"}
+    assert occ["m-1"].device_id == "CUDA1" and occ["m-1"].busy == 1.0  # 3/2 capped
+    assert occ["d-1"].device_id == "CUDA0" and occ["d-1"].busy == 0.5 and occ["d-1"].est_mb == 1000
+    await rec.shutdown()
+
+
+async def _budget_setup(est=1000, budget=2500, state="ready"):
+    rec, store, clock = make_reconciler(planner=make_planner(est_mb=est))
+    up = EngineStatus(engine_id="m-1-head", kind="server", state="running", port=9000)
+    put_replica(store, "m-1", state=state, now=clock())
+    clock.t += rec.READY_REPORT_GRACE_S + 1  # the grace reservation no longer applies
+    # free memory still looks roomy (a shared card): only the budget can stop the next replica
+    beat(store, clock, node("a", devices=[dev(free=8000, usable=budget, budget=budget)], engines=[up]))
+    return rec, store, clock
+
+
+async def test_budget_subtracts_own_replicas_after_the_grace():
+    rec, store, clock = await _budget_setup()
+    assert rec.available_reports()[0].devices[0].usable_mb == 1500  # 2500 - 1000
+    await rec.shutdown()
+
+
+async def test_budget_second_model_needing_more_than_left_gets_nofit(mock_health):
+    rec, store, clock = await _budget_setup(est=2000)
+    store.put_model(SPEC.model_copy(update={"replicas": 2}))
+    await rec.tick()
+    assert [r.replica_id for r in store.list_replicas()] == ["m-1"]
+    assert rec.nofit_reason("m")
+    await rec.shutdown()
+
+
+async def test_budget_counts_draining_replicas():
+    rec, store, clock = await _budget_setup(state="draining")
+    assert rec.available_reports()[0].devices[0].usable_mb == 1500
+    await rec.shutdown()
+
+
+async def test_budget_matches_by_uuid_and_ignores_other_devices():
+    rec, store, clock = make_reconciler()
+    put_replica(store, "m-1", head_device="CUDA0", head_uuid="U1", now=clock())
+    clock.t += rec.READY_REPORT_GRACE_S + 1
+    # the card moved to CUDA1; CUDA0 is another physical card with its own budget
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="U0", usable=2500, budget=2500),
+                                          dev("CUDA1", uuid="U1", usable=2500, budget=2500)]))
+    got = {d.device_id: d.usable_mb for d in rec.available_reports()[0].devices}
+    assert got == {"CUDA0": 2500, "CUDA1": 1500}
+    await rec.shutdown()
+
+
+async def test_unbudgeted_device_is_unaffected_by_own_replicas():
+    rec, store, clock = make_reconciler()
+    put_replica(store, "m-1", now=clock())
+    clock.t += rec.READY_REPORT_GRACE_S + 1
+    beat(store, clock, node("a", devices=[dev(usable=2500)]))
+    assert rec.available_reports()[0].devices[0].usable_mb == 2500
+    await rec.shutdown()
+
+
+async def test_budget_exhausted_floors_at_zero_and_disabled_stays_zero():
+    rec, store, clock = await _budget_setup(budget=500)  # estimate exceeds the budget
+    assert rec.available_reports()[0].devices[0].usable_mb == 0
+    store.set_gpu_enabled("a", "CUDA0", False)
+    assert rec.available_reports()[0].devices[0].usable_mb == 0
+    await rec.shutdown()
+
+
+async def test_plan_for_passes_occupants_to_the_planner(mock_health):
+    seen = []
+    inner = make_planner()
+
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset(), **kw):
+        seen.append(kw["occupants"])
+        return inner(meta, spec, nodes, rid, port_alloc)
+
+    rec, store, clock = make_reconciler(planner=planner)
+    beat(store, clock, node("a", devices=[dev(usable=9000)]))
+    put_replica(store, "other-1", model="other")
+    await rec.plan_for(SPEC)
+    assert [o.replica_id for o in seen[0]] == ["other-1"]
+    await rec.shutdown()
+
+
+async def test_rank_for_applies_pins_and_available_reports(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000), dev("CUDA1", usable=6000)]),
+         node("b", devices=[dev(usable=7000)]))
+    store.set_gpu_enabled("a", "CUDA1", False)
+    seen = {}
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5):
+        seen.update({(n.node_id, d.device_id): d.usable_mb for n in nodes for d in n.devices}, limit=limit)
+        return []
+
+    rec.ranker = ranker
+    assert await rec.rank_for(SPEC.model_copy(update={"pin_devices": ["a/CUDA0"]}), 4) == []
+    assert seen == {("a", "CUDA0"): 5000, ("a", "CUDA1"): 0, ("b", "CUDA0"): 0, "limit": 4}
     await rec.shutdown()

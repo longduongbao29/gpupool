@@ -98,6 +98,17 @@ def test_fake_devices_margin_and_budget(tmp_path, monkeypatch):
     assert d["CUDA1"].usable_mb == 88  # floor 512 beats 10% of 2000
     assert d["CUDA2"].usable_mb == 1200  # budget caps
     assert d["CPU"].usable_mb == 2000  # 8000-512 capped by budget
+    # The cap itself is reported so the coordinator can subtract its own replicas from it.
+    assert (d["CUDA0"].budget_mb, d["CUDA2"].budget_mb, d["CPU"].budget_mb) == (None, 1200, 2000)
+
+
+def test_cpu_and_cuda_probes_report_budget(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    cfg = make_cfg(tmp_path, budget_mb={"CPU": 3000}, include_cpu=True)
+    monkeypatch.delenv("GPUPOOL_FAKE_DEVICES", raising=False)
+    monkeypatch.setattr(g, "_cuda_devices", lambda c: [])
+    assert probe_devices(cfg)[0].budget_mb == 3000
+    assert probe_devices(make_cfg(tmp_path, include_cpu=True))[0].budget_mb is None
 
 
 def test_fake_devices_never_negative(tmp_path, monkeypatch):
@@ -735,6 +746,40 @@ def test_nvml_uuid_failure_keeps_device(tmp_path, monkeypatch):
     d = g._cuda_devices(make_cfg(tmp_path))
     assert len(d) == 1 and d[0].uuid is None
     assert d[0].usable_mb > 0 and d[0].pci_bus_id == "0000:01:00.0"
+
+
+def test_nvml_bandwidth_from_bus_width_and_mem_clock(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+    m.NVML_CLOCK_MEM = 2
+    m.nvmlDeviceGetMemoryBusWidth = lambda h: 128
+    m.nvmlDeviceGetMaxClockInfo = lambda h, kind: 5001 if kind == 2 else 0
+    assert g._cuda_devices(make_cfg(tmp_path))[0].bandwidth_gbps == 160.0
+
+
+@pytest.mark.parametrize("fail", ["width", "clock", "missing"])
+def test_nvml_bandwidth_failure_keeps_device(tmp_path, monkeypatch, fail):
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+    m.NVML_CLOCK_MEM = 2
+
+    def boom(*a):
+        raise _NvmlErr("NOT_SUPPORTED")
+    m.nvmlDeviceGetMemoryBusWidth = boom if fail == "width" else (lambda h: 128)
+    m.nvmlDeviceGetMaxClockInfo = boom if fail == "clock" else (lambda h, kind: 5001)
+    if fail == "missing":
+        del m.nvmlDeviceGetMaxClockInfo
+    d = g._cuda_devices(make_cfg(tmp_path))
+    assert len(d) == 1 and d[0].bandwidth_gbps is None and d[0].usable_mb > 0
+
+
+def test_fake_devices_bandwidth_passthrough(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("GPUPOOL_FAKE_DEVICES", json.dumps([
+        {"device_id": "CUDA0", "total_mb": 100, "free_mb": 90, "bandwidth_gbps": 320.5},
+        {"device_id": "CUDA1", "total_mb": 100, "free_mb": 90}]))
+    d = probe_devices(make_cfg(tmp_path))
+    assert (d[0].bandwidth_gbps, d[1].bandwidth_gbps) == (320.5, None)
 
 
 def test_fake_devices_identity_passthrough(tmp_path, monkeypatch):

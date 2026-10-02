@@ -6,7 +6,9 @@ Everything is in memory and driven by wall-clock time: GPU utilization fluctuate
 progresses, models walk stopped -> starting -> running. About 30 s after start, server
 CTG-Server-2 "dies" (events node_offline, realloc_started, realloc_done) and at ~50 s one GPU of
 CTG-Server-1 vanishes (gpu_missing). POST /api/_mock/kill/{node_id} triggers the outage by hand.
-Setting ctx_size above 32768 makes /plan answer 409 (does not fit).
+Setting ctx_size above 32768 makes /plan answer 409 (does not fit). POST /api/recommend answers with
+ranked options normally and with `not_possible` when the estimated need exceeds the biggest server
+(e.g. ctx_size 131072 on the 8B file, about 3 MB per context token). GET /api/capacity mirrors the live GPU numbers.
 """
 from __future__ import annotations
 
@@ -26,10 +28,13 @@ EVENTS: list[dict] = []
 SCHEDULED: list[tuple[float, object]] = []  # (absolute time, callable)
 
 
+BANDWIDTH_GBPS = {"NVIDIA H100 80GB": 3350.0, "NVIDIA RTX 4090": 1008.0, "NVIDIA A100 40GB": 1555.0, "NVIDIA RTX 3090": 936.2}
+
+
 def _gpu(i: int, name: str, total_mb: int, phase: float, driver="535.154.05", cuda="12.2") -> dict:
     return {"device_id": f"CUDA{i}", "kind": "cuda", "name": name, "total_mb": total_mb, "free_mb": total_mb,
             "usable_mb": total_mb, "util_pct": 0, "temp_c": 40, "power_w": 60, "processes": [],
-            "driver": driver, "cuda": cuda, "_phase": phase, "_base": 20 + 12 * i}
+            "driver": driver, "cuda": cuda, "bandwidth_gbps": BANDWIDTH_GBPS.get(name), "_phase": phase, "_base": 20 + 12 * i}
 
 
 def _server(node_id: str, ip: str, gpus: list[dict], alive: bool, ram_total: int) -> dict:
@@ -68,7 +73,7 @@ def reset() -> None:
         "hf_repo": "bartowski/Llama-3.1-8B-GGUF", "hf_file": "llama-8b.gguf", "bytes": 5_000_000_000,
         "downloaded": 500_000_000, "status": "downloading", "error": None, "created_at": T0, "_t": T0}
     MODELS["qwen3b"] = {"spec": {"name": "qwen3b", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096,
-        "parallel": 1, "replicas": 0, "pin_devices": []}, "file": "qwen2.5-3b-q4.gguf", "state": "stopped", "error": None,
+        "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu"}, "file": "qwen2.5-3b-q4.gguf", "state": "stopped", "error": None,
         "replicas": [], "_t": 0.0}
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
@@ -129,6 +134,8 @@ def _place(m: dict, replicas: int = 1) -> None:
 def _placement(name: str, chosen: list[tuple[str, str]]) -> dict:
     return {"model": name, "replica_id": f"{name}-plan", "tier": "multi_node" if len({c[0] for c in chosen}) > 1 else "single_node",
             "head_node": chosen[0][0], "head_port": 9000, "tensor_split": [1.0] * len(chosen), "est_total_mb": 5000 * len(chosen),
+            "score": 82.5, "est_decode_tps": 96.4,
+            "reasons": ["fastest GPUs with room (about 1008 GB/s)", "spread: replicas on different GPUs"],
             "assignments": [{"node_id": n, "device_id": d, "llama_device": d, "rpc_endpoint": None, "layers": 18 // len(chosen),
                              "est_mb": 5000} for n, d in chosen]}
 
@@ -300,8 +307,25 @@ def put_model(name: str, body: dict) -> dict:
     m = MODELS.setdefault(name, {"spec": {"name": name, "replicas": 0}, "state": "stopped", "error": None, "replicas": [], "_t": 0.0})
     m["file"] = file
     m["spec"].update(source=f"coordinator://{file}", ctx_size=int(body.get("ctx_size", 4096)), parallel=int(body.get("parallel", 1)),
-                     pin_devices=list(body.get("pin_devices", [])))
+                     pin_devices=list(body.get("pin_devices", [])), priority=_int_in(body.get("priority", 50), 0, 100, "priority"),
+                     spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
     return m["spec"]
+
+
+def _int_in(v, lo: int, hi: int, field: str) -> int:
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"{field} must be an integer")
+    if not lo <= n <= hi:
+        raise HTTPException(422, f"{field} must be between {lo} and {hi}")
+    return n
+
+
+def _choice(v, allowed: tuple, field: str) -> str:
+    if v not in allowed:
+        raise HTTPException(422, f"{field} must be one of {', '.join(allowed)}")
+    return v
 
 
 def _model(name: str) -> dict:
@@ -341,6 +365,85 @@ def plan_model(name: str) -> dict:
     pins = m["spec"]["pin_devices"]
     chosen = [tuple(p.split("/", 1)) for p in pins][:3] or [("CTG-Server-1", "CUDA0"), ("CTG-Server-2", "CUDA0")]
     return _placement(name, chosen)
+
+
+def _need_mb(file_bytes: int, ctx: int, parallel: int) -> int:
+    return int(file_bytes / 1048576 * 1.1 + ctx * parallel * 3.0 + 300)
+
+
+@app.post("/api/recommend", dependencies=[api])
+def recommend(body: dict) -> dict:
+    item = LIBRARY.get(body.get("file"))
+    if item is None:
+        raise HTTPException(404, f"{body.get('file')} is not in the library")
+    ctx = _int_in(body.get("ctx_size", 4096), 256, 10_000_000, "ctx_size")
+    parallel = _int_in(body.get("parallel", 1), 1, 64, "parallel")
+    limit = max(1, min(10, int(body.get("limit", 3))))
+    pins = list(body.get("pin_devices") or [])
+    alive = [s for s in SERVERS.values() if s["alive"]]
+    gpus = [(s["node_id"], g) for s in alive for g in s["gpus"]
+            if s["gpu_enabled"].get(g["device_id"], True) and (not pins or f"{s['node_id']}/{g['device_id']}" in pins)]
+    need = _need_mb(item["bytes"], ctx, parallel)
+    fixed = _need_mb(item["bytes"], 0, 1)
+    biggest_gpu = max((g["usable_mb"] for _, g in gpus), default=0)
+    per_node: dict[str, int] = {}
+    for n, g in gpus:
+        per_node[n] = per_node.get(n, 0) + g["usable_mb"]
+    biggest_node = max(per_node.values(), default=0)
+    max_ctx_single = max(0, int((biggest_gpu - fixed) / (3.0 * parallel)) // 256 * 256)
+    out = {"need_mb": need, "options": [], "max_ctx_single_gpu": max_ctx_single or None, "not_possible": None}
+    if need > biggest_node:
+        fits = max(0, int((biggest_node - fixed) / (3.0 * parallel)) // 256 * 256)
+        out["not_possible"] = {"need_mb": need, "largest_single_gpu_mb": biggest_gpu, "largest_single_node_mb": biggest_node,
+                               "max_ctx_that_fits": fits or None}
+        return out
+    ranked = sorted(gpus, key=lambda t: -(t[1]["bandwidth_gbps"] or 0))
+    singles = [(n, g) for n, g in ranked if g["usable_mb"] >= need]
+    opts = []
+    for n, g in singles[:limit]:
+        tps = round((g["bandwidth_gbps"] or 100) * 1024 / max(need, 1) * 0.5, 1)
+        opts.append({"score": round(60 + tps / 10, 1), "tier": "single_gpu", "fits_now": True,
+                     "assignments": [{"node_id": n, "device_id": g["device_id"], "layers": 33, "est_mb": need}],
+                     "est_decode_tps": tps, "est_total_mb": need,
+                     "reasons": [f"{g['name']}: {g['usable_mb'] // 1024} GB free", f"about {round(g['bandwidth_gbps'] or 0)} GB/s memory bandwidth"]})
+    if len(opts) < limit:
+        multi = [(n, g) for n, g in ranked if (n, g) not in singles][:2]
+        if len(multi) >= 2:
+            half = need // 2
+            tps = round(sum(g["bandwidth_gbps"] or 100 for _, g in multi) / 2 * 1024 / max(need, 1) * 0.4, 1)
+            opts.append({"score": round(40 + tps / 10, 1), "tier": "multi_gpu" if multi[0][0] == multi[1][0] else "multi_node",
+                         "fits_now": sum(g["usable_mb"] for _, g in multi) >= need,
+                         "assignments": [{"node_id": n, "device_id": g["device_id"], "layers": 17, "est_mb": half} for n, g in multi],
+                         "est_decode_tps": tps, "est_total_mb": need,
+                         "reasons": ["needs more than one GPU", "split layers evenly across the pair"]})
+    for i, o in enumerate(sorted(opts, key=lambda o: -o["score"]), 1):
+        out["options"].append({"rank": i, **o})
+    return out
+
+
+@app.get("/api/capacity", dependencies=[api])
+def capacity() -> dict:
+    tick()
+    rows = []
+    for s in SERVERS.values():
+        for g in s["gpus"]:
+            reps = [{"replica_id": r["replica_id"], "model": m["spec"]["name"], "est_mb": a["est_mb"], "busy": 0.0}
+                    for m in MODELS.values() for r in m["replicas"] for a in r["placement"]["assignments"]
+                    if a["node_id"] == s["node_id"] and a["device_id"] == g["device_id"]]
+            reserved = sum(r["est_mb"] for r in reps)
+            on = s["gpu_enabled"].get(g["device_id"], True)
+            rows.append({"node_id": s["node_id"], "device_id": g["device_id"], "uuid": f"GPU-mock-{s['node_id']}-{g['device_id']}",
+                         "name": g["name"], "kind": "cuda", "enabled": on, "alive": s["alive"], "total_mb": g["total_mb"],
+                         "usable_mb": g["usable_mb"], "free_for_new_mb": max(0, g["usable_mb"] - reserved) if on and s["alive"] else 0,
+                         "reserved_mb": reserved, "bandwidth_gbps": g["bandwidth_gbps"], "busy": round(g["util_pct"] / 100, 2),
+                         "replicas": reps})
+    usable = [r for r in rows if r["enabled"] and r["alive"]]
+    per_node: dict[str, int] = {}
+    for r in usable:
+        per_node[r["node_id"]] = per_node.get(r["node_id"], 0) + r["free_for_new_mb"]
+    return {"gpus": rows, "summary": {"gpus": len(rows), "free_for_new_mb": sum(r["free_for_new_mb"] for r in usable),
+                                      "largest_single_gpu_mb": max((r["free_for_new_mb"] for r in usable), default=0),
+                                      "largest_single_node_mb": max(per_node.values(), default=0)}}
 
 
 @app.get("/api/events", dependencies=[api])
