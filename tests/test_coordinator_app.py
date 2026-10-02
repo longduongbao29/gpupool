@@ -216,3 +216,13 @@ def test_stale_node_drops_out_without_any_write(routing):
     assert calls == n  # judged from the cached snapshot, liveness evaluated per call
     store.upsert_node(node("a"), clock())  # heartbeat resumes
     assert len(cap["get_candidates"]("m")) == 1
+
+
+async def test_admin_register_and_scale_wake_reconciler(env):
+    c, app, *_ = env
+    woke = []
+    app.state.reconciler.wake = lambda: woke.append(1)
+    assert (await c.post("/admin/models", json=SPEC.model_dump(), headers=AD)).status_code == 200
+    assert len(woke) == 1
+    assert (await c.post(f"/admin/models/{SPEC.name}/scale?replicas=2", headers=AD)).status_code == 200
+    assert len(woke) == 2

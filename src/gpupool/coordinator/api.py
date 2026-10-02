@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ValidationError
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import ACTIVE_STATES, LIVE_STATES, ModelSpec
 from gpupool.coordinator.agent_client import AgentError
-from gpupool.coordinator.store import ServerRecord
+from gpupool.coordinator.store import ServerRecord, gpu_key
 from gpupool.scheduler.placement import NoFit
 
 log = logging.getLogger("gpupool.api")
@@ -101,7 +101,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "alive": bool(n and n.alive(now(), cfg.heartbeat_timeout_s)),
             "last_seen": n.last_seen if n else 0.0,
             "report": n.report.model_dump(mode="json") if n else None,
-            "gpu_enabled": {d.device_id: flags.get((s.node_id, d.device_id), True) for d in devices},
+            "gpu_enabled": {d.device_id: flags.get((s.node_id, gpu_key(d)), True) for d in devices},
         }
 
     def model_entry(spec: ModelSpec, reps: list) -> dict:
@@ -220,7 +220,11 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     @router.put("/servers/{node_id}/gpus/{device_id}")
     async def set_gpu(node_id: str, device_id: str, body: GpuBody) -> dict:
         server_or_404(node_id)
-        store.set_gpu_enabled(node_id, device_id, body.enabled)
+        # The UI addresses GPUs by device_id; flags are stored by the card's identity.
+        node = next((n for n in store.list_nodes() if n.report.node_id == node_id), None)
+        dev = next((d for d in node.report.devices if d.device_id == device_id), None) if node else None
+        store.set_gpu_enabled(node_id, gpu_key(dev) if dev else device_id, body.enabled)
+        reconciler.wake()
         return {"node_id": node_id, "device_id": device_id, "enabled": body.enabled}
 
     # ------------------------------------------------------------------ models
@@ -245,6 +249,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             name=name, source=COORD_PREFIX + body.file, ctx_size=body.ctx_size, parallel=body.parallel,
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)))
         store.put_model(spec)
+        reconciler.wake()
         return spec.model_dump(mode="json")
 
     @router.post("/models/{name}/start")
@@ -253,10 +258,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         spec = spec.model_copy(update={"replicas": (body or StartBody()).replicas})
         store.put_model(spec)
         emit("info", "model_started", f"Model {name} started ({spec.replicas} replica(s) requested)", model=name)
-        try:
-            await reconciler.tick()
-        except Exception:  # best effort: the background loop will pick it up anyway
-            log.exception("immediate reconcile after start failed")
+        reconciler.wake()  # not tick(): that waits on the tick lock and agent HTTP calls
         return spec.model_dump(mode="json")
 
     @router.post("/models/{name}/stop")
@@ -264,12 +266,14 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         spec = spec_or_404(store, name).model_copy(update={"replicas": 0})
         store.put_model(spec)
         emit("info", "model_stopped", f"Model {name} stopped", model=name)
+        reconciler.wake()
         return spec.model_dump(mode="json")
 
     @router.delete("/models/{name}")
     async def delete_model(name: str) -> dict:
         await drain_and_delete_model(store, reconciler, name)
         emit("info", "model_stopped", f"Model {name} removed", model=name)
+        reconciler.wake()
         return {"ok": True}
 
     @router.post("/models/{name}/plan")

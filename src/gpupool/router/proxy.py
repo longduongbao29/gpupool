@@ -78,6 +78,7 @@ def make_router(
     on_replica_error: Callable[[str], None],
     client: httpx.AsyncClient | None = None,
     max_retries: int = 2,
+    max_body_bytes: int = 32 * 1024 * 1024,
 ) -> APIRouter:
     router = APIRouter()
     auth = require_bearer(*api_keys)
@@ -104,8 +105,22 @@ def make_router(
     async def handle(request: Request, path: str):
         if (denied := check_auth(request)) is not None:
             return denied
+        too_big = _error(413, f"request body exceeds {max_body_bytes // (1024 * 1024)} MB",
+                         "invalid_request_error", "request_too_large")
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > max_body_bytes:
+            return too_big
+        # Chunked uploads carry no content-length, so enforce the cap while reading: one
+        # client must not be able to buffer an unbounded body in coordinator memory.
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > max_body_bytes:
+                return too_big
+            chunks.append(chunk)
         try:
-            body = json.loads(await request.body())
+            body = json.loads(b"".join(chunks))
         except ValueError:
             return _error(400, "request body is not valid JSON",
                           "invalid_request_error", "invalid_json")

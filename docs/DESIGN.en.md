@@ -50,7 +50,7 @@ Source of truth: `src/gpupool/common/models.py` (pydantic v2). Summary:
 
 | Model | Direction | Key fields |
 | --- | --- | --- |
-| `Device` | agent → coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free − margin, budget)) |
+| `Device` | agent → coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free − margin, budget)), `uuid` / `pci_bus_id` (stable identity of the physical GPU; `device_id` is a position that shifts when a GPU drops off the bus) |
 | `NodeReport` | heartbeat | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, models |
 | `EngineSpec` | coordinator → agent | `engine_id`, `kind` rpc/server, `port`, `devices` (order = `--device`), `rpc_endpoints`, `tensor_split`, `ctx_size`, `parallel` |
 | `EngineStatus` | agent → coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (≤ 50 lines) |

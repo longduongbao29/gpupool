@@ -2,8 +2,8 @@ import time
 
 import pytest
 
-from gpupool.coordinator.store import Store
-from tests.test_coordinator_helpers import SPEC, node, put_replica
+from gpupool.coordinator.store import Store, gpu_key
+from tests.test_coordinator_helpers import SPEC, dev, node, put_replica
 
 
 @pytest.fixture(params=["memory", "file"])
@@ -78,6 +78,35 @@ def test_gpu_flags_default_enabled_and_toggle(store):
     assert store.gpu_flags() == {("a", "CUDA0"): False}
     store.set_gpu_enabled("a", "CUDA0", True)
     assert store.gpu_flags() == {("a", "CUDA0"): True}
+
+
+def test_gpu_key_prefers_uuid():
+    assert gpu_key(dev("CUDA1", uuid="GPU-1")) == "GPU-1"
+    assert gpu_key(dev("CUDA1")) == "CUDA1"
+
+
+def test_upsert_migrates_legacy_flag_rows_to_uuid(store):
+    store.set_gpu_enabled("a", "CUDA0", True)
+    store.set_gpu_enabled("a", "CUDA1", False)
+    store.set_gpu_enabled("b", "CUDA0", False)  # other node: untouched
+    v = store.version
+    store.upsert_node(node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-1")]), 1.0)
+    assert store.gpu_flags() == {("a", "GPU-0"): True, ("a", "GPU-1"): False, ("b", "CUDA0"): False}
+    assert store.version == v + 1  # the node write bumps, the flag rewrite adds nothing
+    # numbering shifts later: the flags stay with their cards and nothing is rewritten again
+    store.upsert_node(node("a", devices=[dev("CUDA0", uuid="GPU-1")]), 2.0)
+    assert store.gpu_flags() == {("a", "GPU-0"): True, ("a", "GPU-1"): False, ("b", "CUDA0"): False}
+
+
+def test_migration_keeps_existing_uuid_row_and_skips_uuidless_reports(store):
+    store.set_gpu_enabled("a", "CUDA0", False)  # legacy
+    store.set_gpu_enabled("a", "GPU-0", True)  # already has a uuid row: it wins
+    store.upsert_node(node("a", devices=[dev("CUDA0", uuid="GPU-0")]), 1.0)
+    assert store.gpu_flags() == {("a", "CUDA0"): False, ("a", "GPU-0"): True}
+    store.upsert_node(node("b", devices=[dev("CUDA0")]), 1.0)  # no uuids: legacy rows stay
+    store.set_gpu_enabled("b", "CUDA0", False)
+    store.upsert_node(node("b", devices=[dev("CUDA0")]), 2.0)
+    assert store.gpu_flags()[("b", "CUDA0")] is False
 
 
 def test_events_order_filter_read_and_prune(store, monkeypatch):

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from gpupool.common.models import ModelSpec, NodeReport, ReplicaRecord
+from gpupool.common.models import Device, ModelSpec, NodeReport, ReplicaRecord
 from gpupool.coordinator.events import Event
 
 _SCHEMA = """
@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 EVENTS_KEEP = 1000
+
+
+def gpu_key(device: Device) -> str:
+    """Key of a GPU in gpu_flags: the physical card (uuid) when reported, else its position.
+    device_id shifts when a GPU drops off the bus; the uuid does not."""
+    return device.uuid or device.device_id
 
 
 class NodeRecord(BaseModel):
@@ -85,11 +91,30 @@ class Store:
 
     # nodes
     def upsert_node(self, report: NodeReport, now: float) -> None:
-        self._write(
-            "INSERT INTO nodes(node_id, report, last_seen) VALUES(?,?,?) "
-            "ON CONFLICT(node_id) DO UPDATE SET report=excluded.report, last_seen=excluded.last_seen",
-            (report.node_id, report.model_dump_json(), now),
-        )
+        by_id = {d.device_id: d.uuid for d in report.devices if d.uuid}
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO nodes(node_id, report, last_seen) VALUES(?,?,?) "
+                "ON CONFLICT(node_id) DO UPDATE SET report=excluded.report, last_seen=excluded.last_seen",
+                (report.node_id, report.model_dump_json(), now))
+            if by_id:
+                self._migrate_flags(report.node_id, by_id)
+            self._version += 1
+
+    def _migrate_flags(self, node_id: str, uuid_by_device_id: dict[str, str]) -> None:
+        """Rewrite legacy flag rows (keyed by device_id) to the card's uuid.
+
+        Runs on the report of an agent that has just started sending uuids: the numbering is
+        then still the one the legacy rows were written under, so device_id -> uuid is safe.
+        Later reports find nothing to do (rows are already uuid keys). Flags do not affect
+        routing, so no version bump. Caller holds the lock and a transaction."""
+        have = {r[0] for r in self._conn.execute("SELECT device_id FROM gpu_flags WHERE node_id=?", (node_id,))}
+        for did, uid in uuid_by_device_id.items():
+            if did in have and uid not in have:
+                self._conn.execute("UPDATE gpu_flags SET device_id=? WHERE node_id=? AND device_id=?",
+                                   (uid, node_id, did))
+                have.discard(did)
+                have.add(uid)
 
     def list_nodes(self) -> list[NodeRecord]:
         rows = self._read("SELECT report, last_seen FROM nodes ORDER BY node_id")
@@ -134,15 +159,16 @@ class Store:
         return bool(self._read("SELECT 1 FROM removed_servers WHERE node_id=?", (node_id,)))
 
     # gpu flags
-    def set_gpu_enabled(self, node_id: str, device_id: str, enabled: bool) -> None:
+    def set_gpu_enabled(self, node_id: str, key: str, enabled: bool) -> None:
+        """`key` is gpu_key(device): the uuid when the agent reports one, else the device_id."""
         self._write(
             "INSERT INTO gpu_flags(node_id, device_id, enabled) VALUES(?,?,?) "
             "ON CONFLICT(node_id, device_id) DO UPDATE SET enabled=excluded.enabled",
-            (node_id, device_id, int(enabled)), bump=False,
+            (node_id, key, int(enabled)), bump=False,
         )
 
     def gpu_flags(self) -> dict[tuple[str, str], bool]:
-        """Explicit flags only; a device without a row is enabled."""
+        """Explicit flags only, keyed (node_id, gpu_key); a device without a row is enabled."""
         return {(n, d): bool(e) for n, d, e in self._read("SELECT node_id, device_id, enabled FROM gpu_flags")}
 
     # events

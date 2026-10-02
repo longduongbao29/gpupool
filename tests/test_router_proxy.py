@@ -15,7 +15,7 @@ def ep(i: int) -> ReplicaEndpoint:
 
 
 class Env:
-    def __init__(self, behaviors, n=3, api_keys=(), max_retries=2, models=("m",)):
+    def __init__(self, behaviors, n=3, api_keys=(), max_retries=2, models=("m",), **router_kw):
         self.behaviors = behaviors  # host -> callable(request) -> response | raises
         self.hits: list[str] = []
         self.bodies: list[dict] = []
@@ -38,6 +38,7 @@ class Env:
             list_models=lambda: list(models),
             balancer=self.balancer, metrics=self.metrics, api_keys=list(api_keys),
             on_replica_error=self.errors.append, client=client, max_retries=max_retries,
+            **router_kw,
         ))
 
     def client(self):
@@ -270,3 +271,43 @@ async def test_metrics_outstanding_gauge():
     env.balancer.acquire("r1")
     text = env.metrics.render()
     assert 'gpupool_outstanding{replica="r1"} 1' in text
+
+
+BIG = 1024 * 1024  # max_body_bytes=BIG keeps these tests small
+
+
+async def test_body_over_limit_with_content_length_is_413():
+    env = Env({"*": ok}, max_body_bytes=BIG)
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", content=b"x" * (BIG + 1))
+    assert r.status_code == 413 and r.json()["error"]["code"] == "request_too_large"
+    assert env.hits == []
+
+
+async def test_chunked_body_over_limit_is_413():
+    env = Env({"*": ok}, max_body_bytes=BIG)
+
+    async def gen():  # async generator -> no content-length, chunked
+        for _ in range(3):
+            yield b"x" * (BIG // 2)
+
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", content=gen())
+    assert r.status_code == 413 and env.hits == []
+
+
+async def test_body_at_limit_passes():
+    env = Env({"*": ok}, max_body_bytes=BIG)
+    body = json.dumps({"model": "m", "messages": []})
+    body = body[:-1] + " " * (BIG - len(body)) + body[-1:]  # pad inside JSON whitespace
+    assert len(body) == BIG
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", content=body.encode())
+    assert r.status_code == 200
+
+
+async def test_unauthenticated_big_body_is_401_not_413():
+    env = Env({"*": ok}, api_keys=["k"], max_body_bytes=BIG)
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", content=b"x" * (BIG + 1))
+    assert r.status_code == 401

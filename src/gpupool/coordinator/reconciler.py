@@ -17,6 +17,8 @@ from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
     ACTIVE_STATES,
     LIVE_STATES,
+    Device,
+    DeviceAssignment,
     EngineSpec,
     ModelMeta,
     ModelSpec,
@@ -27,7 +29,7 @@ from gpupool.common.models import (
 from gpupool.common.net import internal_client
 from gpupool.coordinator.agent_client import AgentClient
 from gpupool.coordinator.events import Notifier
-from gpupool.coordinator.store import NodeRecord, Store
+from gpupool.coordinator.store import NodeRecord, Store, gpu_key
 from gpupool.scheduler.placement import NoFit, plan
 
 log = logging.getLogger("gpupool.reconciler")
@@ -51,6 +53,16 @@ class _Realloc:
 
 def _port_of(endpoint: str) -> int:
     return int(endpoint.rsplit(":", 1)[1])
+
+
+def _find_device(devices: list[Device], a: DeviceAssignment) -> Device | None:
+    """The card an assignment was planned on. By uuid when both sides have one: device_id is a
+    position that shifts when a GPU drops off the bus, so matching it would blame a healthy replica
+    for the lost card's neighbour, or miss the loss when another card took the old id. Without uuids
+    in the report (agent downgrade) or on the assignment, fall back to device_id."""
+    if a.device_uuid and any(d.uuid for d in devices):
+        return next((d for d in devices if d.uuid == a.device_uuid), None)
+    return next((d for d in devices if d.device_id == a.device_id), None)
 
 
 def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
@@ -95,6 +107,7 @@ class Reconciler:
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
         self._realloc: dict[str, _Realloc] = {}
+        self._wake = asyncio.Event()
 
     # ------------------------------------------------------------------ helpers
     def _http_client(self) -> httpx.AsyncClient:
@@ -155,7 +168,7 @@ class Reconciler:
                 continue
             rep = n.report.model_copy(deep=True)
             for d in rep.devices:
-                if not flags.get((rep.node_id, d.device_id), True):
+                if not flags.get((rep.node_id, gpu_key(d)), True):
                     # Disabled in the pool: usable_mb 0 makes the unchanged planner skip it.
                     d.usable_mb = 0
                     continue
@@ -242,7 +255,19 @@ class Reconciler:
                 raise
             except Exception:
                 log.exception("reconcile tick failed")
-            await asyncio.sleep(self.cfg.reconcile_s)
+            try:  # sleep until the next period, or earlier when wake() is called
+                await asyncio.wait_for(self._wake.wait(), self.cfg.reconcile_s)
+            except TimeoutError:
+                pass
+            self._wake.clear()
+
+    def wake(self) -> None:
+        """Run the next tick now instead of at the end of the period (desired state changed).
+
+        API handlers call this instead of awaiting tick(): a tick waits on the tick lock and on
+        HTTP calls to agents, which would hold the request for seconds. Call it on the event loop
+        (from async routes): asyncio.Event is not thread-safe, so sync threadpool routes must not."""
+        self._wake.set()
 
     async def shutdown(self) -> None:
         tasks = list(self._launches.values())
@@ -340,7 +365,7 @@ class Reconciler:
                 await self._fail(rec, f"node(s) dead: {', '.join(dead)}", nodes, now)
                 continue
             gone = sorted(f"{a.node_id}/{a.device_id}" for a in p.assignments
-                          if a.device_id not in {d.device_id for d in nodes[a.node_id].report.devices})
+                          if _find_device(nodes[a.node_id].report.devices, a) is None)
             if gone:
                 reason = f"GPU {', '.join(gone)} no longer reported by its (live) server"
                 self._emit("error", "gpu_missing", f"{reason}; replica {rec.replica_id} of {rec.model} failed",
@@ -412,7 +437,7 @@ class Reconciler:
             n = nodes.get(a.node_id)
             if n is None:
                 continue
-            d = next((d for d in n.report.devices if d.device_id == a.device_id), None)
+            d = _find_device(n.report.devices, a)
             if d is not None and d.free_mb < self.cfg.low_free_mb:
                 return True
         return False

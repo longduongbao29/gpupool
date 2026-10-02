@@ -64,7 +64,7 @@ class ModelSpec(BaseModel):
     pin_devices: list[str] = []  # "node_id/device_id"; empty = scheduler chooses
 ```
 
-New store tables: `servers(node_id, agent_url, added_at)`, `gpu_flags(node_id, device_id, enabled)`,
+New store tables: `servers(node_id, agent_url, added_at)`, `gpu_flags(node_id, device_id, enabled)` (the second column holds the GPU's `uuid` when the agent reports one, so a flag follows the physical card; legacy rows keyed by `CUDA<i>` are migrated on the first report carrying uuids),
 `library(name, path, source, bytes, status, progress, error)`.
 
 Scheduler input changes (no change to `plan()` itself): before planning, the reconciler sets

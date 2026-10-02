@@ -197,21 +197,25 @@ def create_app(
 
     # ---- admin
     @app.post("/admin/models", dependencies=[admin_auth])
-    def put_model(spec: ModelSpec) -> ModelSpec:
+    async def put_model(spec: ModelSpec) -> ModelSpec:
+        # async, not a threadpool route: wake() sets an asyncio.Event, which is not thread-safe
         store.put_model(spec)
+        reconciler.wake()  # act now rather than after reconcile_s
         return spec
 
     @app.delete("/admin/models/{name}", dependencies=[admin_auth])
     async def delete_model(name: str) -> dict:
         await drain_and_delete_model(store, reconciler, name)  # no event here, unlike /api
+        reconciler.wake()
         return {"ok": True}
 
     @app.post("/admin/models/{name}/scale", dependencies=[admin_auth])
-    def scale(name: str, replicas: int) -> ModelSpec:
+    async def scale(name: str, replicas: int) -> ModelSpec:  # async: see put_model
         if replicas < 0:
             raise HTTPException(422, "replicas must be >= 0")
         spec = spec_or_404(store, name).model_copy(update={"replicas": replicas})
         store.put_model(spec)
+        reconciler.wake()
         return spec
 
     @app.post("/admin/deploy/{model}", dependencies=[admin_auth])
@@ -293,6 +297,7 @@ def create_app(
         list_models=lambda: list(_snapshot()[1]),
         balancer=balancer, metrics=metrics, api_keys=cfg.api_keys,
         on_replica_error=reconciler.note_error,
+        max_body_bytes=cfg.max_request_mb * 1024 * 1024,
     ))
 
     @app.get("/metrics")

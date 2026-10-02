@@ -237,7 +237,7 @@ def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id) -> 
         assignments.append(
             DeviceAssignment(
                 node_id=d.node.node_id, device_id=d.dev.device_id, llama_device=llama_dev,
-                rpc_endpoint=endpoint, layers=c, est_mb=est,
+                rpc_endpoint=endpoint, layers=c, est_mb=est, device_uuid=d.dev.uuid,
             )
         )
         start += c

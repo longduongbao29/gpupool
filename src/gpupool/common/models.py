@@ -42,6 +42,10 @@ class Device(BaseModel):
     processes: list[GpuProcess] = Field(default_factory=list)
     driver: str | None = None  # NVIDIA driver version, e.g. "535.154.05"
     cuda: str | None = None  # highest CUDA version the driver supports, e.g. "12.2"
+    # Stable identity of a physical GPU (NVML), unlike device_id which is a position that
+    # shifts when a GPU disappears. None for CPU devices and agents before 0.3.
+    uuid: str | None = None  # "GPU-8f2c..."
+    pci_bus_id: str | None = None  # "00000000:01:00.0"
 
 
 class EngineSpec(BaseModel):
@@ -139,6 +143,7 @@ class DeviceAssignment(BaseModel):
     rpc_endpoint: str | None = None  # "host:port"; None when local to the head
     layers: int
     est_mb: int
+    device_uuid: str | None = None  # Device.uuid at planning time, when the agent reports one
 
 
 class Placement(BaseModel):

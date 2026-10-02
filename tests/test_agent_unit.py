@@ -713,3 +713,34 @@ def test_nvml_lost_gpu_does_not_reinit(tmp_path, monkeypatch):
     g._cuda_devices(cfg)
     g._cuda_devices(cfg)
     assert calls["init"] == 1
+
+
+def test_nvml_uuid_and_pci_filled(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+    m.nvmlDeviceGetUUID = lambda h: b"GPU-8f2c0000-aaaa"
+    d = g._cuda_devices(make_cfg(tmp_path))[0]
+    assert (d.uuid, d.pci_bus_id) == ("GPU-8f2c0000-aaaa", "0000:01:00.0")
+    m.nvmlDeviceGetUUID = lambda h: "GPU-str"  # newer pynvml returns str
+    assert g._cuda_devices(make_cfg(tmp_path))[0].uuid == "GPU-str"
+
+
+def test_nvml_uuid_failure_keeps_device(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    m = _stub_nvml(monkeypatch)
+
+    def boom(h):
+        raise _NvmlErr("NOT_SUPPORTED")
+    m.nvmlDeviceGetUUID = boom
+    d = g._cuda_devices(make_cfg(tmp_path))
+    assert len(d) == 1 and d[0].uuid is None
+    assert d[0].usable_mb > 0 and d[0].pci_bus_id == "0000:01:00.0"
+
+
+def test_fake_devices_identity_passthrough(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("GPUPOOL_FAKE_DEVICES", json.dumps([{
+        "device_id": "CUDA0", "total_mb": 100, "free_mb": 90,
+        "uuid": "GPU-fake", "pci_bus_id": "00000000:02:00.0"}]))
+    d = probe_devices(make_cfg(tmp_path))[0]
+    assert (d.uuid, d.pci_bus_id) == ("GPU-fake", "00000000:02:00.0")

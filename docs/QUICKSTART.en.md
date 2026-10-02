@@ -146,6 +146,7 @@ docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_p
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `GPUPOOL_API_KEYS` | empty (open) | comma-separated keys clients must send |
+| `GPUPOOL_MAX_REQUEST_MB` | 32 | largest request body accepted on /v1, in MB (bigger gets HTTP 413) |
 | `GPUPOOL_PUBLIC_URL` | detected | address servers use to reach the coordinator, if detection is wrong |
 | `GPUPOOL_WEBHOOK_URL` | empty | Slack/Discord webhook for alerts (server down, GPU lost, not enough VRAM) |
 | `HF_TOKEN` | empty | for gated or private Hugging Face repos |

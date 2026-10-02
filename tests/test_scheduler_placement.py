@@ -189,3 +189,14 @@ def test_cpu_joins_only_when_gpus_cannot_hold_model():
     pl = plan(meta, SPEC, nodes, "r1", Ports())
     assert {a.device_id for a in pl.assignments} == {"CUDA0", "CPU"}
     check(meta, pl, nodes)
+
+
+def test_plan_carries_device_uuid():
+    meta = make_meta(8)
+    need = total_need_mb(meta, 512)
+    d0 = dev("CUDA0", need + 50)
+    d0.uuid = "GPU-aaaa"
+    d1 = dev("CUDA0", need + 50)  # an old agent: no uuid
+    n = [node("a", d0)]
+    assert plan(meta, SPEC, n, "r1", Ports()).assignments[0].device_uuid == "GPU-aaaa"
+    assert plan(meta, SPEC, [node("b", d1)], "r2", Ports()).assignments[0].device_uuid is None

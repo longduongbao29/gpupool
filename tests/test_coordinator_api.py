@@ -124,6 +124,25 @@ async def test_gpu_switch(env):
     assert st["servers"][0]["gpu_enabled"] == {"CUDA0": False}
 
 
+async def test_set_gpu_stores_uuid_key_and_ui_stays_device_id(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-1")]))
+    woke = []
+    rec.wake = lambda: woke.append(1)
+    r = await c.put("/api/servers/a/gpus/CUDA1", json={"enabled": False})
+    assert r.json() == {"node_id": "a", "device_id": "CUDA1", "enabled": False}
+    assert store.gpu_flags() == {("a", "GPU-1"): False} and woke
+    st = (await c.get("/api/state")).json()
+    assert st["servers"][0]["gpu_enabled"] == {"CUDA0": True, "CUDA1": False}
+    assert st["summary"]["gpus_enabled"] == 1
+    # the card moves to CUDA0: the flag follows it
+    store.upsert_node(node("a", devices=[dev("CUDA0", uuid="GPU-1")]), clock())
+    assert (await c.get("/api/state")).json()["servers"][0]["gpu_enabled"] == {"CUDA0": False}
+    # device_id not in the report: stored as given
+    await c.put("/api/servers/a/gpus/CUDA7", json={"enabled": False})
+    assert store.gpu_flags()[("a", "CUDA7")] is False
+
+
 # ---------------------------------------------------------------- state
 async def test_state_shape_and_summary(env):
     c, store, rec, _, clock, _ = env
@@ -247,12 +266,18 @@ async def test_put_model_create_update_validation(env):
 async def test_start_stop_delete_flow(env):
     c, store, rec, _, clock, _ = env
     rec.planner = make_planner()
+    woke = []
+    rec.wake = lambda: woke.append(1)
     register(store, clock, node("a"))
     await c.put("/api/models/m", json={"file": "x.gguf"})
+    woke.clear()
     assert (await c.post("/api/models/m/start", json={"replicas": 0})).status_code == 422
     r = await c.post("/api/models/m/start")  # body optional
     assert r.status_code == 200 and r.json()["replicas"] == 1
-    assert store.list_replicas(model="m")  # best-effort tick already placed it
+    assert woke == [1]  # start only wakes the loop; the placement happens on the next tick
+    assert store.list_replicas(model="m") == []
+    await rec.tick()
+    assert store.list_replicas(model="m")
     r = await c.post("/api/models/m/start", json={"replicas": 3})
     assert r.json()["replicas"] == 3 and store.get_model("m").replicas == 3
     r = await c.post("/api/models/m/stop")
@@ -266,16 +291,27 @@ async def test_start_stop_delete_flow(env):
     await rec.shutdown()
 
 
-async def test_start_survives_tick_failure(env):
+async def test_start_does_not_wait_for_a_tick(env):
     c, store, rec, *_ = env
     store.put_model(SPEC)
 
     async def boom():
-        raise RuntimeError("tick broke")
+        raise AssertionError("start must not run a tick inside the request")
 
     rec.tick = boom
     r = await c.post("/api/models/m/start")
     assert r.status_code == 200 and store.get_model("m").replicas == 1
+    assert rec._wake.is_set()
+
+
+async def test_stop_delete_put_model_wake_the_loop(env):
+    c, store, rec, *_ = env
+    store.put_model(SPEC)
+    for call in (lambda: c.post("/api/models/m/stop"), lambda: c.put("/api/models/m", json={"file": "x.gguf"}),
+                 lambda: c.delete("/api/models/m")):
+        rec._wake.clear()
+        assert (await call()).status_code == 200
+        assert rec._wake.is_set()
 
 
 async def test_plan_dry_run_and_nofit(env):

@@ -143,6 +143,7 @@ docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_p
 | Biến | Mặc định | Tác dụng |
 | --- | --- | --- |
 | `GPUPOOL_API_KEYS` | rỗng (mở) | các key client phải gửi, phân cách bằng dấu phẩy |
+| `GPUPOOL_MAX_REQUEST_MB` | 32 | kích thước tối đa của một request gửi tới /v1, tính bằng MB (lớn hơn sẽ nhận HTTP 413) |
 | `GPUPOOL_PUBLIC_URL` | tự dò | địa chỉ server dùng để gọi coordinator, nếu tự dò sai |
 | `GPUPOOL_WEBHOOK_URL` | rỗng | webhook Slack/Discord để nhận cảnh báo (server chết, mất GPU, thiếu VRAM) |
 | `HF_TOKEN` | rỗng | cho repo Hugging Face bị giới hạn hoặc private |

@@ -53,6 +53,7 @@ class CoordinatorConfig(BaseModel):
     models_dir: Path = Path(".gpupool/models")  # served at /files/<name> for coordinator:// sources
     heartbeat_timeout_s: float = 10.0
     reconcile_s: float = 2.0
+    max_request_mb: int = 32  # cap on one /v1 request body; larger -> 413
     launch_timeout_s: float = 600.0
     low_free_mb: int = 256  # device free below this while hosting an engine -> move replica
     drain_timeout_s: float = 60.0

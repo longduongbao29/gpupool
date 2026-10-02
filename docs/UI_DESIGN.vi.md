@@ -64,7 +64,7 @@ class ModelSpec(BaseModel):
     pin_devices: list[str] = []  # "node_id/device_id"; rỗng = scheduler tự chọn
 ```
 
-Bảng store mới: `servers(node_id, agent_url, added_at)`, `gpu_flags(node_id, device_id, enabled)`,
+Bảng store mới: `servers(node_id, agent_url, added_at)`, `gpu_flags(node_id, device_id, enabled)` (cột thứ hai lưu `uuid` của GPU khi agent có báo, để cờ bật/tắt đi theo card vật lý; các dòng cũ theo `CUDA<i>` được chuyển sang uuid ở report đầu tiên có uuid),
 `library(name, path, source, bytes, status, progress, error)`.
 
 Scheduler không đổi hàm `plan()`: trước khi plan, reconciler đặt `usable_mb = 0` cho GPU bị tắt và, khi

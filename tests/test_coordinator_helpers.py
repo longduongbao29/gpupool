@@ -23,8 +23,9 @@ META = ModelMeta(arch="llama", n_layers=4, n_embd=64, n_head=4, n_head_kv=4, hea
                  layer_bytes=[1] * 4, other_bytes=1, output_bytes=1)
 
 
-def dev(device_id="CUDA0", free=8000, usable=7000) -> Device:
-    return Device(device_id=device_id, kind="cuda", name=device_id, total_mb=10000, free_mb=free, usable_mb=usable)
+def dev(device_id="CUDA0", free=8000, usable=7000, uuid=None) -> Device:
+    return Device(device_id=device_id, kind="cuda", name=device_id, total_mb=10000, free_mb=free, usable_mb=usable,
+                  uuid=uuid)
 
 
 def node(node_id="a", host=None, devices=None, engines=None, ts=0.0) -> NodeReport:
@@ -132,8 +133,9 @@ async def settle(rec: Reconciler):
 
 
 def put_replica(store, rid="m-1", model="m", state="ready", head="a", rpc_node=None, now=1000.0,
-                head_port=9000, rpc_port=9001) -> ReplicaRecord:
-    asg = [DeviceAssignment(node_id=head, device_id="CUDA0", llama_device="CUDA0", layers=2, est_mb=1000)]
+                head_port=9000, rpc_port=9001, head_device="CUDA0", head_uuid=None) -> ReplicaRecord:
+    asg = [DeviceAssignment(node_id=head, device_id=head_device, llama_device="CUDA0", layers=2, est_mb=1000,
+                            device_uuid=head_uuid)]
     if rpc_node:
         asg.append(DeviceAssignment(node_id=rpc_node, device_id="CUDA0", llama_device="RPC0",
                                     rpc_endpoint=f"10.0.0.2:{rpc_port}", layers=2, est_mb=1000))

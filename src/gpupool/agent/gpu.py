@@ -40,6 +40,7 @@ def _fake_devices(cfg: AgentConfig, raw: str) -> list[Device]:
             temp_c=d.get("temp_c"), power_w=d.get("power_w"),
             processes=[GpuProcess(**p) for p in d.get("processes", [])],
             driver=d.get("driver"), cuda=d.get("cuda"),
+            uuid=d.get("uuid"), pci_bus_id=d.get("pci_bus_id"),
         ))
     return out
 
@@ -176,11 +177,13 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
             temp = _best_effort(
                 lambda: int(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)))
             power = _best_effort(lambda: int(round(pynvml.nvmlDeviceGetPowerUsage(h) / 1000)))
+            # Stable identity across reboots/bus loss; "CUDA<i>" shifts when a card drops.
+            uuid = _text(_best_effort(lambda: pynvml.nvmlDeviceGetUUID(h)))
             did = f"CUDA{idx}"
             out.append(Device(device_id=did, kind="cuda", name=name, total_mb=total, free_mb=free,
                               usable_mb=_usable(cfg, did, "cuda", total, free), util_pct=util,
                               temp_c=temp, power_w=power, processes=_gpu_processes(pynvml, h),
-                              driver=driver, cuda=cuda))
+                              driver=driver, cuda=cuda, uuid=uuid, pci_bus_id=pci))
         if lost:
             # The CUDA runtime behind llama.cpp may or may not still count the lost GPU, so
             # "CUDA<i>" -> physical card is no longer trustworthy: a per-device flag or a new

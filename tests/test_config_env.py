@@ -10,6 +10,9 @@ def test_env_overrides_types():
     assert cfg.api_keys == ["a", "b", "c"]
     assert cfg.port_range == (9100, 9200) and cfg.port == 8081
     assert cfg.hf_token == "hf_x" and cfg.models_dir == Path("/data/models")
+    assert CoordinatorConfig().max_request_mb == 32
+    assert CoordinatorConfig(**env_overrides(
+        CoordinatorConfig, {"GPUPOOL_MAX_REQUEST_MB": "5"})).max_request_mb == 5
 
 
 def test_env_overrides_agent_dict_and_bool():

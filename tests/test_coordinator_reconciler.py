@@ -291,6 +291,18 @@ async def test_disabled_gpu_gets_zero_usable_mb():
     assert store.list_nodes()[0].report.devices[0].usable_mb == 7000
 
 
+async def test_disabled_flag_follows_the_card_not_the_position():
+    seen = []
+    rec, store, clock = make_reconciler(planner=spy_planner(seen))
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-1")]))
+    store.set_gpu_enabled("a", "GPU-0", False)
+    await rec.plan_for(SPEC)
+    assert seen[-1] == {("a", "CUDA0"): 0, ("a", "CUDA1"): 7000}
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-1")]))  # GPU-0 fell off the bus
+    await rec.plan_for(SPEC)
+    assert seen[-1] == {("a", "CUDA0"): 7000}  # the disabled card is gone, GPU-1 stays enabled
+
+
 async def test_pin_devices_zero_everything_else():
     seen = []
     rec, store, clock = make_reconciler(planner=spy_planner(seen))
@@ -446,6 +458,48 @@ async def test_gpu_missing_does_not_set_backoff():
     beat(store, clock, node("a", devices=[dev("CUDA9")]))
     await rec.tick()
     assert store.get_replica("m-1").state == "failed" and "m" not in rec._backoff
+
+
+def _running(rid="m-1"):
+    return [EngineStatus(engine_id=f"{rid}-head", kind="server", state="running", port=9000)]
+
+
+async def test_shifted_gpu_does_not_fail_healthy_replica():
+    rec, store, clock = make_reconciler()
+    store.put_model(SPEC)
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-1")]))
+    put_replica(store, "m-1", now=clock(), head_device="CUDA1", head_uuid="GPU-1")
+    clock.t += 1
+    # GPU-0 fell off the bus: GPU-1 is now CUDA0 and CUDA1 no longer exists
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-1")], engines=_running()))
+    await rec.tick()
+    assert store.get_replica("m-1").state == "ready"
+    assert "gpu_missing" not in [e.kind for e in store.list_events(limit=50)]
+
+
+async def test_lost_uuid_fails_replica_even_if_old_device_id_is_taken():
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-1")]))
+    put_replica(store, "m-1", now=clock(), head_device="CUDA1", head_uuid="GPU-1")
+    clock.t += 1
+    beat(store, clock, node("a", devices=[dev("CUDA0", uuid="GPU-0"), dev("CUDA1", uuid="GPU-9")],
+                            engines=_running()))  # a different card now holds the id CUDA1
+    await rec.tick()
+    r = store.get_replica("m-1")
+    assert r.state == "failed" and "a/CUDA1" in r.error
+    assert "gpu_missing" in [e.kind for e in store.list_events(limit=50)]
+
+
+async def test_no_uuids_in_report_falls_back_to_device_id():
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0"), dev("CUDA1")]))
+    put_replica(store, "m-1", now=clock(), head_device="CUDA1", head_uuid="GPU-1")
+    put_replica(store, "m-2", now=clock(), head_device="CUDA0", head_uuid="GPU-0", head_port=9100)
+    clock.t += 1
+    beat(store, clock, node("a", devices=[dev("CUDA0")], engines=_running() + _running("m-2")))  # downgraded agent
+    await rec.tick()
+    assert store.get_replica("m-1").state == "failed"  # CUDA1 is not reported
+    assert store.get_replica("m-2").state != "failed"  # CUDA0 is (no spec: drained, not failed)
 
 
 async def test_late_crash_after_stable_period_sets_no_backoff():
