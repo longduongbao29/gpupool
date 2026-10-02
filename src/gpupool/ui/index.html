@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gpupool</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<meta name="theme-color" content="#0b0d12">
+<meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
 <link rel="stylesheet" href="styles.css">
 <script src="app.js"></script>
 <script defer src="vendor/alpine.min.js"></script>
@@ -53,61 +56,69 @@
       <div class="row right">
         <label class="search"><span x-html="icon('search')"></span><input type="text" x-model="search" placeholder="Search..."></label>
         <!-- notifications bell -->
-        <div style="position:relative" @click.outside="evOpen = false">
-          <button class="btn icon" @click="evOpen = !evOpen" title="Notifications" style="position:relative">
+        <div class="bell-wrap" @click.outside="evOpen = false">
+          <button class="btn icon" @click="evOpen = !evOpen" title="Notifications" aria-label="Notifications">
             <span x-html="icon('bell')"></span>
-            <span x-show="unread() > 0" class="pill red" style="position:absolute;top:-7px;right:-7px;padding:0 6px;font-size:11px" x-text="unread()"></span>
+            <span x-show="unread() > 0" class="badge" :class="{pop: bellPop}" x-text="unread()"></span>
           </button>
-          <div class="panel" x-show="evOpen" x-cloak
-               style="position:absolute;right:0;top:44px;width:380px;max-width:90vw;z-index:30;box-shadow:0 12px 40px rgba(0,0,0,.5)">
-            <div class="panel-head"><h2 style="font-size:14px">Notifications</h2>
+          <div class="panel notif" x-show="evOpen" x-cloak
+               x-transition:enter="tr-enter" x-transition:enter-start="tr-drop-from" x-transition:enter-end="tr-drop-to"
+               x-transition:leave="tr-leave" x-transition:leave-start="tr-drop-to" x-transition:leave-end="tr-drop-from">
+            <div class="panel-head"><h2 style="font-size:var(--fs-md)">Notifications</h2>
               <button class="btn sm right" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div>
-            <div style="max-height:380px;overflow:auto">
+            <div class="notif-list">
               <template x-for="e in events().slice(0, 12)" :key="e.id">
-                <div style="padding:10px 14px;border-bottom:1px solid var(--border)" :style="e.read ? 'opacity:.65' : ''">
-                  <div class="row" style="align-items:flex-start">
-                    <span :style="'color:var(--' + (evClass(e)==='blue' ? 'primary' : evClass(e)) + ')'" x-html="icon(evIcon(e))"></span>
+                <div class="notif-item" :class="{read: e.read}">
+                  <div class="row">
+                    <span :class="'tone-' + evClass(e)" x-html="icon(evIcon(e))"></span>
                     <div class="grow">
                       <div x-text="e.message"></div>
                       <div class="row wrap small muted" style="gap:6px;margin-top:4px">
                         <span x-text="ago(e.ts)"></span>
                         <a href="#" class="pill" x-show="e.node_id" @click.prevent="evGo(e,'servers')" x-text="e.node_id"></a>
-                        <a href="#" class="pill blue" x-show="e.model" @click.prevent="evGo(e,'models')" x-text="e.model"></a>
+                        <a href="#" class="pill accent" x-show="e.model" @click.prevent="evGo(e,'models')" x-text="e.model"></a>
                       </div>
                     </div>
-                    <span class="dot" x-show="!e.read" style="margin-top:6px;background:var(--primary);box-shadow:none"></span>
+                    <span class="dot unread-dot" x-show="!e.read"></span>
                   </div>
                 </div>
               </template>
               <div class="empty" x-show="events().length === 0">No events yet</div>
             </div>
-            <div style="padding:8px 14px;text-align:center"><a href="#" @click.prevent="evOpen=false;go('events')">View all events</a></div>
+            <div class="notif-foot"><a href="#" @click.prevent="evOpen=false;go('events')">View all events</a></div>
           </div>
         </div>
-        <button class="btn primary" @click="openAddServer()" x-show="view==='servers'"><span x-html="icon('plus')"></span> Add Server</button>
+        <button class="btn primary" @click="openAddServer()" x-show="view==='servers' || view==='overview'"><span x-html="icon('plus')"></span> Add Server</button>
       </div>
     </div>
 
-    <div x-show="!st" class="empty">Loading...</div>
+    <div x-show="!st" class="skel-wrap" aria-busy="true">
+      <span class="sr-only">Loading...</span>
+      <div class="skel-stats"><div class="skel skel-tile"></div><div class="skel skel-tile"></div><div class="skel skel-tile"></div><div class="skel skel-tile"></div></div>
+      <div class="skel skel-panel"></div>
+    </div>
 
     <template x-if="st">
     <div>
 
     <!-- ============ stat cards ============ -->
-    <div class="stats" x-show="view==='overview'">
-      <div class="panel stat"><div class="ico blue" x-html="icon('server')"></div>
-        <div><div class="v"><span x-text="summary().servers_online"></span><small> / <span x-text="summary().servers_total"></span></small></div><div class="l">Total Servers</div></div></div>
-      <div class="panel stat"><div class="ico green" x-html="icon('chip')"></div>
-        <div><div class="v"><span x-text="summary().gpus_enabled"></span><small> / <span x-text="summary().gpus_total"></span></small></div><div class="l">Total GPUs (in pool)</div></div></div>
-      <div class="panel stat"><div class="ico purple" x-html="icon('cube')"></div>
-        <div><div class="v" x-text="summary().models_running"></div><div class="l">Running Models</div></div></div>
-      <div class="panel stat"><div class="ico amber" x-html="icon('db')"></div>
-        <div><div class="v"><span x-text="freePoolGb()"></span> <small>GB</small></div><div class="l">Free pool VRAM</div></div></div>
-      <div class="add-wrap"><button class="btn primary" style="height:100%" @click="openAddServer()"><span x-html="icon('plus')"></span> Add Server</button></div>
+    <div class="stats view" x-show="view==='overview'">
+      <div class="panel stat"><div><div class="l">Total Servers</div>
+        <div class="v"><span x-text="summary().servers_online"></span><small> / <span x-text="summary().servers_total"></span></small></div></div>
+        <div class="ico blue" x-html="icon('server')"></div></div>
+      <div class="panel stat"><div><div class="l">Total GPUs (in pool)</div>
+        <div class="v"><span x-text="summary().gpus_enabled"></span><small> / <span x-text="summary().gpus_total"></span></small></div></div>
+        <div class="ico green" x-html="icon('chip')"></div></div>
+      <div class="panel stat"><div><div class="l">Running Models</div>
+        <div class="v" x-text="summary().models_running"></div></div>
+        <div class="ico purple" x-html="icon('cube')"></div></div>
+      <div class="panel stat"><div><div class="l">Free pool VRAM</div>
+        <div class="v"><span x-text="freePoolGb()"></span> <small>GB</small></div></div>
+        <div class="ico amber" x-html="icon('db')"></div></div>
     </div>
 
     <!-- ============ servers (overview + servers) ============ -->
-    <div class="cols" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
+    <div class="cols view" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
       <div class="panel">
         <div class="panel-head"><h2>Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
         <div class="empty" x-show="filteredServers().length === 0">No servers yet. Click <b>Add Server</b> to register an agent.</div>
@@ -118,8 +129,8 @@
               <div class="sico" x-html="icon('server')"></div>
               <div class="grow">
                 <div class="name"><span x-text="s.node_id"></span>
-                  <span class="pill green" x-show="s.alive"><span class="dot" style="width:6px;height:6px;box-shadow:none"></span>Online</span>
-                  <span class="pill red" x-show="!s.alive">Offline</span></div>
+                  <span class="pill green lead live" x-show="s.alive">Online</span>
+                  <span class="pill red lead" x-show="!s.alive">Offline</span></div>
                 <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span></div>
               </div>
               <div class="meters" x-show="s.report">
@@ -132,8 +143,7 @@
               </div>
             </div>
 
-            <div x-show="!s.alive" style="margin:0 16px 12px;padding:9px 12px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:#fca5a5;filter:none"
-                 x-text="offlineInfo(s)"></div>
+            <div class="callout danger" x-show="!s.alive" x-text="offlineInfo(s)"></div>
 
             <!-- expanded: GPU table -->
             <div class="server-body" x-show="isOpen(s)">
@@ -151,7 +161,7 @@
                       <td x-text="val(d.temp_c, '°C')"></td>
                       <td x-text="val(d.power_w, ' W')"></td>
                       <td x-text="d.processes ? d.processes.length : dash"></td>
-                      <td><span class="pill" :class="d.util_pct == null ? '' : (busy(d) ? 'amber' : 'green')" x-text="d.util_pct == null ? dash : (busy(d) ? 'Busy' : 'Idle')"></span></td>
+                      <td><span class="pill lead" :class="d.util_pct == null ? '' : (busy(d) ? 'amber' : 'green')" x-text="d.util_pct == null ? dash : (busy(d) ? 'Busy' : 'Idle')"></span></td>
                     </tr>
                   </template>
                 </tbody>
@@ -172,7 +182,7 @@
 
             <div class="server-foot" x-show="view==='servers'">
               <span class="muted small ellipsis" x-text="s.agent_url"></span>
-              <button class="btn danger sm right" @click="delSrv = s"><span x-html="icon('trash')"></span> Remove</button>
+              <button class="btn ghost danger sm right" @click="delSrv = s"><span x-html="icon('trash')"></span> Remove</button>
             </div>
           </div>
         </template>
@@ -184,7 +194,7 @@
           <div>
             <div class="panel-head"><div class="grow"><h2 x-text="devName(selected().d)"></h2>
               <div class="muted small"><span x-text="selected().s.node_id"></span> / <span x-text="selected().d.device_id"></span></div></div>
-              <button class="btn icon" @click="sel = null" x-html="icon('x')"></button></div>
+              <button class="btn ghost icon sm" @click="sel = null" aria-label="Close" x-html="icon('x')"></button></div>
             <div class="panel-body">
               <div class="ring">
                 <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
@@ -204,7 +214,7 @@
               <div x-show="detailTab==='overview'">
                 <div class="small muted" style="margin-bottom:4px">Memory <span x-text="mem(selected().d)"></span></div>
                 <div class="bar" :class="level(memPct(selected().d))"><i :style="'width:' + memPct(selected().d) + '%'"></i></div>
-                <div class="small muted" style="margin-top:8px">Usable for the pool: <b style="color:var(--text)" x-text="gb(selected().d.usable_mb) + ' GB'"></b></div>
+                <div class="small muted" style="margin-top:8px">Usable for the pool: <b style="color:var(--text);font-weight:600" x-text="gb(selected().d.usable_mb) + ' GB'"></b></div>
               </div>
               <div x-show="detailTab==='processes' || detailTab==='overview'">
                 <h3 class="sec">Running Processes</h3>
@@ -232,16 +242,16 @@
     </div>
 
     <!-- ============ GPUs ============ -->
-    <div class="panel" x-show="view==='gpus'">
+    <div class="panel view" x-show="view==='gpus'">
       <div class="panel-head"><h2>All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
       <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
-      <div class="tbl-scroll" x-show="allGpuRows().length > 0">
+      <div class="tbl-scroll tall" x-show="allGpuRows().length > 0">
       <table>
         <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
         <tbody>
           <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
             <tr :style="r.s.alive ? '' : 'opacity:.55'">
-              <td><span x-text="r.s.node_id"></span> <span class="pill red" x-show="!r.s.alive">Offline</span></td>
+              <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
               <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id"></div></td>
               <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
               <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
@@ -258,7 +268,7 @@
     </div>
 
     <!-- ============ Models ============ -->
-    <div x-show="view==='models'">
+    <div class="view" x-show="view==='models'">
       <div class="rb-banner" x-show="rbMove()" style="margin:0 0 14px">
         <span x-html="icon('swap')"></span>
         <div class="grow" x-show="rbMove()">Moving replica <b x-text="rbMove() && rbMove().old"></b> of <b x-text="rbMove() && rbMove().model"></b>
@@ -278,15 +288,15 @@
                 <td class="muted small"><span x-text="it.source === 'hf' ? 'Hugging Face' : 'Path'"></span><div class="ellipsis" style="max-width:260px" x-text="it.source === 'hf' ? it.hf_repo : it.path"></div></td>
                 <td x-text="bytes(it.bytes)"></td>
                 <td class="wrapc" style="min-width:200px">
-                  <span class="pill" :class="libStatusClass(it)"><span class="spin" x-show="it.status==='downloading'"></span><span x-text="it.status"></span></span>
+                  <span class="pill lead" :class="[libStatusClass(it), it.status==='downloading' ? 'spinning' : '']"><span class="spin" x-show="it.status==='downloading'"></span><span x-text="it.status"></span></span>
                   <div x-show="it.status==='downloading'" style="margin-top:6px">
                     <div class="bar"><i :style="'width:' + libPct(it) + '%'"></i></div>
                     <div class="muted small"><span x-text="bytes(it.downloaded)"></span> / <span x-text="bytes(it.bytes)"></span> (<span x-text="libPct(it)"></span>%)</div></div>
-                  <div class="small" style="color:#fca5a5;margin-top:4px" x-show="it.error" x-text="it.error"></div>
+                  <div class="err-line" x-show="it.error" x-text="it.error"></div>
                 </td>
-                <td class="row" style="justify-content:flex-end">
+                <td><div class="row" style="justify-content:flex-end;gap:var(--s-2)">
                   <button class="btn sm primary" x-show="it.status==='ready'" @click="openForm(null, it.name)"><span x-html="icon('play')"></span> Deploy</button>
-                  <button class="btn sm danger icon" @click="deleteLibrary(it)" title="Remove" x-html="icon('trash')"></button></td>
+                  <button class="btn sm ghost danger icon" @click="deleteLibrary(it)" title="Remove" aria-label="Remove" x-html="icon('trash')"></button></div></td>
               </tr>
             </template>
           </tbody>
@@ -322,44 +332,56 @@
         <div class="model-grid" x-show="filteredModels().length > 0">
           <template x-for="m in filteredModels()" :key="m.spec.name">
             <div class="mcard">
-              <div class="row">
-                <div class="grow"><div class="title" x-text="m.spec.name"></div>
-                  <div class="muted small ellipsis"><span x-text="m.file || m.spec.source"></span> &middot; ctx <span x-text="m.spec.ctx_size"></span> &middot; parallel <span x-text="m.spec.parallel"></span></div></div>
-                <span class="pill" :class="stateClass(m)"><span class="spin" x-show="m.state==='starting' || m.state==='stopping'"></span><span x-text="m.state"></span></span>
+              <div class="row" style="align-items:flex-start">
+                <div class="grow">
+                  <div class="mc-title"><span class="title" x-text="m.spec.name"></span>
+                    <span class="pill lead" :class="[stateClass(m), m.state==='running' ? 'live' : '', (m.state==='starting' || m.state==='stopping') ? 'spinning' : '']"><span class="spin" x-show="m.state==='starting' || m.state==='stopping'"></span><span x-text="m.state"></span></span>
+                    <span class="pill accent" x-show="m.spec.priority != null && m.spec.priority !== 50" title="Scheduling priority">Priority <span x-text="m.spec.priority"></span></span></div>
+                  <div class="muted small ellipsis" style="margin-top:2px"><span x-text="m.file || m.spec.source"></span> &middot; ctx <span x-text="m.spec.ctx_size"></span> &middot; parallel <span x-text="m.spec.parallel"></span></div></div>
               </div>
               <div class="endpoint"><code class="grow ellipsis" x-text="endpoint()"></code><span class="muted small">model:</span><code x-text="m.spec.name"></code>
-                <button class="btn sm icon" @click="copy(endpoint())" title="Copy endpoint" x-html="icon('copy')"></button></div>
+                <button class="btn sm ghost icon" @click="copy(endpoint())" title="Copy endpoint" aria-label="Copy endpoint" x-html="icon('copy')"></button></div>
 
-              <div class="scaling" x-show="scalingOf(m)">
+              <div class="metrics">
+                <div class="metric" :title="scalingOf(m) ? 'Replicas desired ' + scalingOf(m).desired : ''"><div class="l">Replicas</div>
+                  <div class="v" x-text="replicasText(m)"></div></div>
+                <div class="metric"><div class="l">Busy</div>
+                  <div class="v" x-text="scalingOf(m) ? busyPct(scalingOf(m).avg_busy) : dash"></div>
+                  <div class="bar" :class="level(scalingOf(m) && scalingOf(m).avg_busy != null ? scalingOf(m).avg_busy * 100 : null)"><i :style="'width:' + clamp(scalingOf(m) && scalingOf(m).avg_busy != null ? scalingOf(m).avg_busy * 100 : 0) + '%'"></i></div></div>
+                <div class="metric"><div class="l">Est. speed</div>
+                  <div class="v" x-text="modelTps(m)"></div></div>
+                <div class="metric"><div class="l">Mode</div>
+                  <div class="v" x-text="modeLabel(m)"></div></div>
+              </div>
+
+              <div x-show="scalingOf(m)">
                 <template x-if="scalingOf(m)">
-                  <div>
+                  <div class="scaling">
                     <div class="row wrap">
-                      <span class="small muted">Replicas desired <b x-text="scalingOf(m).desired"></b> (<span x-text="scaleRange(scalingOf(m))"></span>)</span>
-                      <span class="small muted">&middot; busy <b x-text="busyPct(scalingOf(m).avg_busy)"></b></span>
                       <span class="pill blue" x-show="m.state==='idle'"><span x-html="icon('moon')"></span>Idle &mdash; loads on first request</span>
+                      <button type="button" class="link-btn right" @click="toggleScaling(m)"><span class="chev-wrap" :class="{open: scState(m.spec.name).open}" x-html="icon('chev')"></span><span x-text="scState(m.spec.name).open ? 'Hide scaling details' : 'Scaling details'"></span></button>
                     </div>
-                    <div class="small" style="margin-top:4px"><a href="#" @click.prevent="toggleScaling(m)" x-text="scState(m.spec.name).open ? 'Hide scaling details' : 'Scaling details'"></a></div>
                     <div class="sc-detail" x-show="scState(m.spec.name).open">
                       <div class="muted small" x-show="scState(m.spec.name).busy">Loading...</div>
-                      <div class="small" style="color:#fca5a5" x-show="scState(m.spec.name).err" x-text="scState(m.spec.name).err"></div>
+                      <div class="err-line" x-show="scState(m.spec.name).err" x-text="scState(m.spec.name).err"></div>
                       <template x-if="scState(m.spec.name).data">
                         <div>
-                          <div class="row wrap small" style="gap:8px">
-                            <span class="pill" :class="scStateClass(scState(m.spec.name).data.state)" x-text="scStateLabel(scState(m.spec.name).data.state)"></span>
+                          <div class="row wrap small" style="gap:var(--s-2)">
+                            <span class="pill lead" :class="scStateClass(scState(m.spec.name).data.state)" x-text="scStateLabel(scState(m.spec.name).data.state)"></span>
                             <span class="muted">ready <b x-text="scState(m.spec.name).data.ready"></b> &middot; launching <b x-text="scState(m.spec.name).data.launching"></b> &middot; queued <b x-text="scState(m.spec.name).data.queued"></b> &middot; idle <b x-text="scState(m.spec.name).data.idle_s == null ? dash : Math.round(scState(m.spec.name).data.idle_s) + ' s'"></b></span>
                           </div>
                           <div class="small muted" style="margin-top:6px">Last decision: <span x-text="decisionText(scState(m.spec.name).data.last_decision)"></span></div>
                           <div class="muted small" style="margin-top:6px" x-show="!(scState(m.spec.name).data.replicas || []).length">No replicas running</div>
                           <table class="sc-table" x-show="(scState(m.spec.name).data.replicas || []).length">
-                            <thead><tr><th>Replica</th><th>Busy</th><th>Active / deferred</th><th>Tok/s (measured / est.)</th><th>Metrics</th></tr></thead>
+                            <thead><tr><th class="c-id">Replica</th><th class="c-busy">Busy</th><th class="c-req" title="Requests being processed / deferred">Active / queued</th><th class="c-tps" title="Decode speed: measured / estimated, tok/s">Tok/s meas. / est.</th><th class="c-ok">Metrics</th></tr></thead>
                             <tbody>
                               <template x-for="r in (scState(m.spec.name).data.replicas || [])" :key="r.replica_id">
                                 <tr>
-                                  <td class="ellipsis" x-text="r.replica_id"></td>
-                                  <td x-text="busyPct(r.busy)"></td>
-                                  <td><span x-text="r.requests_processing == null ? dash : r.requests_processing"></span> / <span x-text="r.requests_deferred == null ? dash : r.requests_deferred"></span></td>
-                                  <td><span x-text="tps(r.measured_decode_tps)"></span> / <span x-text="tps(r.est_decode_tps)"></span></td>
-                                  <td><span class="pill" :class="r.metrics_ok ? 'green' : 'amber'" x-text="r.metrics_ok ? 'ok' : 'unavailable'"></span></td>
+                                  <td class="c-id ellipsis" :title="r.replica_id" x-text="r.replica_id"></td>
+                                  <td class="c-busy" x-text="busyPct(r.busy)"></td>
+                                  <td class="c-req"><span x-text="r.requests_processing == null ? dash : r.requests_processing"></span> / <span x-text="r.requests_deferred == null ? dash : r.requests_deferred"></span></td>
+                                  <td class="c-tps"><span x-text="tpsNum(r.measured_decode_tps)"></span> / <span x-text="tpsNum(r.est_decode_tps)"></span></td>
+                                  <td class="c-ok"><span class="pill lead" :class="r.metrics_ok ? 'green' : 'amber'" :title="r.metrics_ok ? 'Metrics available' : 'Metrics unavailable'" x-text="r.metrics_ok ? 'Ok' : 'None'"></span></td>
                                 </tr>
                               </template>
                             </tbody>
@@ -373,29 +395,43 @@
 
               <div class="errbox" x-show="m.state==='failed' && reallocError(m)" x-text="reallocError(m)"></div>
               <div x-show="m.state==='failed' && modelError(m)">
-                <a href="#" class="small" @click.prevent="openErr[m.spec.name] = !openErr[m.spec.name]" x-text="openErr[m.spec.name] ? 'Hide error' : 'Show error'"></a>
+                <button type="button" class="link-btn" @click="openErr[m.spec.name] = !openErr[m.spec.name]" x-text="openErr[m.spec.name] ? 'Hide error' : 'Show error'"></button>
                 <div class="errbox" x-show="openErr[m.spec.name]" x-text="modelError(m)" style="margin-top:6px"></div>
               </div>
 
-              <div class="place" x-show="placementLines(m).length">
+              <div class="reps" x-show="placementLines(m).length">
                 <template x-for="p in placementLines(m)" :key="p.id">
-                  <div>Replica <b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
+                  <div class="rep">
+                    <span class="sdot" :class="replicaClass(p.state)" :title="p.state"></span>
+                    <code class="rep-id" :title="'Replica ' + p.id + ' (' + p.state + ')'" x-text="p.id"></code>
+                    <span class="chips"><template x-for="c in p.devs" :key="c"><span class="chip mono" :title="c" x-text="c"></span></template></span>
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
-                    <div class="rnote" x-show="p.note" :title="p.note" x-text="p.note"></div></div>
+                    <span class="tps" :title="p.note" x-text="p.tps"></span>
+                  </div>
                 </template>
+                <details class="why">
+                  <summary>Why here</summary>
+                  <template x-for="p in placementLines(m)" :key="'w' + p.id">
+                    <div class="why-item"><b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
+                      <div class="rnote" x-show="p.reasons" x-text="p.reasons"></div></div>
+                  </template>
+                </details>
               </div>
-              <div class="place" x-show="(m.spec.pin_devices || []).length">Pinned to: <b x-text="(m.spec.pin_devices || []).join(', ')"></b></div>
+              <div class="place row wrap" style="gap:6px" x-show="(m.spec.pin_devices || []).length"><span>Pinned to</span>
+                <template x-for="c in (m.spec.pin_devices || [])" :key="c"><span class="chip mono" x-text="c"></span></template></div>
 
-              <div class="row wrap">
+              <div class="mc-foot">
                 <template x-if="m.state==='stopped' || m.state==='failed'">
-                  <div class="row">
-                    <label class="row small muted">Replicas <input type="number" min="1" max="16" :value="replicasOf(m)" @input="rep[m.spec.name] = $event.target.value" style="width:64px"></label>
-                    <button class="btn green" @click="startModel(m)"><span x-html="icon('play')"></span> Start</button>
+                  <div class="row" style="gap:var(--s-2)">
+                    <button class="btn primary" @click="startModel(m)"><span x-html="icon('play')"></span> Start</button>
+                    <label class="field-inline">Replicas <input type="number" min="1" max="16" :value="replicasOf(m)" @input="rep[m.spec.name] = $event.target.value"></label>
                   </div>
                 </template>
                 <button class="btn" x-show="m.state==='running' || m.state==='starting' || m.state==='idle'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
-                <button class="btn right" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
-                <button class="btn danger icon" @click="deleteModel(m)" title="Delete" x-html="icon('trash')"></button>
+                <div class="row right" style="gap:var(--s-1)">
+                  <button class="btn" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
+                  <button class="btn ghost danger icon" @click="deleteModel(m)" title="Delete" aria-label="Delete" x-html="icon('trash')"></button>
+                </div>
               </div>
             </div>
           </template>
@@ -404,19 +440,19 @@
     </div>
 
     <!-- ============ Events ============ -->
-    <div class="panel" x-show="view==='events'">
+    <div class="panel view" x-show="view==='events'">
       <div class="panel-head"><h2>Events</h2>
         <div class="row right">
           <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
           <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div></div>
       <div class="empty" x-show="filteredEvents().length === 0">No events.</div>
-      <div class="tbl-scroll" x-show="filteredEvents().length > 0">
+      <div class="tbl-scroll tall" x-show="filteredEvents().length > 0">
       <table>
         <thead><tr><th>Level</th><th>Event</th><th>Server</th><th>Model</th><th>Time</th></tr></thead>
         <tbody>
           <template x-for="e in filteredEvents()" :key="e.id">
             <tr :style="e.read ? 'opacity:.7' : ''">
-              <td><span class="pill" :class="evClass(e)" x-text="e.level"></span></td>
+              <td><span class="pill lead" :class="evClass(e)" x-text="e.level"></span></td>
               <td class="wrapc"><div x-text="e.message"></div><div class="muted small" x-text="e.kind.replace(/_/g, ' ')"></div></td>
               <td x-text="e.node_id || dash"></td>
               <td x-text="e.model || dash"></td>
@@ -429,7 +465,7 @@
     </div>
 
     <!-- ============ Settings ============ -->
-    <div x-show="view==='settings'">
+    <div class="view" x-show="view==='settings'">
       <div class="panel"><div class="panel-head"><h2>API</h2></div><div class="panel-body">
         <div class="muted small">OpenAI-compatible base URL</div>
         <div class="cmd" style="margin:6px 0 16px"><span x-text="endpoint()"></span><button class="btn sm" @click="copy(endpoint())">Copy</button></div>
@@ -447,6 +483,15 @@
         <div class="muted small" style="margin-top:12px">Without Docker (uv)</div>
         <div class="cmd" style="margin-top:6px"><span x-text="agentCmdUv()"></span><button class="btn sm" @click="copy(agentCmdUv())">Copy</button></div>
       </div></div>
+      <div class="panel mt"><div class="panel-head"><h2>Appearance</h2></div><div class="panel-body">
+        <div class="row wrap" style="justify-content:space-between">
+          <div><div style="font-weight:500">Theme</div><div class="muted small">System follows your operating system setting.</div></div>
+          <div class="seg" role="group" aria-label="Theme">
+            <button type="button" :class="{active: theme==='system'}" @click="setTheme('system')">System</button>
+            <button type="button" :class="{active: theme==='dark'}" @click="setTheme('dark')">Dark</button>
+            <button type="button" :class="{active: theme==='light'}" @click="setTheme('light')">Light</button>
+          </div></div>
+      </div></div>
       <div class="panel mt"><div class="panel-head"><h2>Session</h2></div><div class="panel-body">
         <div class="row" style="margin-bottom:14px"><label class="switch"><input type="checkbox" :checked="desktop" @change="toggleDesktop($event.target.checked)"><span></span></label>
           <div><div>Enable desktop alerts</div><div class="muted small">System notification for warnings and errors while this tab is in the background.</div></div></div>
@@ -460,9 +505,9 @@
 </div>
 
 <!-- ============ modals ============ -->
-<div class="overlay" x-show="authed && addSrv.open" x-cloak @click.self="addSrv.open = false" @keydown.escape.window="addSrv.open = false; addMdl.open = false; form.open = false; delSrv = null">
-  <div class="modal">
-    <div class="modal-head"><h2>Add Server</h2><button class="btn icon right" @click="addSrv.open = false" x-html="icon('x')"></button></div>
+<div class="overlay" x-show="authed && addSrv.open" x-cloak @click.self="addSrv.open = false" @keydown.escape.window="addSrv.open = false; addMdl.open = false; form.open = false; delSrv = null" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal" x-show="addSrv.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><h2>Add Server</h2><button class="btn ghost icon sm right" aria-label="Close" @click="addSrv.open = false" x-html="icon('x')"></button></div>
     <form class="modal-body" @submit.prevent="addServer()">
       <div class="muted small" style="margin-bottom:8px">Run this on the GPU server; it appears here within a few seconds.</div>
       <div class="tabs"><button type="button" :class="{active: addSrv.tab==='docker'}" @click="addSrv.tab='docker'">Docker</button><button type="button" :class="{active: addSrv.tab==='uv'}" @click="addSrv.tab='uv'">Without Docker (uv)</button></div>
@@ -479,8 +524,8 @@
   </div>
 </div>
 
-<div class="overlay" x-show="authed && delSrv" x-cloak>
-  <div class="modal" x-show="delSrv">
+<div class="overlay" x-show="authed && delSrv" x-cloak x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal" x-show="delSrv" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
     <div class="modal-head"><h2>Remove server</h2></div>
     <div class="modal-body">
       <p style="margin-top:0">Remove <b x-text="delSrv && delSrv.node_id"></b> from the pool?</p>
@@ -492,12 +537,12 @@
   </div>
 </div>
 
-<div class="overlay" x-show="authed && addMdl.open" x-cloak @click.self="addMdl.open = false">
-  <div class="modal wide">
-    <div class="modal-head"><h2>Add model</h2><button class="btn icon right" @click="addMdl.open = false" x-html="icon('x')"></button></div>
+<div class="overlay" x-show="authed && addMdl.open" x-cloak @click.self="addMdl.open = false" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal wide" x-show="addMdl.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><h2>Add model</h2><button class="btn ghost icon sm right" aria-label="Close" @click="addMdl.open = false" x-html="icon('x')"></button></div>
     <div class="modal-body">
       <div class="tabs"><button :class="{active: addMdl.tab==='hf'}" @click="addMdl.tab='hf'">Hugging Face</button>
-        <button :class="{active: addMdl.tab==='path'}" @click="addMdl.tab='path'">Path</button></div>
+        <button :class="{active: addMdl.tab==='path'}" @click="addMdl.tab='path'; loadBrowse(false)">Path</button></div>
       <div x-show="addMdl.tab==='hf'">
         <label class="field"><span>Repository</span>
           <div class="row"><input type="text" x-model="addMdl.repo" placeholder="Qwen/Qwen2.5-3B-Instruct-GGUF" @keydown.enter.prevent="listHf()">
@@ -507,8 +552,45 @@
       </div>
       <div x-show="addMdl.tab==='path'">
         <label class="field"><span>Absolute path to a .gguf on the coordinator machine</span>
-          <input type="text" x-model="addMdl.path" placeholder="/data/models/model.gguf" @keydown.enter.prevent="addToLibrary()"></label>
+          <input type="text" x-model="addMdl.path" placeholder="/models/model.gguf" @input="addMdl.err = ''" @keydown.enter.prevent="addToLibrary()"></label>
+        <div class="muted small" style="margin:-4px 0 var(--s-3)">When the coordinator runs in Docker it only sees mounted folders. You can also paste the host path; it is translated if the folder is mounted.</div>
+
+        <div class="browse">
+          <div class="browse-head">
+            <h3 class="sec" style="margin:0">Browse server folders</h3>
+            <span class="muted small" x-show="addMdl.browse.loaded && !addMdl.browse.err" x-text="browseCount()"></span>
+            <button type="button" class="btn sm ghost right" @click="loadBrowse(true)" :disabled="addMdl.browse.loading"><span class="spin" x-show="addMdl.browse.loading"></span> Refresh</button>
+          </div>
+          <div class="browse-roots small muted" x-show="addMdl.browse.roots.length">
+            <template x-for="r in addMdl.browse.roots" :key="r.path">
+              <div><code x-text="r.path"></code>
+                <span x-show="r.host_path"> &larr; <code x-text="r.host_path"></code> on the host</span>
+                <span class="pill amber" x-show="!r.exists">not found</span></div>
+            </template>
+          </div>
+          <div class="result bad" x-show="addMdl.browse.err" x-text="addMdl.browse.err"></div>
+          <div class="muted small browse-note" x-show="addMdl.browse.loading && !addMdl.browse.loaded">Looking for .gguf files...</div>
+          <div class="muted small browse-note" x-show="addMdl.browse.loaded && !addMdl.browse.err && addMdl.browse.roots.length === 0">No model folders are configured on the coordinator, so there is nothing to browse. Paste a path above.</div>
+          <div class="muted small browse-note" x-show="addMdl.browse.loaded && !addMdl.browse.err && addMdl.browse.roots.length > 0 && addMdl.browse.files.length === 0">No .gguf files found in these folders.</div>
+          <div class="file-pick" x-show="addMdl.browse.files.length">
+            <template x-for="f in addMdl.browse.files" :key="f.path">
+              <button type="button" class="file-row" :class="{sel: addMdl.path === f.path}" :disabled="!browseUsable(f)" @click="pickFile(f)" :title="f.path">
+                <span class="grow">
+                  <span class="fname ellipsis" x-text="f.name"></span>
+                  <span class="muted small ellipsis fdir" x-text="folderOf(f.path)"></span>
+                </span>
+                <span class="pill green" x-show="addMdl.path === f.path && browseUsable(f)">selected</span>
+                <span class="pill blue" x-show="f.in_library">in library</span>
+                <span class="pill amber" x-show="f.split_part">split part &ndash; not supported</span>
+                <span class="pill red" x-show="f.broken_link">broken link</span>
+                <span class="muted small fsize" x-text="bytes(f.bytes)"></span>
+              </button>
+            </template>
+          </div>
+          <div class="muted small browse-note" x-show="addMdl.browse.truncated">The list is cut short. Paste the path of the file you need.</div>
+        </div>
       </div>
+      <div class="result bad err-full" x-show="addMdl.err" role="alert" x-text="addMdl.err"></div>
     </div>
     <div class="modal-foot"><button class="btn" @click="addMdl.open = false">Cancel</button>
       <button class="btn primary" @click="addToLibrary()" :disabled="addMdl.busy || (addMdl.tab==='hf' ? !addMdl.file : !addMdl.path.trim())"
@@ -516,9 +598,9 @@
   </div>
 </div>
 
-<div class="overlay" x-show="authed && form.open" x-cloak @click.self="form.open = false">
-  <div class="modal wide">
-    <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn icon right" @click="form.open = false" x-html="icon('x')"></button></div>
+<div class="overlay" x-show="authed && form.open" x-cloak @click.self="form.open = false" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal wide" x-show="form.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn ghost icon sm right" aria-label="Close" @click="form.open = false" x-html="icon('x')"></button></div>
     <div class="modal-body">
       <label class="field"><span>File (from the library)</span>
         <select x-model="form.file" @change="form.plan = null">
@@ -567,7 +649,7 @@
       <div class="gpu-pick" x-show="!form.auto">
         <template x-for="s in servers()" :key="s.node_id">
           <div>
-            <div class="grp"><span x-text="s.node_id"></span> <span class="pill red" x-show="!s.alive">Offline</span></div>
+            <div class="grp"><span x-text="s.node_id"></span> <span class="pill red lead" x-show="!s.alive">Offline</span></div>
             <template x-for="d in gpus(s)" :key="d.device_id">
               <label><input type="checkbox" :checked="form.pins.indexOf(pinLabel(s,d)) >= 0" @change="togglePin(pinLabel(s,d), $event.target.checked)">
                 <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
@@ -626,7 +708,7 @@
             <div class="opt">
               <div class="row wrap">
                 <b>#<span x-text="o.rank"></span></b>
-                <span class="pill" :class="o.fits_now ? 'green' : 'amber'" x-text="o.fits_now ? 'fits now' : 'needs room'"></span>
+                <span class="pill lead" :class="o.fits_now ? 'green' : 'amber'" x-text="o.fits_now ? 'fits now' : 'needs room'"></span>
                 <span class="pill" x-text="String(o.tier).replace('_', ' ')"></span>
                 <span class="muted small">score <b x-text="o.score"></b> &middot; <span x-text="gb(o.est_total_mb) + ' GB'"></span> &middot; <span x-text="tps(o.est_decode_tps)"></span></span>
                 <button class="btn sm right" @click="pinOption(o)" title="Pin the form to exactly these GPUs">Pin to these GPUs</button>
@@ -645,12 +727,16 @@
         </div>
       </template>
     </div>
-    <div class="modal-foot">
-      <button class="btn" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement</button>
-      <button class="btn" @click="simulate()" :disabled="form.busy || form.simBusy || !form.file" title="Dry run over the whole cluster: what would start, stop or be preempted. Saves nothing"><span class="spin" x-show="form.simBusy"></span> Preview impact</button>
-      <button class="btn" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
-      <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
-      <button class="btn green" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
+    <div class="modal-foot split">
+      <div class="foot-group" role="group" aria-label="Check before saving">
+        <button class="btn sm" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement</button>
+        <button class="btn sm" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
+        <button class="btn sm" @click="simulate()" :disabled="form.busy || form.simBusy || !form.file" title="Dry run over the whole cluster: what would start, stop or be preempted. Saves nothing"><span class="spin" x-show="form.simBusy"></span> Preview impact</button>
+      </div>
+      <div class="foot-group">
+        <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
+        <button class="btn primary" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
+      </div>
     </div>
   </div>
 </div>
@@ -658,9 +744,9 @@
 <!-- ============ toasts ============ -->
 <div class="toasts">
   <template x-for="t in toasts" :key="t.id">
-    <div class="toast" :class="t.kind" :style="t.kind==='warning' ? 'border-left-color:var(--amber)' : ''">
+    <div class="toast" :class="t.kind" role="status">
       <div class="row" style="align-items:flex-start"><div class="grow" x-text="t.msg"></div>
-        <button class="btn sm icon" style="border:0;background:none" @click="dismiss(t.id)" x-html="icon('x')"></button></div>
+        <button class="btn sm ghost icon" aria-label="Dismiss" @click="dismiss(t.id)" x-html="icon('x')"></button></div>
     </div>
   </template>
 </div>

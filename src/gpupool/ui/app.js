@@ -2,6 +2,21 @@
 "use strict";
 
 var KEY_STORE = "gpupool.adminKey";
+var THEME_STORE = "gpupool.theme";
+
+// Theme: "system" follows prefers-color-scheme (no attribute), "dark"/"light" force it via data-theme on <html>.
+// Applied here, at script load in <head>, so the first paint already has the right colours.
+function applyTheme(t) {
+  var root = document.documentElement;
+  if (t === "dark" || t === "light") root.setAttribute("data-theme", t);
+  else root.removeAttribute("data-theme");
+}
+function savedTheme() {
+  var t = "";
+  try { t = localStorage.getItem(THEME_STORE) || ""; } catch (e) { t = ""; }
+  return t === "dark" || t === "light" ? t : "system";
+}
+applyTheme(savedTheme());
 
 // Inline SVG icons (stroke style). Keyed by name; rendered through icon().
 var ICONS = {
@@ -62,6 +77,11 @@ function scalingForm(spec) {
   return f;
 }
 
+// "Browse server folders" state of the Add model modal (GET /api/library/browse).
+function emptyBrowse() {
+  return { loading: false, loaded: false, err: "", roots: [], files: [], truncated: false };
+}
+
 function app() {
   return {
     // ----- session -----
@@ -71,6 +91,9 @@ function app() {
     loginErr: "",
     loginBusy: false,
     online: true,
+    theme: "system", // "system" | "dark" | "light"
+    bellPop: false, // brief pop animation of the bell badge when the unread count grows
+    prevUnread: null,
     // ----- data -----
     st: null,
     flags: {}, // optimistic GPU toggles in flight: "node/dev" -> bool
@@ -97,7 +120,7 @@ function app() {
     addSrv: { open: false, url: "", name: "gpu-node-1", busy: false },
     delSrv: null, // server object pending delete confirmation
     // add model modal
-    addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false },
+    addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", browse: emptyBrowse() },
     // deploy (new / edit) modal
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
@@ -107,6 +130,7 @@ function app() {
     init: function () {
       var hv = (location.hash || "").replace("#", "");
       if (["overview", "servers", "gpus", "models", "events", "settings"].indexOf(hv) >= 0) this.view = hv;
+      this.theme = savedTheme();
       var saved = "";
       try { saved = localStorage.getItem(KEY_STORE) || ""; } catch (e) { saved = ""; }
       try { this.desktop = localStorage.getItem("gpupool.desktopAlerts") === "1" && window.Notification && Notification.permission === "granted"; } catch (e) { this.desktop = false; }
@@ -175,12 +199,28 @@ function app() {
       try {
         this.st = await this.api("GET", "/api/state");
         this.processEvents();
+        this.noteUnread();
         if (this.view === "events") this.loadEvents();
         this.refreshScaling();
       } catch (e) { /* offline or 401 already handled */ }
     },
 
+    // ================= theme =================
+    setTheme: function (t) {
+      this.theme = t === "dark" || t === "light" ? t : "system";
+      applyTheme(this.theme);
+      try { localStorage.setItem(THEME_STORE, this.theme); } catch (e) { /* storage blocked */ }
+    },
+
     // ================= events =================
+    noteUnread: function () {
+      var n = this.unread(), self = this;
+      if (this.prevUnread !== null && n > this.prevUnread) {
+        this.bellPop = false;
+        setTimeout(function () { self.bellPop = true; setTimeout(function () { self.bellPop = false; }, 600); }, 20);
+      }
+      this.prevUnread = n;
+    },
     events: function () { return (this.st && this.st.events) || []; },
     unread: function () { return (this.st && this.st.unread_events) || 0; },
     processEvents: function () {
@@ -301,14 +341,14 @@ function app() {
       while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
       return x.toFixed(i >= 3 ? 2 : (i ? 1 : 0)) + " " + u[i];
     },
-    level: function (p) { return p == null ? "" : (p >= 85 ? "red" : (p >= 50 ? "amber" : "green")); },
+    level: function (p) { return p == null ? "" : (p >= 85 ? "red" : (p >= 60 ? "amber" : "green")); },
     clamp: function (p) { return Math.max(0, Math.min(100, p == null ? 0 : p)); },
     isGpu: function (d) { return d.kind !== "cpu"; },
     devName: function (d) { return d.kind === "cpu" ? "CPU (RAM)" : d.name; },
     busy: function (d) { return d.util_pct != null && d.util_pct >= 50; },
     ringDash: function (p) { var c = 2 * Math.PI * 60; return c + " " + c; },
     ringOffset: function (p) { var c = 2 * Math.PI * 60; return c * (1 - this.clamp(p) / 100); },
-    ringColor: function (p) { var l = this.level(p); return l === "red" ? "var(--red)" : (l === "amber" ? "var(--amber)" : "var(--green)"); },
+    ringColor: function (p) { var l = this.level(p); return l === "red" ? "var(--danger)" : (l === "amber" ? "var(--warning)" : "var(--success)"); },
 
     // ================= derived data =================
     servers: function () { return this.st ? this.st.servers : []; },
@@ -459,8 +499,36 @@ function app() {
 
     // ================= library =================
     openAddModel: function () {
-      this.addMdl = { open: true, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false };
+      this.addMdl = { open: true, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", browse: emptyBrowse() };
     },
+    // Files the coordinator can see under its model folders (inside Docker: only the mounted ones).
+    loadBrowse: async function (force) {
+      var b = this.addMdl.browse;
+      if (b.loading || (b.loaded && !force)) return;
+      b.loading = true;
+      b.err = "";
+      try {
+        var r = await this.api("GET", "/api/library/browse");
+        b.roots = (r && r.roots) || [];
+        b.files = (r && r.files) || [];
+        b.truncated = !!(r && r.truncated);
+        b.loaded = true;
+      } catch (e) {
+        if (e.status !== 401) { b.err = "Could not list the server folders: " + e.message; b.loaded = true; b.roots = []; b.files = []; b.truncated = false; }
+      }
+      b.loading = false;
+    },
+    browseUsable: function (f) { return !f.in_library && !f.split_part && !f.broken_link; },
+    browseCount: function () {
+      var n = this.addMdl.browse.files.length;
+      return n + (n === 1 ? " file" : " files") + (this.addMdl.browse.truncated ? "+" : "");
+    },
+    pickFile: function (f) {
+      if (!this.browseUsable(f)) return;
+      this.addMdl.path = f.path;
+      this.addMdl.err = "";
+    },
+    folderOf: function (p) { var i = String(p).lastIndexOf("/"); return i > 0 ? p.slice(0, i) : "/"; },
     listHf: async function () {
       var repo = this.addMdl.repo.trim();
       if (!repo) return;
@@ -485,12 +553,16 @@ function app() {
         body = { path: a.path.trim() };
       }
       a.busy = true;
+      a.err = "";
       try {
         await this.api("POST", "/api/library", body);
         this.toast(a.tab === "hf" ? "Download started" : "Model added", "ok");
         a.open = false;
         await this.refresh();
-      } catch (e) { this.fail(e); }
+      } catch (e) {
+        // Shown in full inside the modal: these messages (missing file, mounted folders) are long and a toast would cut them.
+        if (e.status !== 401) a.err = e.message || String(e);
+      }
       a.busy = false;
     },
     deleteLibrary: async function (it) {
@@ -557,9 +629,28 @@ function app() {
           return a.node_id + "/" + a.device_id + ": " + a.layers + " layers";
         });
         out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
-          note: self.replicaNote(r), mark: self.replicaMark(m, r) });
+          note: self.replicaNote(r), mark: self.replicaMark(m, r),
+          devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }),
+          tps: self.tps(r.placement.est_decode_tps), reasons: (r.placement.reasons || []).join("; ") });
       });
       return out;
+    },
+    // ----- model card summary -----
+    replicaClass: function (state) { return { ready: "green", starting: "amber", stopping: "amber", failed: "red" }[state] || ""; },
+    readyCount: function (m) { return (m.replicas || []).filter(function (r) { return r.state === "ready"; }).length; },
+    // "2 of 1–4": replicas serving now, out of the configured range.
+    replicasText: function (m) {
+      var sc = this.scalingOf(m);
+      return this.readyCount(m) + " of " + (sc ? this.scaleRange(sc) : m.spec.replicas);
+    },
+    modeLabel: function (m) { return { fixed: "Fixed", autoscale: "Autoscale", demand: "On demand" }[scalingForm(m.spec).mode]; },
+    // Summed estimated decode speed of the replicas that are serving.
+    modelTps: function (m) {
+      var sum = 0, any = false;
+      (m.replicas || []).forEach(function (r) {
+        if (r.state === "ready" && r.placement && r.placement.est_decode_tps != null) { sum += r.placement.est_decode_tps; any = true; }
+      });
+      return any ? this.tps(sum) : this.dash;
     },
     // ----- rebalancing -----
     rebalance: function () { return (this.st && this.st.rebalance) || { in_progress: null, next_run_ts: null }; },
@@ -780,6 +871,7 @@ function app() {
       this.form.plan = null;
       await this.recommend();
     },
+    tpsNum: function (v) { return v == null ? this.dash : (v >= 100 ? Math.round(v) : v.toFixed(1)); },
     tps: function (v) { return v == null ? this.dash : (v >= 100 ? Math.round(v) : v.toFixed(1)) + " tok/s"; },
     bw: function (d) { return d && d.bandwidth_gbps != null ? Math.round(d.bandwidth_gbps) + " GB/s" : this.dash; },
     replicaNote: function (r) {

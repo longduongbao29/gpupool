@@ -19,6 +19,9 @@ fits_now false + requires_preemption when the request priority is 80 or more. PO
   also shows `stop` (an autoscaled model shrinks) and `unplaced` (not enough GPUs);
 - an edit that changes nothing, or only lowers replicas, -> empty / `stop`.
 A `preempted` warning event is seeded.
+Model files: GET /api/library/browse lists /models (host folder /srv/gguf) with an in-library file, a split part and a broken
+link; POST /api/library {path} accepts a listed file by its /models or /srv/gguf path and answers 400 with the long
+"No such file inside the coordinator ..." message for anything else.
 Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-auto" replica onto CTG-Server-1/CUDA0). With
 dry_run false it starts the move: a replacement replica appears (state starting), GET /api/state carries
 `rebalance.in_progress`, and ~20 s later the old replica is dropped (events rebalance_started, rebalanced). Afterwards the
@@ -349,6 +352,36 @@ def hf_files(repo: str = Query(...)) -> list[dict]:
     return [{"file": f"{base}-q4_k_m.gguf", "bytes": 2_300_000_000}, {"file": f"{base}-q8_0.gguf", "bytes": 3_900_000_000}]
 
 
+MODEL_ROOT, HOST_ROOT = "/models", "/srv/gguf"
+# (relative name, bytes, split_part, broken_link). `in_library` is computed from LIBRARY.
+BROWSE_FILES = [("qwen2.5-3b-q4.gguf", 2_000_000_000, False, False), ("llama-3.1-8b-instruct-q4_k_m.gguf", 4_920_000_000, False, False),
+                ("mistral-7b/mistral-7b-instruct-v0.3-q8_0.gguf", 7_700_000_000, False, False),
+                ("deepseek-70b/deepseek-r1-70b-q4_k_m-00001-of-00003.gguf", 14_300_000_000, True, False),
+                ("old/gemma-2-9b-it.gguf", 0, False, True)]
+
+
+@app.get("/api/library/browse", dependencies=[api])
+def browse_library() -> dict:
+    """Model files the coordinator can see. In Docker that is only the mounted folder (/models <- /srv/gguf on the host)."""
+    files = [{"path": f"{MODEL_ROOT}/{rel}", "name": rel.split("/")[-1], "bytes": size, "in_library": rel.split("/")[-1] in LIBRARY,
+              "split_part": split, "broken_link": broken, "host_path": f"{HOST_ROOT}/{rel}"} for rel, size, split, broken in BROWSE_FILES]
+    return {"roots": [{"path": MODEL_ROOT, "exists": True, "host_path": HOST_ROOT}], "files": files, "truncated": False}
+
+
+def _resolve_model_path(p: str) -> dict:
+    """Translate a host path to the mounted one and require the file to be in the browse list (mimics the real coordinator)."""
+    if p.startswith(HOST_ROOT + "/"):
+        p = MODEL_ROOT + p[len(HOST_ROOT):]
+    hit = next((f for f in browse_library()["files"] if f["path"] == p), None)
+    if hit is None or hit["broken_link"]:
+        raise HTTPException(400, f"No such file inside the coordinator: {p}. The coordinator runs in Docker and only sees its mounted "
+                                 f"folders: {MODEL_ROOT} (host folder {HOST_ROOT}). Mount the folder that holds the file with "
+                                 f"-v /path/on/host:{MODEL_ROOT}, then paste a path under {MODEL_ROOT} or pick the file from the list.")
+    if hit["split_part"]:
+        raise HTTPException(400, f"{hit['name']} is one part of a split GGUF; split models are not supported. Merge the parts into one file first.")
+    return hit
+
+
 @app.post("/api/library", dependencies=[api])
 def add_library(body: dict) -> dict:
     if body.get("hf_repo"):
@@ -360,8 +393,9 @@ def add_library(body: dict) -> dict:
         p = str(body["path"])
         if not p.startswith("/"):
             raise HTTPException(400, "path must be absolute")
-        name = p.split("/")[-1]
-        item = {"name": name, "path": p, "source": "path", "hf_repo": None, "hf_file": None, "bytes": 1_500_000_000,
+        hit = _resolve_model_path(p)
+        name, p = hit["name"], hit["path"]
+        item = {"name": name, "path": p, "source": "path", "hf_repo": None, "hf_file": None, "bytes": hit["bytes"],
                 "downloaded": 0, "status": "ready", "error": None, "created_at": time.time()}
     else:
         raise HTTPException(422, "hf_repo+hf_file or path required")

@@ -318,3 +318,63 @@ def test_app_js_parses():
         pytest.skip("node not installed")
     r = subprocess.run([node, "--check", str(UI / "app.js")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_favicon_declared_and_valid_svg(client):
+    import xml.etree.ElementTree as ET
+
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'<link[^>]+rel="icon"[^>]+type="image/svg\+xml"[^>]+href="favicon\.svg"', html)
+    assert 'name="theme-color"' in html
+    root = ET.fromstring((UI / "favicon.svg").read_text(encoding="utf-8"))
+    assert root.tag == "{http://www.w3.org/2000/svg}svg" and root.get("viewBox")
+    r = client.get("/favicon.svg")
+    assert r.status_code == 200 and "svg" in r.headers["content-type"]
+
+
+def test_theme_setting_and_reduced_motion():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    assert "gpupool.theme" in js and "data-theme" in js and "setTheme" in html
+    assert "prefers-color-scheme: light" in css and "prefers-reduced-motion: reduce" in css
+
+
+def test_mock_library_browse_contract(client):
+    r = client.get("/api/library/browse", headers=HEAD).json()
+    assert {"roots", "files", "truncated"} <= r.keys() and r["truncated"] is False
+    assert {"path", "exists", "host_path"} <= r["roots"][0].keys() and r["roots"][0]["host_path"]
+    for f in r["files"]:
+        assert {"path", "name", "bytes", "in_library", "split_part", "broken_link", "host_path"} <= f.keys()
+    assert any(f["in_library"] for f in r["files"]) and any(f["split_part"] for f in r["files"]) and any(f["broken_link"] for f in r["files"])
+    assert client.get("/api/library/browse").status_code == 401
+
+
+def test_mock_library_add_path_translates_and_explains(client):
+    files = {f["name"]: f for f in client.get("/api/library/browse", headers=HEAD).json()["files"]}
+    ok = files["llama-3.1-8b-instruct-q4_k_m.gguf"]
+    r = client.post("/api/library", json={"path": ok["host_path"]}, headers=HEAD)  # host path is translated
+    assert r.status_code == 200 and r.json()["path"] == ok["path"]
+    assert client.get("/api/library/browse", headers=HEAD).json()["files"][1]["in_library"] is True
+    r = client.post("/api/library", json={"path": "/data/missing.gguf"}, headers=HEAD)
+    assert r.status_code == 400 and "No such file inside the coordinator" in r.json()["detail"] and "/models" in r.json()["detail"]
+    assert client.post("/api/library", json={"path": files["deepseek-r1-70b-q4_k_m-00001-of-00003.gguf"]["path"]}, headers=HEAD).status_code == 400
+
+
+def test_ui_has_file_picker_and_modal_errors():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    assert "/api/library/browse" in js and "host_path" in html and "addMdl.err" in html and "a.err" in js
+    for needle in ("Browse server folders", "in library", "split part &ndash; not supported", "broken link",
+                   "When the coordinator runs in Docker it only sees mounted folders", "on the host",
+                   "it is translated if the folder is mounted", "No .gguf files found", "nothing to browse"):
+        assert needle in html, needle
+
+
+def test_ui_polish_markup():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    assert "Replicas desired <b" not in html  # the cryptic duplicate of the Replicas tile is gone
+    assert 'class="modal-foot split"' in html and ".foot-group" in css
+    assert re.search(r"\.model-grid \{[^}]*align-items: start", css)
+    assert re.search(r"\.sc-table \{[^}]*table-layout: fixed", css)
