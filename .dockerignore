@@ -10,3 +10,4 @@ docs
 data
 models
 .env
+# vendor/ is deliberately NOT ignored: agent.Dockerfile bind-mounts it (llama.cpp tarball, Python archives)

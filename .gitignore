@@ -14,3 +14,8 @@ wheels/
 .env
 data/
 models/
+
+# Offline build inputs (llama.cpp / Python archives): never commit them
+vendor/*
+!vendor/.gitkeep
+!vendor/README.md

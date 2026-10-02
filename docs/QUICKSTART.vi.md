@@ -138,6 +138,114 @@ docker build --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_p
 
 (`docker compose ... --build` tự truyền các biến này.) Giá trị proxy không được lưu trong image.
 
+Những việc bạn vẫn phải tự làm trên mỗi máy chạy Docker:
+
+1. **Proxy của Docker daemon**, để kéo base image (`nvidia/cuda`, `python`, image uv). Biến proxy của shell và
+   build arg không được dùng cho việc này vì chính daemon kéo image. Tạo
+   `/etc/systemd/system/docker.service.d/http-proxy.conf`:
+
+   ```ini
+   [Service]
+   Environment="HTTP_PROXY=http://proxy.corp.local:3128"
+   Environment="HTTPS_PROXY=http://proxy.corp.local:3128"
+   Environment="NO_PROXY=localhost,127.0.0.1,.corp.local,10.0.0.0/8"
+   ```
+
+   rồi `sudo systemctl daemon-reload && sudo systemctl restart docker`. Kiểm tra bằng
+   `systemctl show --property=Environment docker`.
+2. **Tuỳ chọn: `~/.docker/config.json`.** Khi đó Docker client tự chèn proxy vào mọi lần build (dưới dạng build
+   arg) và mọi container (dưới dạng biến môi trường), không cần `-e` hay `--build-arg`:
+
+   ```json
+   { "proxies": { "default": {
+       "httpProxy": "http://proxy.corp.local:3128",
+       "httpsProxy": "http://proxy.corp.local:3128",
+       "noProxy": "localhost,127.0.0.1,.corp.local,10.0.0.0/8" } } }
+   ```
+3. **`no_proxy` phải liệt kê coordinator và mọi server GPU** (IP, hostname, hậu tố `.domain` hoặc CIDR như
+   `10.0.0.0/8`). Bản thân gpupool không bao giờ đưa lưu lượng cluster qua proxy, nhưng proxy đặt cho các
+   công cụ khác trong cùng container hoặc trên máy (curl, apt...) thì có. Luôn thêm `localhost,127.0.0.1`.
+4. `git clone` (khi build agent) tuân theo `http_proxy` / `https_proxy`. Nếu proxy chặn hẳn GitHub, xem
+   [Build không cần GitHub](#build-không-cần-github).
+
+| Hiện tượng | Nguyên nhân | Cách sửa |
+| --- | --- | --- |
+| `docker pull` / bước `FROM`: `i/o timeout`, `TLS handshake timeout`, `connection refused` | daemon chưa có proxy | bước 1 (proxy của daemon), restart docker |
+| Bước build `git clone` treo hoặc `Failed to connect to github.com` | GitHub bị chặn kể cả qua proxy | đặt `vendor/llama.cpp-b11342.tar.gz` vào repo, hoặc đặt `LLAMA_CPP_URL` |
+| `uv sync`: `Failed to download ... cpython-3.12` | python-build-standalone đặt trên GitHub | đặt `UV_PYTHON_INSTALL_MIRROR` (xem bên dưới) |
+| `failed to resolve source metadata for ghcr.io/astral-sh/uv` | không vào được ghcr.io | đặt `UV_IMAGE` là bản mirror; coordinator: `UV_FROM_PYPI=1` |
+| `apt-get` hoặc `pip` lỗi trong lúc build | thiếu build arg proxy | truyền `--build-arg http_proxy=... https_proxy=...` hoặc dùng compose / `config.json` |
+| `407 Proxy Authentication Required` | proxy đòi tài khoản | dùng `http://user:pass@host:port`; mã hoá URL các ký tự đặc biệt trong mật khẩu |
+| Tìm hoặc tải Hugging Face trên UI lỗi, các thứ khác vẫn chạy | container coordinator không có biến proxy | đặt `http_proxy` / `https_proxy` trong `.env` (compose) hoặc `-e` (docker run) rồi tạo lại container |
+| Server offline, request model lỗi, chỉ khi bật proxy | lưu lượng cluster bị đẩy qua proxy | thêm IP hoặc CIDR của coordinator và các server vào `no_proxy` |
+| Proxy dùng được với `curl` nhưng container thì không | khác biệt biến viết thường / viết hoa | đặt cả hai cách viết (file compose đã truyền cả hai) |
+
+## Build không cần GitHub
+
+Trên server không ra được GitHub (hoặc git), có thể build image từ các file bạn chép vào. Nếu proxy cho
+phép đi qua GitHub thì không cần phần này.
+
+1. **Mã nguồn llama.cpp** (image agent). Trên máy ra được GitHub, tải bản nén của tag vào `vendor/` của repo
+   rồi chép repo sang server:
+
+   ```bash
+   curl -L -o vendor/llama.cpp-b11342.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz
+   ```
+
+   Build dùng file này trước, rồi `git clone`, rồi `curl` tới `LLAMA_CPP_URL` (mirror nội bộ của cùng file nén).
+   Khi không có `.git`, số build được truyền thẳng cho CMake nên `llama_version` vẫn đúng.
+2. **Python 3.12** (image agent). Base image CUDA Ubuntu không có Python 3.12 nên uv tải một bản từ
+   python-build-standalone. Đặt file nén vào `vendor/python/<release>/` (cấu trúc và tên file chính xác:
+   [vendor/README.md](../vendor/README.md)) rồi build với `UV_PYTHON_INSTALL_MIRROR=file:///vendor/python`, hoặc
+   trỏ tới mirror HTTP nội bộ.
+3. **Image uv** (cả hai image). `UV_IMAGE=registry.corp.local/astral-sh/uv:0.10` cho registry mirror. Image
+   coordinator có thể dùng `UV_FROM_PYPI=1`: uv được cài bằng pip, và PyPI thường vào được qua proxy.
+4. Tuỳ chọn: `LLAMA_USE_PREBUILT_UI=OFF` bỏ qua việc llama.cpp tải web UI của nó (gpupool không dùng).
+
+Với docker compose, đặt các biến vào `.env` (xem `.env.example`) rồi:
+
+```bash
+docker compose -f docker-compose.agent.yml up -d --build            # agent
+docker compose -f docker-compose.coordinator.yml up -d --build      # coordinator
+```
+
+Hoặc với docker thuần:
+
+```bash
+docker build -f docker/agent.Dockerfile -t gpupool-agent \
+  --build-arg UV_PYTHON_INSTALL_MIRROR=file:///vendor/python \
+  --build-arg UV_IMAGE=registry.corp.local/astral-sh/uv:0.10 .
+docker build -f docker/coordinator.Dockerfile -t gpupool-coordinator --build-arg UV_FROM_PYPI=1 .
+```
+
+Các file đặt trong `vendor/` cần BuildKit (mặc định từ Docker 23; bản cũ hơn: `DOCKER_BUILDKIT=1`). Đừng commit
+chúng. Các gói Python vẫn lấy từ PyPI (qua proxy, hoặc `UV_INDEX_URL` / `PIP_INDEX_URL` cho index nội bộ).
+
+## Dùng file model có sẵn trên server
+
+Đừng chép model vào container: hãy mount thư mục chứa nó. Chỉ máy coordinator cần các file này: coordinator
+phục vụ model cho các server GPU nên không phải chép gì sang chúng.
+
+1. Trong `.env` trên máy coordinator đặt thư mục đó, dạng **đường dẫn tuyệt đối** với dấu gạch chéo xuôi:
+
+   ```
+   GPUPOOL_HOST_MODELS_DIR=/srv/gguf
+   ```
+
+   `docker-compose.coordinator.yml` mount nó chỉ đọc tại `/models` và báo cho coordinator biết ánh xạ
+   (`GPUPOOL_PATH_MAP`). Với docker thuần: `-v /srv/gguf:/models:ro -e GPUPOOL_PATH_MAP='{"/srv/gguf": "/models"}'`.
+2. Trên UI (**Models → Add model → Path**) duyệt `/models` (coordinator liệt kê các file `.gguf` ở đó), hoặc gõ
+   đường dẫn. Cả `/srv/gguf/qwen.gguf` (đường dẫn trên máy chủ) lẫn `/models/qwen.gguf` đều được: đường dẫn máy
+   chủ không tồn tại trong container sẽ được đổi thành `/models/...`.
+3. **Symlink phải trỏ vào bên trong thư mục đã mount.** Link có đích nằm ngoài thư mục mount sẽ bị hỏng trong
+   container. Cache của Hugging Face có đúng cấu trúc này (`snapshots/<rev>/file.gguf` là link tới
+   `../../blobs/<hash>`): hãy mount cả thư mục `hub/models--<org>--<repo>` (hoặc `hub`), không chỉ `snapshots`,
+   hoặc chép file bằng `cp -L` / `cp --dereference`.
+4. Không cần có file trên các server GPU.
+
+Nhiều thư mục: thêm các mount `-v`, mở rộng `GPUPOOL_MODEL_ROOTS` (phân tách bằng dấu phẩy) và
+`GPUPOOL_PATH_MAP` (mỗi thư mục một mục JSON).
+
 ## Thiết lập tuỳ chọn (biến môi trường của coordinator)
 
 | Biến | Mặc định | Tác dụng |
