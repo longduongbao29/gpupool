@@ -214,6 +214,7 @@ def test_stale_node_drops_out_without_any_write(routing):
     assert len(cap["get_candidates"]("m")) == 1
     n = dict(calls)
     clock.t += cfg.heartbeat_timeout_s + 1  # node died: no heartbeat, no store write
+    cap["on_replica_error"].__self__.poller._failed["a"] = 2  # ...and its polls really fail
     assert cap["get_candidates"]("m") == []
     assert calls == n  # judged from the cached snapshot, liveness evaluated per call
     store.upsert_node(node("a"), clock())  # heartbeat resumes
@@ -252,3 +253,44 @@ async def test_router_calls_note_request(tmp_path):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/v1/chat/completions", json={"model": "m", "messages": []})
     assert r.status_code == 503 and fake.requests == ["m"]
+
+
+def test_router_uses_poller_evidence_for_liveness(routing):
+    cap, store, calls, clock, cfg = routing
+    rec = cap["on_replica_error"].__self__  # the app's reconciler
+    store.upsert_node(node("a"), clock())
+    put_replica(store, "m-1", now=clock())
+    clock.t += cfg.heartbeat_timeout_s + 1  # stale report
+    assert rec.poller is not None
+    assert len(cap["get_candidates"]("m")) == 1  # no failed polls: stale-but-not-failed keeps traffic
+    rec.poller._failed["a"] = rec.DEAD_AFTER_FAILED_POLLS
+    assert cap["get_candidates"]("m") == []
+
+
+async def test_loop_lag_watchdog_logs_once_per_window(caplog):
+    import logging
+    import time
+
+    from gpupool.coordinator.app import loop_lag_watchdog
+    caplog.set_level(logging.WARNING, logger="gpupool.coordinator")
+    task = asyncio.create_task(loop_lag_watchdog(tick_s=0.05, lag_s=0.2, log_every_s=10.0))
+    await asyncio.sleep(0.1)
+    for _ in range(2):  # two stalls inside one rate-limit window: one line
+        time.sleep(0.4)  # blocks the loop on purpose
+        await asyncio.sleep(0.15)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    lines = [r.getMessage() for r in caplog.records if "event loop blocked" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].startswith("event loop blocked for 0.")
+
+
+async def test_loop_lag_watchdog_quiet_when_loop_is_healthy(caplog):
+    import logging
+
+    from gpupool.coordinator.app import loop_lag_watchdog
+    caplog.set_level(logging.WARNING, logger="gpupool.coordinator")
+    task = asyncio.create_task(loop_lag_watchdog(tick_s=0.02, lag_s=0.5))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert not [r for r in caplog.records if "event loop blocked" in r.getMessage()]

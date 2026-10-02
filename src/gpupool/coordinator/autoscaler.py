@@ -97,6 +97,8 @@ class Autoscaler:
         self.wake = wake
         self._state: dict[str, _State] = {}
         self._scrapes: dict[str, _Scrape] = {}
+        # Liveness rule, set by the app to Reconciler.node_alive; None = pure last_seen rule.
+        self.node_alive: Callable[[object, float], bool] | None = None
 
     # -- helpers ---------------------------------------------------------------------------
 
@@ -289,6 +291,11 @@ class Autoscaler:
             else:
                 old.ok = False
 
+    def _node_alive(self, n, now: float) -> bool:
+        if self.node_alive is not None:
+            return self.node_alive(n, now)
+        return n.alive(now, self.cfg.heartbeat_timeout_s)
+
     async def scrape_once(self) -> None:
         """Read llama-server /metrics of every ready head."""
         try:
@@ -300,7 +307,7 @@ class Autoscaler:
             jobs = []
             for rec in ready:
                 n = nodes.get(rec.placement.head_node)
-                if n is None or not n.alive(now, self.cfg.heartbeat_timeout_s):
+                if n is None or not self._node_alive(n, now):
                     continue
                 jobs.append(self._scrape_one(rec, n.report.host))
             if jobs:

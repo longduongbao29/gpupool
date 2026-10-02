@@ -38,6 +38,27 @@ from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
 
 log = logging.getLogger("gpupool.coordinator")
 
+# Loop-lag watchdog (diagnostic only): a blocked loop starves polls and API calls, and the
+# symptom elsewhere (nodes "dying") is hard to trace back without this line.
+WATCHDOG_TICK_S = 0.25
+WATCHDOG_LAG_S = 1.0
+WATCHDOG_LOG_EVERY_S = 10.0
+
+
+async def loop_lag_watchdog(tick_s: float = WATCHDOG_TICK_S, lag_s: float = WATCHDOG_LAG_S,
+                            log_every_s: float = WATCHDOG_LOG_EVERY_S,
+                            clock: Callable[[], float] = time.monotonic,
+                            sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    last_logged = float("-inf")
+    while True:
+        t0 = clock()
+        await sleep(tick_s)
+        t1 = clock()
+        over = t1 - t0 - tick_s
+        if over > lag_s and t1 - last_logged >= log_every_s:
+            last_logged = t1
+            log.warning("event loop blocked for %.1f s", over)
+
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 
 class JoinBody(BaseModel):
@@ -115,6 +136,8 @@ def create_app(
     autoscaler = autoscaler or Autoscaler(store, cfg, balancer.outstanding, notifier,
                                           clock=reconciler.clock, wake=reconciler.wake)
     reconciler.autoscaler = autoscaler
+    reconciler.poller = poller
+    autoscaler.node_alive = reconciler.node_alive
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -123,7 +146,8 @@ def create_app(
             library.resume()  # restart HF downloads interrupted by a previous run
             tasks = [asyncio.create_task(poller.run(), name="poller"),
                      asyncio.create_task(reconciler.run(), name="reconciler"),
-                     asyncio.create_task(autoscaler.run(), name="autoscaler")]
+                     asyncio.create_task(autoscaler.run(), name="autoscaler"),
+                     asyncio.create_task(loop_lag_watchdog(), name="loop-watchdog")]
         try:
             yield
         finally:
@@ -252,7 +276,7 @@ def create_app(
             "nodes": [
                 {
                     "node_id": n.report.node_id,
-                    "alive": n.alive(now, cfg.heartbeat_timeout_s),
+                    "alive": reconciler.node_alive(n, now),
                     "last_seen": n.last_seen,
                     "agent_url": n.report.agent_url,
                     "host": n.report.host,
@@ -272,7 +296,7 @@ def create_app(
     # The per-request path must not parse every node report and model spec. The snapshot holds
     # only what routing needs and is rebuilt when the store version moved. Liveness is NOT in
     # it: a node that just went silent triggers no write, so it is judged on every call.
-    snap: tuple = (-1, [], {}, {})  # (version, model names, ready replicas per model, nodes)
+    snap: tuple = (-1, [], {}, {})  # (version, names, ready per model, NodeRecords)
 
     def _snapshot() -> tuple:
         nonlocal snap
@@ -285,7 +309,7 @@ def create_app(
         for r in store.list_replicas(states={"ready"}):
             ready.setdefault(r.model, []).append(
                 (r.replica_id, r.placement.head_node, r.placement.head_port))
-        nodes = {n.report.node_id: (n.report.host, n.last_seen) for n in store.list_nodes()}
+        nodes = {n.report.node_id: n for n in store.list_nodes()}
         snap = cur = (v, names, ready, nodes)
         return cur
 
@@ -295,10 +319,10 @@ def create_app(
         out = []
         for replica_id, head_node, head_port in ready.get(model, ()):
             n = nodes.get(head_node)
-            if n is None or now - n[1] > cfg.heartbeat_timeout_s:
+            if n is None or not reconciler.node_alive(n, now):
                 continue
             out.append(ReplicaEndpoint(
-                replica_id=replica_id, model=model, base_url=f"http://{n[0]}:{head_port}"))
+                replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}"))
         return out
 
     app.include_router(make_router(
@@ -320,7 +344,7 @@ def create_app(
         for n in store.list_nodes():
             nid = prom_label_escape(n.report.node_id)
             alive.append(f'gpupool_node_alive{{node="{nid}"}} '
-                         f'{int(n.alive(now, cfg.heartbeat_timeout_s))}')
+                         f'{int(reconciler.node_alive(n, now))}')
             for d in n.report.devices:
                 lab = f'node="{nid}",device="{prom_label_escape(d.device_id)}"'
                 free.append(f"gpupool_device_free_mb{{{lab}}} {d.free_mb}")

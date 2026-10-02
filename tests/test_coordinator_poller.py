@@ -100,3 +100,35 @@ async def test_agent_client_report_uses_token_and_parses():
             await c.report("http://h:7070")
         assert ei.value.status == 401
         await c.aclose()
+
+
+async def test_failed_polls_count_reset_and_forget():
+    store, client, clock, poller = setup("a", "b")
+    await poller.poll_once()
+    assert poller.failed_polls("a") == 0
+    client.reports["http://a:7070"] = httpx.ConnectError("down")
+    for expected in (1, 2, 3):
+        await poller.poll_once()
+        assert poller.failed_polls("a") == expected
+    assert poller.failed_polls("b") == 0
+    client.reports["http://a:7070"] = node("a")
+    await poller.poll_once()
+    assert poller.failed_polls("a") == 0  # success resets
+    client.reports["http://a:7070"] = httpx.ConnectError("down")
+    await poller.poll_once()
+    assert poller.failed_polls("a") == 1
+    store.delete_server("a")
+    await poller.poll_once()
+    assert poller.failed_polls("a") == 0 and "a" not in poller._failed  # forgotten
+
+
+async def test_cancelled_poll_is_not_a_failure():
+    import asyncio
+    store, client, clock, poller = setup("a")
+
+    async def cancelled(url):
+        raise asyncio.CancelledError()
+    client.report = cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await poller._poll_one(store.list_servers()[0])
+    assert poller.failed_polls("a") == 0

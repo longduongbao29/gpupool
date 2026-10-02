@@ -441,3 +441,18 @@ def test_peek_unloaded_model_stays_zero_and_new_model_is_not_registered():
     assert rig.a.peek(spec) == 0
     fresh = ModelSpec(name="fresh", source="x.gguf", min_replicas=0)
     assert rig.a.peek(fresh) == 1 and "fresh" not in rig.a._state  # floor is max(min, 1)
+
+
+async def test_scrape_uses_injected_liveness_rule():
+    # stale report but the shared rule says alive (no failed polls): still scraped
+    r = Rig()
+    autoscaled(r)
+    r.store.upsert_node(node("a", host="10.0.0.1"), r.clock() - 100)
+    r.replica("r1", port=9001, node_id="a")
+    r.a.node_alive = lambda n, now: True
+    with respx.mock() as mock:
+        route = mock.get("http://10.0.0.1:9001/metrics").mock(
+            return_value=httpx.Response(200, text="llamacpp:requests_processing 1\n"))
+        await r.a.scrape_once()
+    assert route.called and r.a._scrapes["r1"].ok
+    await r.a.aclose()

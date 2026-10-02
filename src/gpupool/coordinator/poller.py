@@ -28,6 +28,12 @@ class Poller:
         self.clock = clock
         self._fail_logged: dict[str, float] = {}  # node_id -> clock() of the last failure log line
         self._mismatch_logged: set[tuple[str, str]] = set()  # (registered id, id the agent reports)
+        # node_id -> consecutive polls that ran to completion with an error since the last success.
+        # WHY: a stale last_seen alone cannot tell a dead agent from a stalled coordinator loop.
+        self._failed: dict[str, int] = {}
+
+    def failed_polls(self, node_id: str) -> int:
+        return self._failed.get(node_id, 0)
 
     async def probe(self, agent_url: str) -> NodeReport:
         """Fetch a report for registration. Errors (AgentError, httpx) go to the caller."""
@@ -40,6 +46,7 @@ class Poller:
             raise
         except Exception as e:
             # last_seen simply ages: that is how the reconciler marks the node dead
+            self._failed[server.node_id] = self._failed.get(server.node_id, 0) + 1
             now = self.clock()
             if now - self._fail_logged.get(server.node_id, float("-inf")) >= self.FAIL_LOG_EVERY_S:
                 self._fail_logged[server.node_id] = now
@@ -48,6 +55,7 @@ class Poller:
             return
         self._fail_logged.pop(server.node_id, None)
         if report.node_id != server.node_id:
+            self._failed[server.node_id] = self._failed.get(server.node_id, 0) + 1  # unusable answer
             # The agent at this URL was reconfigured: its data must not be filed under another id.
             key = (server.node_id, report.node_id)
             if key not in self._mismatch_logged:
@@ -56,6 +64,7 @@ class Poller:
                             server.agent_url, report.node_id, server.node_id)
             return
         self._mismatch_logged = {k for k in self._mismatch_logged if k[0] != server.node_id}
+        self._failed.pop(server.node_id, None)
         # The server may have been deleted while the request was in flight: do not resurrect it.
         if self.store.get_server(server.node_id) is None:
             return
@@ -66,6 +75,10 @@ class Poller:
 
     async def poll_once(self) -> None:
         servers = self.store.list_servers()
+        ids = {s.node_id for s in servers}
+        for d in (self._failed, self._fail_logged):  # forget removed servers
+            for k in [k for k in d if k not in ids]:
+                del d[k]
         if servers:
             await asyncio.gather(*(self._poll_one(s) for s in servers))
 

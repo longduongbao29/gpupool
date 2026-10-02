@@ -106,7 +106,7 @@ Source of truth: `src/gpupool/common/models.py` (pydantic v2). Summary:
    single_gpu tier (a GPU + CPU split is faster than CPU only).
 2. **single_gpu**: best fit — the smallest device that still fits, keeping big devices for big models.
 3. **single_node**: on one node, add devices by usable desc until it fits; pick the node needing the fewest devices.
-4. **multi_node**: add nodes by total usable desc (fewest nodes), then drop devices that are not needed.
+4. **multi_node**: add nodes by total usable desc (fewest nodes), then drop devices that are not needed. When the pool mixes CUDA and CPU, a second candidate starts from all CUDA devices, adds CPU nodes only as needed and drops only CPU devices; the scorer picks the faster, so a small GPU is not discarded for a CPU-only placement unless that is really faster.
 5. Split layers in proportion to capacity, then repair with exact per-layer bytes until every
    device has `est_mb ≤ usable_mb`. Head = the node holding the most layers. `tensor_split` = layer counts.
 6. Device order: the head's CUDA devices (`CUDA0`…), then every other device over RPC
@@ -127,7 +127,7 @@ No network measurements yet, so no latency-aware ordering (phase 5).
 
 ## 8. Reconciler (2 s loop)
 
-- Node without heartbeat for > 10 s → replicas using it become `failed`; surviving engines are stopped.
+- Node dead = its report is older than 10 s AND at least 2 consecutive polls really failed (a stalled coordinator loop alone never kills a node) → replicas using it become `failed`; surviving engines are stopped. A loop-lag watchdog logs a warning when the coordinator's own event loop is blocked for > 1 s.
 - An engine reported `exited/failed`, or missing from its node's report → replica `failed`.
 - Fewer replicas than `replicas` → `plan()` and launch, at most one replica per model per tick;
   a failed launch backs off 5 s, 10 s, 20 s… up to 300 s.

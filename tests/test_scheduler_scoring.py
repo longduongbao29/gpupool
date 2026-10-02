@@ -225,3 +225,31 @@ def test_extra_on_missing_device_is_skipped_and_no_extra_unchanged():
     assert [p.model_dump() for p in out] == [p.model_dump() for p in rank(META, SPEC, nodes)]
     assert [p.model_dump() for p in rank(META, SPEC, nodes, extra=())] == \
         [p.model_dump() for p in rank(META, SPEC, nodes)]
+
+
+def _cpu_dev(did, usable, bw=None):
+    return dev(did, usable, bw, kind="cpu")
+
+
+def test_multi_node_keeps_small_gpu_instead_of_cpu_only():
+    # GPU too small for the model, CPU on another node could hold it alone. Smallest-first
+    # trimming used to drop the GPU and leave CPU only; the GPU+CPU split must win by tps.
+    nodes = [node("a", dev("CUDA0", 460, 400)), node("b", _cpu_dev("CPU0", 2000, 25))]
+    ranked = rank(META, SPEC, nodes)
+    assert {frozenset(a.device_id for a in p.assignments) for p in ranked} == {frozenset({"CUDA0", "CPU0"}), frozenset({"CPU0"})}
+    best = ranked[0]
+    assert best.tier == "multi_node" and ("a", "CUDA0") in where(best)
+    cpu_only = next(p for p in ranked if where(p) == [("b", "CPU0")])
+    assert best.est_decode_tps > cpu_only.est_decode_tps
+    assert where(go(nodes=nodes)) == where(best)
+
+
+def test_multi_node_tiny_gpu_scorer_decides():
+    # A GPU holding one layer behind an RPC hop (HOP_S) is slower than CPU only; both variants
+    # are candidates and the scorer, not the trimming order, returns the faster one.
+    nodes = [node("a", dev("CUDA0", 100 + 300, 400)), node("b", _cpu_dev("CPU0", 2000, 25))]
+    ranked = rank(META, SPEC, nodes)
+    tps = {tuple(where(p)): p.est_decode_tps for p in ranked}
+    assert len(tps) == 2
+    assert ranked[0].est_decode_tps == max(tps.values())
+    assert where(go(nodes=nodes)) == where(ranked[0])

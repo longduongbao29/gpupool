@@ -1221,3 +1221,54 @@ async def test_periodic_run_records_last_run_when_nothing_qualifies_and_zero_dis
     _rb_beat(store2, clock2)
     await off.tick()
     assert off._move is None and off.ranker.calls == [] and off.rebalance_state()["next_run_ts"] is None
+
+
+class _FakePoller:
+    def __init__(self, **failed):
+        self.failed = failed
+
+    def failed_polls(self, node_id):
+        return self.failed.get(node_id, 0)
+
+
+async def _stale_node_rig(failed):
+    rec, store, clock = make_reconciler()
+    rec.poller = _FakePoller(a=failed)
+    store.put_model(SPEC)
+    beat(store, clock, node("a", engines=_running()))
+    put_replica(store, "m-1", now=clock())
+    await rec.tick()  # first sighting: transitions are only reported after a known-alive state
+    clock.t += 20  # report stale past heartbeat_timeout_s
+    await rec.tick()
+    return rec, store, clock
+
+
+@pytest.mark.parametrize("failed", [0, 1])
+async def test_stale_report_without_failed_polls_is_alive(failed):
+    # the coordinator's own loop may have stalled: no evidence the agent is gone
+    rec, store, clock = await _stale_node_rig(failed)
+    assert store.get_replica("m-1").state == "ready"
+    assert "node_offline" not in [e.kind for e in store.list_events(limit=50)]
+    assert rec.node_alive(store.list_nodes()[0], clock())
+
+
+async def test_stale_report_with_two_failed_polls_is_dead():
+    rec, store, clock = await _stale_node_rig(2)
+    assert store.get_replica("m-1").state == "failed"
+    assert "node_offline" in [e.kind for e in store.list_events(limit=50)]
+    assert not rec.node_alive(store.list_nodes()[0], clock())
+
+
+async def test_fresh_report_is_alive_whatever_the_poller_says():
+    rec, store, clock = make_reconciler()
+    rec.poller = _FakePoller(a=9)
+    beat(store, clock, node("a"))
+    assert rec.node_alive(store.list_nodes()[0], clock())
+
+
+async def test_no_poller_keeps_the_pure_time_rule():
+    rec, store, clock = make_reconciler()
+    assert rec.poller is None
+    beat(store, clock, node("a"))
+    clock.t += 20
+    assert not rec.node_alive(store.list_nodes()[0], clock())

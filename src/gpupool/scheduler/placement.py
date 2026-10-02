@@ -164,9 +164,7 @@ def _candidates(meta, ctx, pool, allow_single=True) -> list[_Cand]:
                 for d in _fits_single(meta, ctx, pool)]
     out += [_Cand("single_node", *s) for s in _tier_single_node(meta, ctx, pool)]
     if not out:
-        s = _tier_multi_node(meta, ctx, pool)
-        if s:
-            out.append(_Cand("multi_node", *s))
+        out += [_Cand("multi_node", *s) for s in _tier_multi_node(meta, ctx, pool)]
     return out
 
 
@@ -365,7 +363,30 @@ def _tier_single_node(meta, ctx, pool):
     return out
 
 
+def _trim(meta, ctx, chosen: list[_Dev], solved, key, only=lambda d: True):
+    """Drop devices that are not needed, in `key` order, while still feasible.
+    Devices failing `only` are never dropped."""
+    for d in sorted(filter(only, chosen), key=key):
+        rest = [x for x in chosen if x is not d]
+        if not rest:
+            continue
+        s = _solve(meta, ctx, rest)
+        if s:
+            chosen, solved = rest, s
+    return solved
+
+
+def _sig(solved) -> tuple:
+    order, counts, head = solved
+    return (tuple((d.node.node_id, d.dev.device_id) for d in order), tuple(counts), head)
+
+
 def _tier_multi_node(meta, ctx, pool):
+    """Feasible multi-node solutions: usually one, two when the pool mixes CUDA and CPU.
+    The fewest-nodes pass can pick a big CPU node alone (or trimming can drop a small GPU),
+    leaving host RAM only, 10x+ slower than VRAM. So a second variant starts from every CUDA
+    device, adds CPU nodes only as needed and sheds only CPU devices (the GPUs stay); the scorer then picks
+    whichever decodes faster."""
     totals: dict[str, int] = {}
     for d in pool:
         totals[d.node.node_id] = totals.get(d.node.node_id, 0) + d.dev.usable_mb
@@ -378,16 +399,22 @@ def _tier_multi_node(meta, ctx, pool):
         if solved:
             break
     if not solved:
-        return None
-    # drop devices that are not needed, smallest first, while still feasible
-    for d in sorted(chosen, key=lambda d: d.dev.usable_mb):
-        rest = [x for x in chosen if x is not d]
-        if not rest:
-            continue
-        s = _solve(meta, ctx, rest)
-        if s:
-            chosen, solved = rest, s
-    return solved
+        return []
+    out = [_trim(meta, ctx, chosen, solved, lambda d: d.dev.usable_mb)]
+    if {"cuda", "cpu"} <= {d.dev.kind for d in pool}:
+        gpu_first = [d for d in pool if d.dev.kind == "cuda"]
+        alt = _solve(meta, ctx, gpu_first)
+        for node_id in ranked:
+            if alt:
+                break
+            gpu_first += [d for d in pool if d.node.node_id == node_id and d.dev.kind != "cuda"]
+            alt = _solve(meta, ctx, gpu_first)
+        if alt:
+            alt = _trim(meta, ctx, gpu_first, alt, lambda d: d.dev.usable_mb,
+                        only=lambda d: d.dev.kind != "cuda")
+            if _sig(alt) not in {_sig(o) for o in out}:
+                out.append(alt)
+    return out
 
 
 def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id) -> Placement:

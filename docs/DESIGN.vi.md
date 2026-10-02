@@ -106,7 +106,7 @@ Nguồn chuẩn: `src/gpupool/common/models.py` (pydantic v2). Tóm tắt:
    single_gpu (chia GPU + CPU nhanh hơn chạy toàn CPU).
 2. **single_gpu**: best-fit — device nhỏ nhất vẫn vừa, để chừa device lớn cho model lớn.
 3. **single_node**: trên một node, cộng device theo usable giảm dần tới khi vừa; chọn node cần ít device nhất.
-4. **multi_node**: thêm node theo tổng usable giảm dần (ít node nhất), rồi bỏ các device không cần.
+4. **multi_node**: thêm node theo tổng usable giảm dần (ít node nhất), rồi bỏ các device không cần. Khi pool có cả CUDA lẫn CPU, sinh thêm một ứng viên xuất phát từ mọi device CUDA, chỉ thêm node CPU khi cần và chỉ bỏ device CPU; bộ chấm điểm chọn phương án nhanh hơn, nên GPU nhỏ không bị loại để đặt toàn bộ lên CPU trừ khi CPU thật sự nhanh hơn.
 5. Chia layer theo tỉ lệ dung lượng, rồi sửa bằng số byte thật của từng layer cho tới khi mọi
    device có `est_mb ≤ usable_mb`. Head = node giữ nhiều layer nhất. `tensor_split` = số layer.
 6. Thứ tự device: device CUDA của head (`CUDA0`…), sau đó mọi device còn lại qua RPC
@@ -127,7 +127,7 @@ Chưa có số đo mạng nên chưa sắp theo latency (để GĐ 5).
 
 ## 8. Reconciler (vòng 2s)
 
-- Node mất heartbeat > 10s → replica dùng node đó `failed`, dừng engine còn lại.
+- Node bị coi là chết khi báo cáo cũ hơn 10s VÀ ít nhất 2 lần poll liên tiếp thực sự thất bại (coordinator tự bị đứng vòng lặp thì không làm node bị khai tử) → replica dùng node đó `failed`, dừng engine còn lại. Một watchdog ghi cảnh báo khi event loop của coordinator bị chặn quá 1s.
 - Engine báo `exited/failed` hoặc biến mất khỏi report → replica `failed`.
 - Thiếu replica so với `replicas` → `plan()` rồi launch, mỗi tick tối đa 1 replica mỗi model;
   launch lỗi → backoff 5s, 10s, 20s… tối đa 300s.

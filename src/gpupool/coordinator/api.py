@@ -153,7 +153,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         devices = n.report.devices if n else []
         return {
             "node_id": s.node_id, "agent_url": s.agent_url, "added_at": s.added_at,
-            "alive": bool(n and n.alive(now(), cfg.heartbeat_timeout_s)),
+            "alive": bool(n and reconciler.node_alive(n, now())),
             "last_seen": n.last_seen if n else 0.0,
             "report": n.report.model_dump(mode="json") if n else None,
             "gpu_enabled": {d.device_id: flags.get((s.node_id, gpu_key(d)), True) for d in devices},
@@ -383,7 +383,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         gpus = []
         for node_id in sorted(nodes):
             n = nodes[node_id]
-            alive = n.alive(t, cfg.heartbeat_timeout_s)
+            alive = reconciler.node_alive(n, t)
             for d in n.report.devices:
                 enabled = flags.get((node_id, gpu_key(d)), True)
                 live = enabled and alive

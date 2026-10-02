@@ -81,6 +81,7 @@ def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
 
 class Reconciler:
     READY_REPORT_GRACE_S = 5.0
+    DEAD_AFTER_FAILED_POLLS = 2  # stale report AND this many failed polls in a row = node dead
     STABLE_S = 300.0  # a replica ready this long counts as healthy: crashes before it feed the backoff
     KEEP_TERMINAL_PER_MODEL = 10  # stopped/failed history rows kept per model
     # A model that evicted others may not do it again for this long, so two models whose needs
@@ -107,6 +108,7 @@ class Reconciler:
         self.meta_for = meta_for
         self.outstanding = outstanding
         self.clock = clock
+        self.poller = None  # set by the app; None = pure last_seen time rule (tests)
         self.autoscaler = None  # set by the app; None keeps the fixed `replicas` behaviour
         self.notifier = notifier or Notifier(store, getattr(cfg, "webhook_url", ""), clock=clock)
         self.poll_s = 0.5  # engine/health poll interval during launch
@@ -135,7 +137,17 @@ class Reconciler:
         return self._http
 
     def _alive(self, rec: NodeRecord, now: float) -> bool:
-        return rec.alive(now, self.cfg.heartbeat_timeout_s)
+        if rec.alive(now, self.cfg.heartbeat_timeout_s):
+            return True
+        # A stale report may be OUR event loop stalling, not the agent dying. With a poller,
+        # dead needs evidence: DEAD_AFTER_FAILED_POLLS polls that really failed.
+        if self.poller is None:
+            return False
+        return self.poller.failed_polls(rec.report.node_id) < self.DEAD_AFTER_FAILED_POLLS
+
+    def node_alive(self, rec: NodeRecord, now: float) -> bool:
+        """Public liveness rule shared by the router, autoscaler and API views."""
+        return self._alive(rec, now)
 
     def _node_map(self) -> dict[str, NodeRecord]:
         # Only registered servers count: a stray heartbeat must not receive placements.
