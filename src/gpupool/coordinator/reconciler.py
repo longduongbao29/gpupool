@@ -22,6 +22,7 @@ from gpupool.common.models import (
     ReplicaRecord,
 )
 from gpupool.coordinator.agent_client import AgentClient
+from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store
 
 log = logging.getLogger("gpupool.reconciler")
@@ -59,6 +60,7 @@ class Reconciler:
         meta_for: Callable[[ModelSpec], Awaitable[ModelMeta]],
         outstanding: Callable[[str], int],
         clock: Callable[[], float] = time.time,
+        notifier: Notifier | None = None,
     ):
         self.store = store
         self.cfg = cfg
@@ -66,6 +68,7 @@ class Reconciler:
         self.meta_for = meta_for
         self.outstanding = outstanding
         self.clock = clock
+        self.notifier = notifier or Notifier(store, getattr(cfg, "webhook_url", ""), clock=clock)
         self.poll_s = 0.5  # engine/health poll interval during launch
         self.planner: Callable | None = None  # tests inject; default is scheduler.placement.plan
         self._http: httpx.AsyncClient | None = None
@@ -74,6 +77,9 @@ class Reconciler:
         self._tick_lock = asyncio.Lock()
         self._nofit: dict[str, str] = {}
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
+        self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
+        # model -> pending re-allocation: {"since": ts, "lost": (replica_id, reason) | None, "started": bool}
+        self._realloc: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ helpers
     def _http_client(self) -> httpx.AsyncClient:
@@ -85,7 +91,9 @@ class Reconciler:
         return now - rec.last_seen <= self.cfg.heartbeat_timeout_s
 
     def _node_map(self) -> dict[str, NodeRecord]:
-        return {n.report.node_id: n for n in self.store.list_nodes()}
+        # Only registered servers count: a stray heartbeat must not receive placements.
+        registered = {s.node_id for s in self.store.list_servers()}
+        return {n.report.node_id: n for n in self.store.list_nodes() if n.report.node_id in registered}
 
     def _planner(self) -> Callable:
         if self.planner is not None:
@@ -123,12 +131,17 @@ class Reconciler:
                         continue
                 key = (a.node_id, a.device_id)
                 reserved[key] = reserved.get(key, 0) + a.est_mb
+        flags = self.store.gpu_flags()
         out = []
         for n in nodes.values():
             if not self._alive(n, now):
                 continue
             rep = n.report.model_copy(deep=True)
             for d in rep.devices:
+                if not flags.get((rep.node_id, d.device_id), True):
+                    # Disabled in the pool: usable_mb 0 makes the unchanged planner skip it.
+                    d.usable_mb = 0
+                    continue
                 d.usable_mb = max(0, d.usable_mb - reserved.get((rep.node_id, d.device_id), 0))
             out.append(rep)
         return out
@@ -138,6 +151,12 @@ class Reconciler:
         now = self.clock()
         nodes = self._node_map()
         reports = self._reserved_nodes(nodes, now)
+        if spec.pin_devices:
+            pins = set(spec.pin_devices)
+            for rep in reports:  # reports are private copies, safe to edit
+                for d in rep.devices:
+                    if f"{rep.node_id}/{d.device_id}" not in pins:
+                        d.usable_mb = 0
         reported_ports = {r.node_id: {e.port for e in r.engines} for r in reports}
         handed: dict[str, set[int]] = {}
         lo, hi = self.cfg.port_range
@@ -161,11 +180,34 @@ class Reconciler:
     def _new_replica_id(model: str) -> str:
         return f"{re.sub(r'[^A-Za-z0-9_.-]', '-', model)}-{uuid.uuid4().hex[:6]}"
 
+    # ------------------------------------------------------------------ server removal
+    async def remove_node(self, node_id: str) -> None:
+        """Stop every replica touching `node_id`, then forget the server.
+
+        Replicas are marked stopped (not failed) so the desired count is simply re-placed
+        elsewhere by the next tick.
+        """
+        async with self._tick_lock:  # do not race a tick that is launching onto this node
+            now = self.clock()
+            nodes = self._node_map()
+            for rec in self.store.list_replicas(states=set(LIVE_FOR_PORTS)):
+                p = rec.placement
+                if node_id != p.head_node and node_id not in {a.node_id for a in p.assignments}:
+                    continue
+                self.store.set_replica_state(rec.replica_id, "stopped", None, now=now)
+                t = self._launches.get(rec.replica_id)
+                if t is not None:
+                    t.cancel()
+                    await asyncio.gather(t, return_exceptions=True)  # its rollback stops created engines
+                await self._stop_engines(rec, nodes, now)
+            self.store.delete_server(node_id)
+
     # ------------------------------------------------------------------ tick
     async def tick(self) -> None:
         async with self._tick_lock:
             now = self.clock()
             nodes = self._node_map()
+            self._track_nodes(nodes, now)
             await self._detect_failures(nodes, now)
             await self._check_suspects(nodes)
             await self._process_drains(nodes, now)
@@ -191,9 +233,42 @@ class Reconciler:
             await self._http.aclose()
             self._http = None
 
+    # ------------------------------------------------------------------ events
+    def _emit(self, *a, **kw) -> None:
+        try:
+            self.notifier.emit(*a, **kw)
+        except Exception:  # an event problem must never break reconciliation
+            log.exception("emitting event failed")
+
+    def _track_nodes(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """node_offline / node_online, once per liveness transition."""
+        for gone in set(self._node_up) - set(nodes):
+            self._node_up.pop(gone)  # server removed
+        for node_id, n in nodes.items():
+            alive = self._alive(n, now)
+            prev = self._node_up.get(node_id)
+            self._node_up[node_id] = alive
+            if prev is None or prev == alive:
+                continue  # first sighting: no event, only transitions are news
+            if alive:
+                self._emit("info", "node_online", f"Server {node_id} is back online", node_id=node_id)
+                continue
+            models = sorted({r.model for r in self.store.list_replicas(states=set(LIVE_FOR_PORTS))
+                             if node_id == r.placement.head_node
+                             or node_id in {a.node_id for a in r.placement.assignments}})
+            tail = f"; {len(models)} model(s) affected: {', '.join(models)}" if models else "; no model affected"
+            self._emit("warning", "node_offline",
+                       f"Server {node_id} went offline (no report for {now - n.last_seen:.0f} s){tail}",
+                       node_id=node_id)
+
     # ------------------------------------------------------------------ failure detection
     async def _fail(self, rec: ReplicaRecord, reason: str, nodes: dict[str, NodeRecord], now: float) -> None:
         log.warning("replica %s failed: %s", rec.replica_id, reason)
+        entry = self._realloc.get(rec.model)
+        if entry is None:
+            self._realloc[rec.model] = {"since": now, "lost": (rec.replica_id, reason), "started": False}
+        elif not entry["started"]:
+            entry["lost"] = (rec.replica_id, reason)
         t = self._launches.get(rec.replica_id)
         if t is not None:
             t.cancel()
@@ -220,6 +295,14 @@ class Reconciler:
             if dead:
                 await self._fail(rec, f"node(s) dead: {', '.join(dead)}", nodes, now)
                 continue
+            gone = sorted(f"{a.node_id}/{a.device_id}" for a in p.assignments
+                          if a.device_id not in {d.device_id for d in nodes[a.node_id].report.devices})
+            if gone:
+                reason = f"GPU {', '.join(gone)} no longer reported by its (live) server"
+                self._emit("error", "gpu_missing", f"{reason}; replica {rec.replica_id} of {rec.model} failed",
+                           node_id=gone[0].split("/")[0], model=rec.model)
+                await self._fail(rec, reason, nodes, now)
+                continue
             if rec.state != "ready":
                 continue
             for node_id, eid in engine_ids(rec):
@@ -227,9 +310,15 @@ class Reconciler:
                 st = next((e for e in nr.report.engines if e.engine_id == eid), None)
                 if st is not None and st.state in ("exited", "failed"):
                     tail = " | ".join(st.log_tail[-5:])
+                    self._emit("error", "engine_crashed",
+                               f"Engine {eid} on {node_id} {st.state} (exit code {st.exit_code}); "
+                               f"last log: {tail or 'n/a'}", node_id=node_id, model=rec.model)
                     await self._fail(rec, f"engine {eid} {st.state} (exit={st.exit_code}) {tail}".strip(), nodes, now)
                     break
                 if st is None and nr.last_seen > rec.updated_at:
+                    self._emit("error", "engine_crashed",
+                               f"Engine {eid} vanished from the report of {node_id}", node_id=node_id,
+                               model=rec.model)
                     await self._fail(rec, f"engine {eid} missing from {node_id} report", nodes, now)
                     break
 
@@ -287,6 +376,8 @@ class Reconciler:
         for rec in self.store.list_replicas(states=set(ACTIVE)):
             if rec.model not in specs:
                 await self.drain(rec.replica_id)
+        for m in [m for m in self._realloc if m not in specs or specs[m].replicas == 0]:
+            self._realloc.pop(m)  # stopped on purpose: nothing left to re-allocate
 
         for spec in specs.values():
             active = self.store.list_replicas(model=spec.name, states=set(ACTIVE))
@@ -315,6 +406,12 @@ class Reconciler:
             msg = f"{type(e).__name__}: {e}"
             if self._nofit.get(spec.name) != msg:
                 self._nofit[spec.name] = msg
+                if type(e).__name__ == "NoFit":
+                    self._realloc.setdefault(spec.name, {"since": now, "lost": None, "started": False})
+                    self._emit("error", "realloc_failed",
+                               f"Cannot place {spec.name}: {e}", model=spec.name)
+                else:
+                    self._emit("error", "launch_failed", f"Cannot plan {spec.name}: {msg}", model=spec.name)
                 (log.warning if type(e).__name__ == "NoFit" else log.error)(
                     "cannot place %s: %s", spec.name, msg)
             return
@@ -322,6 +419,14 @@ class Reconciler:
         rec = ReplicaRecord(replica_id=placement.replica_id, model=spec.name, placement=placement,
                             state="launching", created_at=now, updated_at=now)
         self.store.put_replica(rec)
+        entry = self._realloc.get(spec.name)
+        if entry is not None and entry["lost"] is not None and not entry["started"]:
+            entry["started"] = True
+            lost_id, why = entry["lost"]
+            where = ", ".join(f"{a.node_id}/{a.device_id} {a.layers} layers" for a in placement.assignments)
+            self._emit("warning", "realloc_started",
+                       f"Re-allocating {spec.name}: replica {lost_id} lost ({why}); new placement: {where}",
+                       model=spec.name)
         self._launches[rec.replica_id] = asyncio.create_task(self._launch(rec, spec), name=f"launch-{rec.replica_id}")
 
     # ------------------------------------------------------------------ launch
@@ -393,6 +498,11 @@ class Reconciler:
             self.store.set_replica_state(rid, "ready", None, now=self.clock())
             self._backoff.pop(spec.name, None)
             log.info("replica %s ready", rid)
+            entry = self._realloc.pop(spec.name, None)
+            if entry is not None:
+                self._emit("info", "realloc_done",
+                           f"{spec.name} is serving again after {self.clock() - entry['since']:.0f} s "
+                           f"(replica {rid})", model=spec.name)
         except asyncio.CancelledError:
             await asyncio.shield(self._rollback(created))
             cur = self.store.get_replica(rid)
@@ -409,6 +519,8 @@ class Reconciler:
                 except Exception:
                     pass
             log.warning("launch of %s failed: %s", rid, err)
+            self._emit("error", "launch_failed", f"Launch of {spec.name} (replica {rid}) failed: {err[:500]}",
+                       node_id=p.head_node, model=spec.name)
             await asyncio.shield(self._rollback(created))
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":

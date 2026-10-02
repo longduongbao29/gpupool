@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpupool</title>
+<link rel="stylesheet" href="styles.css">
+<script src="app.js"></script>
+<script defer src="vendor/alpine.min.js"></script>
+</head>
+<body x-data="app()" x-cloak>
+
+<!-- ============ login ============ -->
+<div class="login" x-show="!authed" x-cloak>
+  <form class="panel" @submit.prevent="login()">
+    <div class="logo" style="padding:0"><div class="mark" x-html="icon('chip')"></div> gpupool</div>
+    <h1>Sign in</h1>
+    <div class="muted small">Enter the admin key of this coordinator.</div>
+    <label class="field mt"><span>Admin key</span><input type="password" x-model="loginKey" autocomplete="current-password" autofocus placeholder="admin key"></label>
+    <div class="err-text" x-show="loginErr" x-text="loginErr"></div>
+    <button class="btn primary mt" style="width:100%" :disabled="loginBusy || !loginKey.trim()">Sign in</button>
+  </form>
+</div>
+
+<!-- ============ app ============ -->
+<div class="app" x-show="authed" x-cloak>
+  <aside class="sidebar" :class="{open: navOpen}">
+    <div class="logo"><div class="mark" x-html="icon('chip')"></div> gpupool</div>
+    <nav class="nav">
+      <button :class="{active: view==='overview'}" @click="go('overview')"><span x-html="icon('grid')"></span> Overview</button>
+      <button :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
+      <button :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
+      <button :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
+      <button :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
+        <span class="pill red right" x-show="unread() > 0" x-text="unread()"></span></button>
+      <button :class="{active: view==='settings'}" @click="go('settings')"><span x-html="icon('gear')"></span> Settings</button>
+    </nav>
+    <div class="side-foot">
+      <div class="sys"><span class="dot" :class="{off: !online}"></span>
+        <div><div style="font-weight:600" x-text="online ? 'System Online' : 'Disconnected'"></div>
+        <div class="muted small" x-text="summary().servers_online + '/' + summary().servers_total + ' servers up'"></div></div></div>
+      <button class="btn" @click="logout()"><span x-html="icon('logout')"></span> Log out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="header">
+      <button class="btn icon menu-btn" @click="navOpen = !navOpen" x-html="icon('menu')"></button>
+      <div>
+        <h1 x-text="title()[0]"></h1>
+        <div class="sub" x-text="title()[1]"></div>
+      </div>
+      <div class="row right">
+        <label class="search"><span x-html="icon('search')"></span><input type="text" x-model="search" placeholder="Search..."></label>
+        <!-- notifications bell -->
+        <div style="position:relative" @click.outside="evOpen = false">
+          <button class="btn icon" @click="evOpen = !evOpen" title="Notifications" style="position:relative">
+            <span x-html="icon('bell')"></span>
+            <span x-show="unread() > 0" class="pill red" style="position:absolute;top:-7px;right:-7px;padding:0 6px;font-size:11px" x-text="unread()"></span>
+          </button>
+          <div class="panel" x-show="evOpen" x-cloak
+               style="position:absolute;right:0;top:44px;width:380px;max-width:90vw;z-index:30;box-shadow:0 12px 40px rgba(0,0,0,.5)">
+            <div class="panel-head"><h2 style="font-size:14px">Notifications</h2>
+              <button class="btn sm right" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div>
+            <div style="max-height:380px;overflow:auto">
+              <template x-for="e in events().slice(0, 12)" :key="e.id">
+                <div style="padding:10px 14px;border-bottom:1px solid var(--border)" :style="e.read ? 'opacity:.65' : ''">
+                  <div class="row" style="align-items:flex-start">
+                    <span :style="'color:var(--' + (evClass(e)==='blue' ? 'primary' : evClass(e)) + ')'" x-html="icon(evIcon(e))"></span>
+                    <div class="grow">
+                      <div x-text="e.message"></div>
+                      <div class="row wrap small muted" style="gap:6px;margin-top:4px">
+                        <span x-text="ago(e.ts)"></span>
+                        <a href="#" class="pill" x-show="e.node_id" @click.prevent="evGo(e,'servers')" x-text="e.node_id"></a>
+                        <a href="#" class="pill blue" x-show="e.model" @click.prevent="evGo(e,'models')" x-text="e.model"></a>
+                      </div>
+                    </div>
+                    <span class="dot" x-show="!e.read" style="margin-top:6px;background:var(--primary);box-shadow:none"></span>
+                  </div>
+                </div>
+              </template>
+              <div class="empty" x-show="events().length === 0">No events yet</div>
+            </div>
+            <div style="padding:8px 14px;text-align:center"><a href="#" @click.prevent="evOpen=false;go('events')">View all events</a></div>
+          </div>
+        </div>
+        <button class="btn primary" @click="openAddServer()" x-show="view==='servers'"><span x-html="icon('plus')"></span> Add Server</button>
+      </div>
+    </div>
+
+    <div x-show="!st" class="empty">Loading...</div>
+
+    <template x-if="st">
+    <div>
+
+    <!-- ============ stat cards ============ -->
+    <div class="stats" x-show="view==='overview'">
+      <div class="panel stat"><div class="ico blue" x-html="icon('server')"></div>
+        <div><div class="v"><span x-text="summary().servers_online"></span><small> / <span x-text="summary().servers_total"></span></small></div><div class="l">Total Servers</div></div></div>
+      <div class="panel stat"><div class="ico green" x-html="icon('chip')"></div>
+        <div><div class="v"><span x-text="summary().gpus_enabled"></span><small> / <span x-text="summary().gpus_total"></span></small></div><div class="l">Total GPUs (in pool)</div></div></div>
+      <div class="panel stat"><div class="ico purple" x-html="icon('cube')"></div>
+        <div><div class="v" x-text="summary().models_running"></div><div class="l">Running Models</div></div></div>
+      <div class="panel stat"><div class="ico amber" x-html="icon('db')"></div>
+        <div><div class="v"><span x-text="freePoolGb()"></span> <small>GB</small></div><div class="l">Free pool VRAM</div></div></div>
+      <div class="add-wrap"><button class="btn primary" style="height:100%" @click="openAddServer()"><span x-html="icon('plus')"></span> Add Server</button></div>
+    </div>
+
+    <!-- ============ servers (overview + servers) ============ -->
+    <div class="cols" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
+      <div class="panel">
+        <div class="panel-head"><h2>Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
+        <div class="empty" x-show="filteredServers().length === 0">No servers yet. Click <b>Add Server</b> to register an agent.</div>
+        <template x-for="s in filteredServers()" :key="s.node_id">
+          <div class="server" :class="{offline: !s.alive}">
+            <div class="server-head" @click="toggleOpen(s)">
+              <span class="chev" :class="{open: isOpen(s)}" x-html="icon('chev')"></span>
+              <div class="sico" x-html="icon('server')"></div>
+              <div class="grow">
+                <div class="name"><span x-text="s.node_id"></span>
+                  <span class="pill green" x-show="s.alive"><span class="dot" style="width:6px;height:6px;box-shadow:none"></span>Online</span>
+                  <span class="pill red" x-show="!s.alive">Offline</span></div>
+                <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span></div>
+              </div>
+              <div class="meters" x-show="s.report">
+                <div class="meter"><div class="t"><span>CPU</span><span x-text="pct(s.report && s.report.cpu_pct)"></span></div>
+                  <div class="bar" :class="level(s.report && s.report.cpu_pct)"><i :style="'width:' + clamp(s.report && s.report.cpu_pct) + '%'"></i></div></div>
+                <div class="meter"><div class="t"><span>RAM</span>
+                  <span x-text="s.report && s.report.ram_total_mb ? gb(s.report.ram_used_mb) + ' / ' + gb(s.report.ram_total_mb) + ' GB' : dash"></span></div>
+                  <div class="bar" :class="level(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : null)">
+                    <i :style="'width:' + clamp(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : 0) + '%'"></i></div></div>
+              </div>
+            </div>
+
+            <div x-show="!s.alive" style="margin:0 16px 12px;padding:9px 12px;border-radius:8px;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:#fca5a5;filter:none"
+                 x-text="offlineInfo(s)"></div>
+
+            <!-- expanded: GPU table -->
+            <div class="server-body" x-show="isOpen(s)">
+              <div class="empty" x-show="devs(s).length === 0" x-text="s.report ? 'No devices reported' : 'This server has never been reached'"></div>
+              <div class="tbl-scroll" x-show="devs(s).length > 0">
+              <table>
+                <thead><tr><th>In pool</th><th>GPU</th><th>Utilization</th><th>Memory</th><th>Temp</th><th>Power</th><th>Processes</th><th>Status</th></tr></thead>
+                <tbody>
+                  <template x-for="d in devs(s)" :key="d.device_id">
+                    <tr class="click" :class="{sel: isSel(s,d)}" @click="select(s,d)">
+                      <td @click.stop><label class="switch" x-show="isGpu(d)" :title="'Include in the pool'"><input type="checkbox" :checked="enabled(s,d)" @change="toggleGpu(s,d,$event.target.checked)"><span></span></label></td>
+                      <td><div style="font-weight:600" x-text="devName(d)"></div><div class="muted small" x-text="d.device_id"></div></td>
+                      <td><div class="util-cell"><div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div><b x-text="pct(d.util_pct)"></b></div></td>
+                      <td x-text="mem(d)"></td>
+                      <td x-text="val(d.temp_c, '°C')"></td>
+                      <td x-text="val(d.power_w, ' W')"></td>
+                      <td x-text="d.processes ? d.processes.length : dash"></td>
+                      <td><span class="pill" :class="d.util_pct == null ? '' : (busy(d) ? 'amber' : 'green')" x-text="d.util_pct == null ? dash : (busy(d) ? 'Busy' : 'Idle')"></span></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+              </div>
+            </div>
+
+            <!-- collapsed: tiles -->
+            <div class="tiles" x-show="!isOpen(s)" style="padding-top:2px">
+              <template x-for="d in devs(s)" :key="d.device_id">
+                <div class="tile" :class="{sel: isSel(s,d)}" @click="select(s,d)">
+                  <div class="p" x-text="pct(d.util_pct)"></div>
+                  <div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div>
+                  <div class="n ellipsis" style="margin-top:4px" x-text="d.kind === 'cpu' ? 'CPU' : d.device_id"></div>
+                </div>
+              </template>
+            </div>
+
+            <div class="server-foot" x-show="view==='servers'">
+              <span class="muted small ellipsis" x-text="s.agent_url"></span>
+              <button class="btn danger sm right" @click="delSrv = s"><span x-html="icon('trash')"></span> Remove</button>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- GPU detail panel -->
+      <div class="panel detail" x-show="sel && selected()" x-cloak>
+        <template x-if="selected()">
+          <div>
+            <div class="panel-head"><div class="grow"><h2 x-text="devName(selected().d)"></h2>
+              <div class="muted small"><span x-text="selected().s.node_id"></span> / <span x-text="selected().d.device_id"></span></div></div>
+              <button class="btn icon" @click="sel = null" x-html="icon('x')"></button></div>
+            <div class="panel-body">
+              <div class="ring">
+                <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
+                  <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(selected().d.util_pct)"
+                    :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(selected().d.util_pct)"/></svg>
+                <div class="c"><b x-text="pct(selected().d.util_pct)"></b><span>Utilization</span></div>
+              </div>
+              <div class="kv3">
+                <div><div class="l">Memory</div><div class="v" x-text="gb(selected().d.total_mb - selected().d.free_mb) + ' GB'"></div></div>
+                <div><div class="l">Temperature</div><div class="v" x-text="val(selected().d.temp_c, '°C')"></div></div>
+                <div><div class="l">Power</div><div class="v" x-text="val(selected().d.power_w, ' W')"></div></div>
+              </div>
+              <div class="tabs">
+                <button :class="{active: detailTab==='overview'}" @click="detailTab='overview'">Overview</button>
+                <button :class="{active: detailTab==='processes'}" @click="detailTab='processes'">Processes</button>
+              </div>
+              <div x-show="detailTab==='overview'">
+                <div class="small muted" style="margin-bottom:4px">Memory <span x-text="mem(selected().d)"></span></div>
+                <div class="bar" :class="level(memPct(selected().d))"><i :style="'width:' + memPct(selected().d) + '%'"></i></div>
+                <div class="small muted" style="margin-top:8px">Usable for the pool: <b style="color:var(--text)" x-text="gb(selected().d.usable_mb) + ' GB'"></b></div>
+              </div>
+              <div x-show="detailTab==='processes' || detailTab==='overview'">
+                <h3 class="sec">Running Processes</h3>
+                <table>
+                  <thead><tr><th>PID</th><th>Process</th><th>GPU Memory</th></tr></thead>
+                  <tbody>
+                    <template x-for="p in (selected().d.processes || [])" :key="p.pid">
+                      <tr><td x-text="p.pid"></td><td x-text="p.name || '(hidden)'"></td><td x-text="p.used_mb == null ? dash : gb(p.used_mb) + ' GB'"></td></tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="muted small" x-show="!(selected().d.processes || []).length" style="padding:8px 12px">No processes</div>
+              </div>
+              <h3 class="sec">GPU Details</h3>
+              <dl class="dl">
+                <dt>Model</dt><dd x-text="devName(selected().d)"></dd>
+                <dt>Total memory</dt><dd x-text="gb(selected().d.total_mb) + ' GB'"></dd>
+                <dt>CUDA</dt><dd x-text="selected().d.cuda || dash"></dd>
+                <dt>Driver</dt><dd x-text="selected().d.driver || dash"></dd>
+              </dl>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ============ GPUs ============ -->
+    <div class="panel" x-show="view==='gpus'">
+      <div class="panel-head"><h2>All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
+      <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
+      <div class="tbl-scroll" x-show="allGpuRows().length > 0">
+      <table>
+        <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
+        <tbody>
+          <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
+            <tr :style="r.s.alive ? '' : 'opacity:.55'">
+              <td><span x-text="r.s.node_id"></span> <span class="pill red" x-show="!r.s.alive">Offline</span></td>
+              <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id"></div></td>
+              <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
+              <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
+              <td x-text="mem(r.d)"></td>
+              <td x-text="val(r.d.temp_c, '°C')"></td>
+              <td x-text="val(r.d.power_w, ' W')"></td>
+              <td x-text="(r.d.processes || []).map(function (p) { return (p.name || p.pid); }).join(', ') || dash" class="ellipsis proc-list"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- ============ Models ============ -->
+    <div x-show="view==='models'">
+      <div class="panel">
+        <div class="panel-head"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
+          <button class="btn primary right" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div>
+        <div class="empty" x-show="filteredLibrary().length === 0">The library is empty. Add a model from Hugging Face or a local path.</div>
+        <div class="tbl-scroll" x-show="filteredLibrary().length > 0">
+        <table>
+          <thead><tr><th>Name</th><th>Source</th><th>Size</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="it in filteredLibrary()" :key="it.name">
+              <tr>
+                <td style="font-weight:600" x-text="it.name"></td>
+                <td class="muted small"><span x-text="it.source === 'hf' ? 'Hugging Face' : 'Path'"></span><div class="ellipsis" style="max-width:260px" x-text="it.source === 'hf' ? it.hf_repo : it.path"></div></td>
+                <td x-text="bytes(it.bytes)"></td>
+                <td class="wrapc" style="min-width:200px">
+                  <span class="pill" :class="libStatusClass(it)"><span class="spin" x-show="it.status==='downloading'"></span><span x-text="it.status"></span></span>
+                  <div x-show="it.status==='downloading'" style="margin-top:6px">
+                    <div class="bar"><i :style="'width:' + libPct(it) + '%'"></i></div>
+                    <div class="muted small"><span x-text="bytes(it.downloaded)"></span> / <span x-text="bytes(it.bytes)"></span> (<span x-text="libPct(it)"></span>%)</div></div>
+                  <div class="small" style="color:#fca5a5;margin-top:4px" x-show="it.error" x-text="it.error"></div>
+                </td>
+                <td class="row" style="justify-content:flex-end">
+                  <button class="btn sm primary" x-show="it.status==='ready'" @click="openForm(null, it.name)"><span x-html="icon('play')"></span> Deploy</button>
+                  <button class="btn sm danger icon" @click="deleteLibrary(it)" title="Remove" x-html="icon('trash')"></button></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <div class="panel mt">
+        <div class="panel-head"><h2>Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
+          <button class="btn primary right" @click="openForm(null)" :disabled="readyLibrary().length === 0" :title="readyLibrary().length === 0 ? 'Add a model to the library first' : ''"><span x-html="icon('plus')"></span> New model</button></div>
+        <div class="empty" x-show="filteredModels().length === 0">No deployments. Pick a file from the library and press <b>Deploy</b>.</div>
+        <div class="model-grid" x-show="filteredModels().length > 0">
+          <template x-for="m in filteredModels()" :key="m.spec.name">
+            <div class="mcard">
+              <div class="row">
+                <div class="grow"><div class="title" x-text="m.spec.name"></div>
+                  <div class="muted small ellipsis"><span x-text="m.file || m.spec.source"></span> &middot; ctx <span x-text="m.spec.ctx_size"></span> &middot; parallel <span x-text="m.spec.parallel"></span></div></div>
+                <span class="pill" :class="stateClass(m)"><span class="spin" x-show="m.state==='starting' || m.state==='stopping'"></span><span x-text="m.state"></span></span>
+              </div>
+              <div class="endpoint"><code class="grow ellipsis" x-text="endpoint()"></code><span class="muted small">model:</span><code x-text="m.spec.name"></code>
+                <button class="btn sm icon" @click="copy(endpoint())" title="Copy endpoint" x-html="icon('copy')"></button></div>
+
+              <div class="errbox" x-show="m.state==='failed' && reallocError(m)" x-text="reallocError(m)"></div>
+              <div x-show="m.state==='failed' && modelError(m)">
+                <a href="#" class="small" @click.prevent="openErr[m.spec.name] = !openErr[m.spec.name]" x-text="openErr[m.spec.name] ? 'Hide error' : 'Show error'"></a>
+                <div class="errbox" x-show="openErr[m.spec.name]" x-text="modelError(m)" style="margin-top:6px"></div>
+              </div>
+
+              <div class="place" x-show="placementLines(m).length">
+                <template x-for="p in placementLines(m)" :key="p.id">
+                  <div>Replica <b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span></div>
+                </template>
+              </div>
+              <div class="place" x-show="(m.spec.pin_devices || []).length">Pinned to: <b x-text="(m.spec.pin_devices || []).join(', ')"></b></div>
+
+              <div class="row wrap">
+                <template x-if="m.state==='stopped' || m.state==='failed'">
+                  <div class="row">
+                    <label class="row small muted">Replicas <input type="number" min="1" max="16" :value="replicasOf(m)" @input="rep[m.spec.name] = $event.target.value" style="width:64px"></label>
+                    <button class="btn green" @click="startModel(m)"><span x-html="icon('play')"></span> Start</button>
+                  </div>
+                </template>
+                <button class="btn" x-show="m.state==='running' || m.state==='starting'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
+                <button class="btn right" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
+                <button class="btn danger icon" @click="deleteModel(m)" title="Delete" x-html="icon('trash')"></button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ Events ============ -->
+    <div class="panel" x-show="view==='events'">
+      <div class="panel-head"><h2>Events</h2>
+        <div class="row right">
+          <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
+          <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div></div>
+      <div class="empty" x-show="filteredEvents().length === 0">No events.</div>
+      <div class="tbl-scroll" x-show="filteredEvents().length > 0">
+      <table>
+        <thead><tr><th>Level</th><th>Event</th><th>Server</th><th>Model</th><th>Time</th></tr></thead>
+        <tbody>
+          <template x-for="e in filteredEvents()" :key="e.id">
+            <tr :style="e.read ? 'opacity:.7' : ''">
+              <td><span class="pill" :class="evClass(e)" x-text="e.level"></span></td>
+              <td class="wrapc"><div x-text="e.message"></div><div class="muted small" x-text="e.kind.replace(/_/g, ' ')"></div></td>
+              <td x-text="e.node_id || dash"></td>
+              <td x-text="e.model || dash"></td>
+              <td class="muted small" style="white-space:nowrap"><span x-text="clock(e.ts)"></span> (<span x-text="ago(e.ts)"></span>)</td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <!-- ============ Settings ============ -->
+    <div x-show="view==='settings'">
+      <div class="panel"><div class="panel-head"><h2>API</h2></div><div class="panel-body">
+        <div class="muted small">OpenAI-compatible base URL</div>
+        <div class="cmd" style="margin:6px 0 16px"><span x-text="endpoint()"></span><button class="btn sm" @click="copy(endpoint())">Copy</button></div>
+        <div class="muted small">curl</div>
+        <div class="cmd" style="margin:6px 0 16px"><span x-text="curlSnippet()"></span><button class="btn sm" @click="copy(curlSnippet())">Copy</button></div>
+        <div class="muted small">Python (openai)</div>
+        <div class="cmd" style="margin:6px 0"><span x-text="pySnippet()"></span><button class="btn sm" @click="copy(pySnippet())">Copy</button></div>
+        <div class="muted small" x-show="!settings().api_keys_set">No API keys are configured: the OpenAI endpoint is open.</div>
+      </div></div>
+      <div class="panel mt"><div class="panel-head"><h2>Agent install</h2></div><div class="panel-body">
+        <div class="muted small">Run on each GPU server, replacing the placeholders:</div>
+        <div class="cmd" style="margin-top:6px"><span x-text="agentCmd('<name>', '<this server IP>')"></span><button class="btn sm" @click="copy(agentCmd('<name>', '<this server IP>'))">Copy</button></div>
+      </div></div>
+      <div class="panel mt"><div class="panel-head"><h2>Session</h2></div><div class="panel-body">
+        <div class="row" style="margin-bottom:14px"><label class="switch"><input type="checkbox" :checked="desktop" @change="toggleDesktop($event.target.checked)"><span></span></label>
+          <div><div>Enable desktop alerts</div><div class="muted small">System notification for warnings and errors while this tab is in the background.</div></div></div>
+        <button class="btn" @click="logout()"><span x-html="icon('logout')"></span> Log out</button>
+      </div></div>
+    </div>
+
+    </div>
+    </template>
+  </main>
+</div>
+
+<!-- ============ modals ============ -->
+<div class="overlay" x-show="authed && addSrv.open" x-cloak @click.self="addSrv.open = false" @keydown.escape.window="addSrv.open = false; addMdl.open = false; form.open = false; delSrv = null">
+  <div class="modal">
+    <div class="modal-head"><h2>Add Server</h2><button class="btn icon right" @click="addSrv.open = false" x-html="icon('x')"></button></div>
+    <form class="modal-body" @submit.prevent="addServer()">
+      <label class="field"><span>Agent URL</span><input type="text" x-model="addSrv.url" placeholder="http://10.0.0.5:7070" autofocus></label>
+      <div class="muted small" style="margin-bottom:14px">The coordinator contacts the agent, reads its node id and registers it. Install the agent first with the command below.</div>
+      <label class="field"><span>Node name (used in the command)</span><input type="text" x-model="addSrv.name"></label>
+      <div class="muted small" style="margin-bottom:6px">Install command (run on the GPU server)</div>
+      <div class="cmd"><span x-text="agentCmd(addSrv.name, addSrvHost())"></span><button type="button" class="btn sm" @click="copy(agentCmd(addSrv.name, addSrvHost()))">Copy</button></div>
+      <button type="submit" style="display:none"></button>
+    </form>
+    <div class="modal-foot"><button class="btn" @click="addSrv.open = false">Cancel</button>
+      <button class="btn primary" @click="addServer()" :disabled="addSrv.busy || !addSrv.url.trim()">Add Server</button></div>
+  </div>
+</div>
+
+<div class="overlay" x-show="authed && delSrv" x-cloak>
+  <div class="modal" x-show="delSrv">
+    <div class="modal-head"><h2>Remove server</h2></div>
+    <div class="modal-body">
+      <p style="margin-top:0">Remove <b x-text="delSrv && delSrv.node_id"></b> from the pool?</p>
+      <div class="result bad" x-show="delSrv && modelsOnServer(delSrv).length">
+        Running models on this server (<b x-text="delSrv && modelsOnServer(delSrv).join(', ')"></b>) will be stopped or moved to other servers.</div>
+      <div class="muted small" style="margin-top:8px">Its engines are stopped. The agent itself keeps running on the machine.</div>
+    </div>
+    <div class="modal-foot"><button class="btn" @click="delSrv = null">Cancel</button><button class="btn danger" @click="deleteServer()">Remove</button></div>
+  </div>
+</div>
+
+<div class="overlay" x-show="authed && addMdl.open" x-cloak @click.self="addMdl.open = false">
+  <div class="modal wide">
+    <div class="modal-head"><h2>Add model</h2><button class="btn icon right" @click="addMdl.open = false" x-html="icon('x')"></button></div>
+    <div class="modal-body">
+      <div class="tabs"><button :class="{active: addMdl.tab==='hf'}" @click="addMdl.tab='hf'">Hugging Face</button>
+        <button :class="{active: addMdl.tab==='path'}" @click="addMdl.tab='path'">Path</button></div>
+      <div x-show="addMdl.tab==='hf'">
+        <label class="field"><span>Repository</span>
+          <div class="row"><input type="text" x-model="addMdl.repo" placeholder="Qwen/Qwen2.5-3B-Instruct-GGUF" @keydown.enter.prevent="listHf()">
+            <button class="btn" @click="listHf()" :disabled="addMdl.listing || !addMdl.repo.trim()"><span class="spin" x-show="addMdl.listing"></span> List files</button></div></label>
+        <label class="field" x-show="addMdl.files.length"><span>File</span>
+          <select x-model="addMdl.file"><template x-for="f in addMdl.files" :key="f.file"><option :value="f.file" x-text="f.file + '  (' + bytes(f.bytes) + ')'"></option></template></select></label>
+      </div>
+      <div x-show="addMdl.tab==='path'">
+        <label class="field"><span>Absolute path to a .gguf on the coordinator machine</span>
+          <input type="text" x-model="addMdl.path" placeholder="/data/models/model.gguf" @keydown.enter.prevent="addToLibrary()"></label>
+      </div>
+    </div>
+    <div class="modal-foot"><button class="btn" @click="addMdl.open = false">Cancel</button>
+      <button class="btn primary" @click="addToLibrary()" :disabled="addMdl.busy || (addMdl.tab==='hf' ? !addMdl.file : !addMdl.path.trim())"
+        x-text="addMdl.tab==='hf' ? 'Download' : 'Add'"></button></div>
+  </div>
+</div>
+
+<div class="overlay" x-show="authed && form.open" x-cloak @click.self="form.open = false">
+  <div class="modal wide">
+    <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn icon right" @click="form.open = false" x-html="icon('x')"></button></div>
+    <div class="modal-body">
+      <label class="field"><span>File (from the library)</span>
+        <select x-model="form.file" @change="form.plan = null">
+          <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" x-text="form.file"></option></template>
+          <template x-for="l in readyLibrary()" :key="l.name"><option :value="l.name" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
+        </select></label>
+      <label class="field"><span>Name (served as the model id)</span><input type="text" x-model="form.name" :disabled="form.edit"></label>
+      <div class="row">
+        <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" style="width:100%"></label>
+        <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" style="width:100%"></label>
+      </div>
+      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.auto" @change="form.plan = null"><span></span></label>
+        <div><div>Auto placement</div><div class="muted small">Let the scheduler pick GPUs. Turn off to choose GPUs yourself.</div></div></div>
+      <div class="gpu-pick" x-show="!form.auto">
+        <template x-for="s in servers()" :key="s.node_id">
+          <div>
+            <div class="grp"><span x-text="s.node_id"></span> <span class="pill red" x-show="!s.alive">Offline</span></div>
+            <template x-for="d in gpus(s)" :key="d.device_id">
+              <label><input type="checkbox" :checked="form.pins.indexOf(pinLabel(s,d)) >= 0" @change="togglePin(pinLabel(s,d), $event.target.checked)">
+                <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
+                <span class="muted small" x-text="'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
+            </template>
+          </div>
+        </template>
+      </div>
+      <template x-if="form.plan && form.plan.ok"><div class="result ok">
+        <b>Fits.</b> Tier <span x-text="form.plan.data.tier.replace('_',' ')"></span>, head <span x-text="form.plan.data.head_node"></span>, about
+        <span x-text="gb(form.plan.data.est_total_mb)"></span> GB.
+        <template x-for="a in form.plan.data.assignments" :key="a.node_id + a.device_id">
+          <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
+        </template>
+      </div></template>
+      <div class="result bad" x-show="form.plan && !form.plan.ok"><b>Does not fit.</b> <span x-text="form.plan && form.plan.msg"></span></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
+      <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
+      <button class="btn green" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ toasts ============ -->
+<div class="toasts">
+  <template x-for="t in toasts" :key="t.id">
+    <div class="toast" :class="t.kind" :style="t.kind==='warning' ? 'border-left-color:var(--amber)' : ''">
+      <div class="row" style="align-items:flex-start"><div class="grow" x-text="t.msg"></div>
+        <button class="btn sm icon" style="border:0;background:none" @click="dismiss(t.id)" x-html="icon('x')"></button></div>
+    </div>
+  </template>
+</div>
+
+</body>
+</html>

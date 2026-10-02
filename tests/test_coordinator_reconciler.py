@@ -1,8 +1,10 @@
 import httpx
 import pytest
+import pytest
 import respx
 
 from gpupool.common.models import EngineStatus
+from gpupool.coordinator.store import ServerRecord
 from tests.test_coordinator_helpers import (
     SPEC, Clock, FakeClient, dev, make_cfg, make_planner, make_reconciler, node, put_replica, settle,
 )
@@ -11,6 +13,10 @@ HEALTH = r"http://10\.0\.0\.\d+:\d+/health"
 
 
 def beat(store, clock, *nodes):
+    # only registered servers count for the reconciler
+    for n in nodes:
+        if store.get_server(n.node_id) is None:
+            store.add_server(ServerRecord(node_id=n.node_id, agent_url=n.agent_url, added_at=clock()))
     for n in nodes:
         store.upsert_node(n, clock())
 
@@ -250,4 +256,96 @@ async def test_ready_replica_stays_reserved_until_a_fresh_report(mock_health):
     beat(store, clock, node("a", devices=[dev(free=1800, usable=1500)]))
     await rec.tick()
     assert len(store.list_replicas()) == 2
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- registration, GPU switches, pinning
+def spy_planner(seen, inner=None):
+    inner = inner or make_planner()
+
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset()):
+        seen.append({(n.node_id, d.device_id): d.usable_mb for n in nodes for d in n.devices})
+        return inner(meta, spec, nodes, rid, port_alloc)
+
+    return planner
+
+
+async def test_unregistered_nodes_are_ignored():
+    rec, store, clock = make_reconciler()
+    store.upsert_node(node("ghost"), clock())  # heartbeat without a server record
+    with pytest.raises(Exception, match="nothing fits"):
+        await rec.plan_for(SPEC)
+    beat(store, clock, node("ghost"))  # registering it makes it count
+    assert (await rec.plan_for(SPEC)).head_node == "ghost"
+
+
+async def test_disabled_gpu_gets_zero_usable_mb():
+    seen = []
+    rec, store, clock = make_reconciler(planner=spy_planner(seen))
+    beat(store, clock, node("a", devices=[dev("CUDA0"), dev("CUDA1")]))
+    store.set_gpu_enabled("a", "CUDA0", False)
+    p = await rec.plan_for(SPEC)
+    assert seen[-1] == {("a", "CUDA0"): 0, ("a", "CUDA1"): 7000}
+    assert p.assignments[0].device_id == "CUDA1"
+    # the stored report is untouched (planning works on copies)
+    assert store.list_nodes()[0].report.devices[0].usable_mb == 7000
+
+
+async def test_pin_devices_zero_everything_else():
+    seen = []
+    rec, store, clock = make_reconciler(planner=spy_planner(seen))
+    beat(store, clock, node("a", devices=[dev("CUDA0")]), node("b", devices=[dev("CUDA0"), dev("CUDA1")]))
+    p = await rec.plan_for(SPEC.model_copy(update={"pin_devices": ["b/CUDA1"]}))
+    assert seen[-1] == {("a", "CUDA0"): 0, ("b", "CUDA0"): 0, ("b", "CUDA1"): 7000}
+    assert (p.head_node, p.assignments[0].device_id) == ("b", "CUDA1")
+    await rec.plan_for(SPEC)  # no pin: nothing zeroed
+    assert all(v == 7000 for v in seen[-1].values())
+
+
+async def test_pin_on_disabled_gpu_does_not_fit():
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.set_gpu_enabled("a", "CUDA0", False)
+    with pytest.raises(Exception, match="nothing fits"):
+        await rec.plan_for(SPEC.model_copy(update={"pin_devices": ["a/CUDA0"]}))
+
+
+async def test_disabling_a_gpu_keeps_running_replicas():
+    rec, store, clock = make_reconciler()
+    store.put_model(SPEC)
+    beat(store, clock, node("a"))
+    put_replica(store, "m-1", now=clock())
+    beat(store, clock, node("a", engines=[EngineStatus(engine_id="m-1-head", kind="server",
+                                                       state="running", port=9000)]))
+    store.set_gpu_enabled("a", "CUDA0", False)
+    await rec.tick()
+    assert store.get_replica("m-1").state == "ready"
+
+
+async def test_remove_node_stops_engines_and_marks_replicas_stopped():
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"), node("b"), node("c"))
+    store.set_gpu_enabled("b", "CUDA0", False)
+    put_replica(store, "m-1", rpc_node="b", now=clock())  # touches a and b
+    put_replica(store, "o-1", model="o", head="c", head_port=9005, now=clock())  # untouched
+    await rec.remove_node("b")
+    assert store.get_replica("m-1").state == "stopped"
+    assert store.get_replica("o-1").state == "ready"
+    stops = {c[1:3] for c in client.calls if c[0] == "stop"}
+    assert stops == {("http://10.0.0.1:7070", "m-1-head"), ("http://10.0.0.2:7070", "m-1-rpc-CUDA0")}
+    assert store.get_server("b") is None and store.gpu_flags() == {}
+    assert [n.report.node_id for n in store.list_nodes()] == ["a", "c"]
+
+
+async def test_remove_node_then_tick_replaces_replica_elsewhere(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    put_replica(store, "m-1", head="a", now=clock())
+    await rec.remove_node("a")
+    await rec.tick()
+    await settle(rec)
+    new = [r for r in store.list_replicas() if r.replica_id != "m-1"]
+    assert len(new) == 1 and new[0].placement.head_node == "b" and new[0].state == "ready"
     await rec.shutdown()

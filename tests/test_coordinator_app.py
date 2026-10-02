@@ -2,7 +2,8 @@ import httpx
 import pytest
 
 from gpupool.coordinator.app import create_app
-from gpupool.coordinator.store import Store
+from gpupool.coordinator.library import Library
+from gpupool.coordinator.store import ServerRecord, Store
 from tests.test_coordinator_helpers import (
     META, SPEC, FakeClient, make_cfg, make_planner, node, put_replica,
 )
@@ -22,7 +23,12 @@ async def env(tmp_path):
         return META
 
     store = Store(":memory:")
-    app = create_app(cfg, store=store, client=FakeClient(), meta_for=meta_for, start_background=False)
+    # Pull mode: only registered servers count, and /files serves library items only.
+    store.add_server(ServerRecord(node_id="a", agent_url="http://a:7070", added_at=0.0))
+    library = Library(":memory:", cfg.models_dir)
+    library.add_path(str((cfg.models_dir / "m.gguf").resolve()))
+    app = create_app(cfg, store=store, client=FakeClient(), meta_for=meta_for, start_background=False,
+                     library=library)
     app.state.reconciler.planner = make_planner()
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
         yield c, app, store, cfg
@@ -58,8 +64,11 @@ async def test_files_served_and_traversal_rejected(env):
     for bad in ["..", "../secret.txt", "..%2Fsecret.txt", "%2e%2e%2fsecret.txt", "..%5Csecret.txt",
                 "sub/m.gguf", "nope.gguf"]:
         r = await c.get(f"/files/{bad}", headers=CT)
-        assert r.status_code in (400, 404), bad
-        assert b"secret" not in r.content
+        # "/files/.." is normalised by the client to "/", which is the web UI page: fine, as
+        # long as no file outside the library is ever returned.
+        is_ui_page = r.status_code == 200 and b"<html" in r.content.lower()
+        assert r.status_code in (400, 404) or is_ui_page, bad
+        assert b"secret" not in r.content and b"GGUFdata" not in r.content
 
 
 async def test_dry_run_has_no_side_effects(env):
@@ -112,3 +121,20 @@ async def test_metrics(env):
     assert 'gpupool_device_usable_mb{node="a",device="CUDA0"} 7000' in text
     assert 'gpupool_node_alive{node="a"} 1' in text
     assert 'gpupool_replicas{model="m",state="ready"} 1' in text
+
+
+async def test_heartbeat_from_unregistered_server_is_rejected(env):
+    # A server removed in the UI must not re-register itself by pushing heartbeats.
+    c, _, store, _ = env
+    r = await c.post("/internal/heartbeat", json=node("zz").model_dump(), headers=CT)
+    assert r.status_code == 403
+    assert all(n.report.node_id != "zz" for n in store.list_nodes())
+
+
+async def test_ui_and_healthz_served(env):
+    c, *_ = env
+    assert (await c.get("/healthz")).json() == {"ok": True}
+    r = await c.get("/")
+    assert r.status_code == 200 and "<html" in r.text.lower()
+    # the UI mount at "/" must not shadow the API
+    assert (await c.get("/api/state")).status_code == 401

@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 
 from gpupool.common.auth import bearer_headers
-from gpupool.common.models import EngineSpec, EngineStatus
+from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
 
 
 class AgentError(Exception):
@@ -55,6 +55,11 @@ class AgentClient:
         )
         self._check(r)
         return r.json()["path"]
+
+    async def report(self, agent_url: str) -> NodeReport:
+        r = await self._call("GET", f"{agent_url.rstrip('/')}/report", timeout=httpx.Timeout(5.0))
+        self._check(r)
+        return NodeReport.model_validate(r.json())
 
     async def aclose(self) -> None:
         await self._http.aclose()

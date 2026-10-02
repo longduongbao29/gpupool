@@ -52,3 +52,47 @@ def test_set_replica_state_updates_blob_column_and_timestamp(store):
     assert (rec.state, rec.error) == ("failed", "oops") and rec.updated_at >= before
     assert [r.replica_id for r in store.list_replicas(states={"failed"})] == ["m-1"]
     store.set_replica_state("ghost", "failed")  # no-op, no crash
+
+
+def test_servers_roundtrip_and_delete_cascades(store):
+    from gpupool.coordinator.store import ServerRecord
+
+    assert store.get_server("a") is None
+    store.add_server(ServerRecord(node_id="b", agent_url="http://b:1", added_at=2.0))
+    store.add_server(ServerRecord(node_id="a", agent_url="http://a:1", added_at=1.0))
+    assert [s.node_id for s in store.list_servers()] == ["a", "b"]
+    assert store.get_server("a").agent_url == "http://a:1"
+    store.upsert_node(node("a"), 1.0)
+    store.upsert_node(node("b"), 1.0)
+    store.set_gpu_enabled("a", "CUDA0", False)
+    store.set_gpu_enabled("b", "CUDA0", False)
+    store.delete_server("a")
+    assert store.get_server("a") is None
+    assert [n.report.node_id for n in store.list_nodes()] == ["b"]
+    assert store.gpu_flags() == {("b", "CUDA0"): False}
+
+
+def test_gpu_flags_default_enabled_and_toggle(store):
+    assert store.gpu_flags() == {}
+    store.set_gpu_enabled("a", "CUDA0", False)
+    assert store.gpu_flags() == {("a", "CUDA0"): False}
+    store.set_gpu_enabled("a", "CUDA0", True)
+    assert store.gpu_flags() == {("a", "CUDA0"): True}
+
+
+def test_events_order_filter_read_and_prune(store, monkeypatch):
+    import gpupool.coordinator.store as st
+
+    e1 = store.add_event(1.0, "info", "k", "one")
+    e2 = store.add_event(2.0, "error", "k", "two", node_id="a", model="m")
+    assert [e.id for e in store.list_events()] == [e2.id, e1.id]
+    assert store.list_events()[0].node_id == "a" and store.list_events()[0].model == "m"
+    assert [e.id for e in store.list_events(after_id=e1.id)] == [e2.id]
+    assert [e.id for e in store.list_events(limit=1)] == [e2.id]
+    assert store.unread_count() == 2
+    store.mark_read(e1.id)
+    assert store.unread_count() == 1 and store.list_events()[1].read is True
+    monkeypatch.setattr(st, "EVENTS_KEEP", 3)
+    for i in range(5):
+        store.add_event(float(i), "info", "k", f"m{i}")
+    assert len(store.list_events(limit=100)) == 3

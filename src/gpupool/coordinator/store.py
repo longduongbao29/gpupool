@@ -9,6 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from gpupool.common.models import ModelSpec, NodeReport, ReplicaRecord
+from gpupool.coordinator.events import Event
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -19,12 +20,30 @@ CREATE TABLE IF NOT EXISTS replicas (
     replica_id TEXT PRIMARY KEY, model TEXT NOT NULL, state TEXT NOT NULL,
     created_at REAL NOT NULL, updated_at REAL NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS replicas_model ON replicas(model);
+CREATE TABLE IF NOT EXISTS servers (
+    node_id TEXT PRIMARY KEY, agent_url TEXT NOT NULL, added_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS gpu_flags (
+    node_id TEXT NOT NULL, device_id TEXT NOT NULL, enabled INTEGER NOT NULL,
+    PRIMARY KEY (node_id, device_id));
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, level TEXT NOT NULL, kind TEXT NOT NULL,
+    message TEXT NOT NULL, node_id TEXT, model TEXT, read INTEGER NOT NULL DEFAULT 0);
 """
+
+EVENTS_KEEP = 1000
 
 
 class NodeRecord(BaseModel):
     report: NodeReport
     last_seen: float
+
+
+class ServerRecord(BaseModel):
+    """A registered agent: the coordinator polls it and plans onto it."""
+
+    node_id: str
+    agent_url: str
+    added_at: float
 
 
 class Store:
@@ -59,6 +78,72 @@ class Store:
     def list_nodes(self) -> list[NodeRecord]:
         rows = self._read("SELECT report, last_seen FROM nodes ORDER BY node_id")
         return [NodeRecord(report=NodeReport.model_validate_json(r), last_seen=t) for r, t in rows]
+
+    # servers
+    def add_server(self, rec: ServerRecord) -> None:
+        self._write(
+            "INSERT INTO servers(node_id, agent_url, added_at) VALUES(?,?,?) "
+            "ON CONFLICT(node_id) DO UPDATE SET agent_url=excluded.agent_url, added_at=excluded.added_at",
+            (rec.node_id, rec.agent_url, rec.added_at),
+        )
+
+    def get_server(self, node_id: str) -> ServerRecord | None:
+        rows = self._read("SELECT node_id, agent_url, added_at FROM servers WHERE node_id=?", (node_id,))
+        return ServerRecord(node_id=rows[0][0], agent_url=rows[0][1], added_at=rows[0][2]) if rows else None
+
+    def list_servers(self) -> list[ServerRecord]:
+        rows = self._read("SELECT node_id, agent_url, added_at FROM servers ORDER BY added_at, node_id")
+        return [ServerRecord(node_id=a, agent_url=b, added_at=c) for a, b, c in rows]
+
+    def delete_server(self, node_id: str) -> None:
+        """Remove the server with its cached report and GPU flags in one transaction,
+        so a removed node can never linger as a half-registered ghost."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM servers WHERE node_id=?", (node_id,))
+            self._conn.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+            self._conn.execute("DELETE FROM gpu_flags WHERE node_id=?", (node_id,))
+
+    # gpu flags
+    def set_gpu_enabled(self, node_id: str, device_id: str, enabled: bool) -> None:
+        self._write(
+            "INSERT INTO gpu_flags(node_id, device_id, enabled) VALUES(?,?,?) "
+            "ON CONFLICT(node_id, device_id) DO UPDATE SET enabled=excluded.enabled",
+            (node_id, device_id, int(enabled)),
+        )
+
+    def gpu_flags(self) -> dict[tuple[str, str], bool]:
+        """Explicit flags only; a device without a row is enabled."""
+        return {(n, d): bool(e) for n, d, e in self._read("SELECT node_id, device_id, enabled FROM gpu_flags")}
+
+    # events
+    def add_event(self, ts: float, level: str, kind: str, message: str,
+                  node_id: str | None = None, model: str | None = None) -> Event:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO events(ts, level, kind, message, node_id, model, read) VALUES(?,?,?,?,?,?,0)",
+                (ts, level, kind, message, node_id, model))
+            eid = cur.lastrowid
+            self._conn.execute("DELETE FROM events WHERE id <= ?", (eid - EVENTS_KEEP,))
+        return Event(id=eid, ts=ts, level=level, kind=kind, message=message,  # type: ignore[arg-type]
+                     node_id=node_id, model=model, read=False)
+
+    def list_events(self, limit: int = 50, after_id: int | None = None) -> list[Event]:
+        """Newest first; `after_id` keeps only events with a larger id."""
+        sql = "SELECT id, ts, level, kind, message, node_id, model, read FROM events"
+        params: list = []
+        if after_id is not None:
+            sql += " WHERE id > ?"
+            params.append(after_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return [Event(id=i, ts=t, level=lv, kind=k, message=m, node_id=n, model=md, read=bool(r))
+                for i, t, lv, k, m, n, md, r in self._read(sql, tuple(params))]
+
+    def unread_count(self) -> int:
+        return self._read("SELECT COUNT(*) FROM events WHERE read=0")[0][0]
+
+    def mark_read(self, up_to_id: int) -> None:
+        self._write("UPDATE events SET read=1 WHERE id<=?", (up_to_id,))
 
     # models
     def put_model(self, spec: ModelSpec) -> None:

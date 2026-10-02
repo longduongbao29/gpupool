@@ -8,14 +8,22 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from gpupool.common.auth import require_bearer
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
 from gpupool.coordinator.agent_client import AgentClient
+from gpupool.coordinator.api import make_api_router
+from gpupool.coordinator.events import Notifier
+from gpupool.coordinator.library import Library
+from gpupool.coordinator.library_api import make_files_router, make_library_router
+from gpupool.coordinator.poller import Poller
 from gpupool.coordinator.reconciler import Reconciler
 from gpupool.coordinator.store import Store
+
+UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 
 ALL_STATES = ["pending", "launching", "ready", "draining", "stopped", "failed"]
 
@@ -24,7 +32,8 @@ def _esc(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def make_meta_provider(cfg: CoordinatorConfig) -> Callable[[ModelSpec], Awaitable[ModelMeta]]:
+def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
+                       ) -> Callable[[ModelSpec], Awaitable[ModelMeta]]:
     cache: dict[str, ModelMeta] = {}
 
     async def meta_for(spec: ModelSpec) -> ModelMeta:
@@ -34,7 +43,8 @@ def make_meta_provider(cfg: CoordinatorConfig) -> Callable[[ModelSpec], Awaitabl
         resolved = source
         if source.startswith("coordinator://"):
             name = source[len("coordinator://"):]
-            resolved = str(_safe_file(cfg.models_dir, name))
+            found = library.resolve(name) if library is not None else None
+            resolved = str(found) if found is not None else str(_safe_file(cfg.models_dir, name))
         from gpupool.scheduler.gguf_meta import read_meta  # lazy: owned by another module
 
         meta = await asyncio.to_thread(read_meta, resolved)
@@ -65,44 +75,71 @@ def create_app(
     client: AgentClient | None = None,
     meta_for: Callable[[ModelSpec], Awaitable[ModelMeta]] | None = None,
     start_background: bool = True,
+    library: Library | None = None,
 ) -> FastAPI:
     from gpupool.router.balancer import Balancer
     from gpupool.router.proxy import RouterMetrics, make_router
 
     store = store or Store(cfg.db_path)
     client = client or AgentClient(cfg.cluster_token)
+    if library is None:
+        if str(cfg.db_path) != ":memory:":
+            Path(cfg.db_path).parent.mkdir(parents=True, exist_ok=True)
+        library = Library(cfg.db_path, cfg.models_dir, cfg.hf_token)
     balancer = Balancer()
     metrics = RouterMetrics(balancer)
-    reconciler = Reconciler(store, cfg, client, meta_for or make_meta_provider(cfg), balancer.outstanding)
+    notifier = Notifier(store, cfg.webhook_url)
+    reconciler = Reconciler(store, cfg, client, meta_for or make_meta_provider(cfg, library),
+                            balancer.outstanding, notifier=notifier)
+    poller = Poller(store, client, cfg.poll_s)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        task = asyncio.create_task(reconciler.run(), name="reconciler") if start_background else None
+        tasks = []
+        if start_background:
+            library.resume()  # restart HF downloads interrupted by a previous run
+            tasks = [asyncio.create_task(poller.run(), name="poller"),
+                     asyncio.create_task(reconciler.run(), name="reconciler")]
         try:
             yield
         finally:
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await reconciler.shutdown()
+            await library.shutdown()
+            await notifier.aclose()
             await client.aclose()
             store.close()
 
     app = FastAPI(title="gpupool coordinator", lifespan=lifespan)
     app.state.store, app.state.reconciler, app.state.balancer = store, reconciler, balancer
+    app.state.poller, app.state.library, app.state.notifier = poller, library, notifier
     cluster_auth = Depends(require_bearer(cfg.cluster_token))
     admin_auth = Depends(require_bearer(cfg.admin_key))
 
     # ---- agents
+    @app.get("/healthz")
+    def healthz() -> dict:
+        return {"ok": True}
+
     @app.post("/internal/heartbeat", dependencies=[cluster_auth])
     def heartbeat(report: NodeReport) -> dict:
+        # Push heartbeats are accepted from registered servers only: a server removed in the
+        # UI must not come back by itself. Registration happens via the UI / POST /api/servers.
+        if store.get_server(report.node_id) is None:
+            raise HTTPException(403, f"server {report.node_id} is not registered")
         store.upsert_node(report, reconciler.clock())
         return {"ok": True}
 
-    @app.get("/files/{name:path}", dependencies=[cluster_auth])
-    def get_file(name: str):
-        p = _safe_file(cfg.models_dir, name)
-        return FileResponse(p, media_type="application/octet-stream", filename=p.name)
+    def model_uses_file(name: str) -> bool:
+        return any(m.source == f"coordinator://{name}" for m in store.list_models())
+
+    app.include_router(make_files_router(library, require_bearer(cfg.cluster_token)))
+    app.include_router(make_library_router(library, require_bearer(cfg.admin_key), model_uses_file))
+    app.include_router(make_api_router(store=store, reconciler=reconciler, poller=poller,
+                                       balancer=balancer, library=library, cfg=cfg,
+                                       admin_dep=admin_auth, notifier=notifier))
 
     # ---- admin
     def _spec_or_404(name: str) -> ModelSpec:
@@ -225,6 +262,9 @@ def create_app(
             lines.append(f'gpupool_replicas{{model="{_esc(m)}",state="{s}"}} {c}')
         return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
+    # The web UI. Mounted last: a mount at "/" would otherwise shadow the API routes.
+    if UI_DIR.is_dir():
+        app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app
 
 

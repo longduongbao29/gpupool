@@ -108,6 +108,11 @@ class Cluster:
             })
             self._spawn(f"agent-{nid}", ["agent", "--config", str(WORK / f"agent-{nid}.toml")],
                         None if nid == "a" else CPU_ONLY_ENV)
+        # Pull mode: the coordinator only knows servers registered through the API/UI.
+        for nid, n in NODES.items():
+            url = f"http://{n['host']}:{n['port']}"
+            wait(lambda: httpx.post(f"{COORD}/api/servers", json={"agent_url": url}, headers=ADMIN,
+                                    timeout=10).status_code in (200, 201, 409), 60, f"register {nid}")
         wait(lambda: len([n for n in status()["nodes"] if n["alive"]]) == 3, 60, "3 nodes alive")
 
     def kill_tree(self, name: str) -> None:
