@@ -8,7 +8,7 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
-Mọi thứ sau v0.3.0.
+## [0.4.0] - 2026-10-03
 
 ### Thêm mới
 
@@ -39,6 +39,7 @@ Mọi thứ sau v0.3.0.
 
 ### Thay đổi
 
+- Repo đổi tên từ `multi-gpu-inference` thành `gpupool` (link cũ tự chuyển hướng); tên image không đổi.
 - Image coordinator có thể kèm bộ công cụ chuyển đổi (`WITH_CONVERT=1`, thêm khoảng 1,2 GB); `WITH_CONVERT=0` giữ
   image gọn.
 - Gửi job chuyển đổi bị từ chối với mã 507 khi ổ đĩa rõ ràng không đủ chỗ, thay vì thất bại sau vài phút.
@@ -48,6 +49,8 @@ Mọi thứ sau v0.3.0.
 
 ### Sửa lỗi
 
+- Image Docker không build được sau khi `pyproject.toml` khai báo file license: Dockerfile không chép `LICENSE` và
+  `THIRD_PARTY_NOTICES.md` vào bước build.
 - CI bị đỏ từ khi có tính năng chuyển đổi: trình quản lý job chuyển đổi không tạo thư mục dữ liệu của coordinator
   trước khi mở cơ sở dữ liệu, nên bản checkout mới hoặc `db_path` ở thư mục mới đều lỗi. Nay thư mục được tạo, có
   test hồi quy.
@@ -112,6 +115,7 @@ Mọi thứ sau v0.3.0.
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0

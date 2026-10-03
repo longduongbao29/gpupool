@@ -8,7 +8,7 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
-Everything after v0.3.0.
+## [0.4.0] - 2026-10-03
 
 ### Added
 
@@ -38,6 +38,7 @@ Everything after v0.3.0.
 
 ### Changed
 
+- The repository is renamed from `multi-gpu-inference` to `gpupool` (old URLs redirect); image names are unchanged.
 - The coordinator image can ship the conversion toolchain (`WITH_CONVERT=1`, about +1.2 GB); `WITH_CONVERT=0`
   keeps the lean image.
 - Submitting a conversion is refused with 507 when the disk obviously cannot hold it, instead of failing minutes
@@ -47,6 +48,8 @@ Everything after v0.3.0.
 
 ### Fixed
 
+- Docker images failed to build once `pyproject.toml` declared its license files: the Dockerfiles did not copy
+  `LICENSE` and `THIRD_PARTY_NOTICES.md` into the build stage.
 - CI was red since the conversion feature landed: the conversion job manager did not create the coordinator's data
   folder before opening its database, so a fresh checkout or a new `db_path` failed. It is now created, with a
   regression test.
@@ -112,6 +115,7 @@ Everything after v0.3.0.
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0
