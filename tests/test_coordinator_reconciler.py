@@ -1,4 +1,5 @@
 import asyncio
+import math
 import httpx
 import pytest
 import respx
@@ -1557,6 +1558,26 @@ def test_calibration_sample_single_rpc_and_draft_and_missing():
     assert Reconciler.calibration_sample(one, {}) is None
     tiny = one.model_copy(update={"assignments": [one.assignments[0].model_copy(update={"est_mb": 100})]})
     assert Reconciler.calibration_sample(tiny, _mem(CUDA0=50)) is None  # estimate <= 0
+    # planned with factor 1.5: est_mb 1500 is unscaled back to 1000 before the context is removed
+    scaled = one.model_copy(update={"mem_factor": 1.5, "assignments": [
+        one.assignments[0].model_copy(update={"est_mb": 1500})]})
+    assert Reconciler.calibration_sample(scaled, _mem(CUDA0=900)) == (900, 872)
+
+
+async def test_calibration_converges_on_the_true_ratio_when_replanned_with_the_factor():
+    # Regression: sampling against estimates already multiplied by the factor measured r/f, and the
+    # EMA then settled on sqrt(r) (1.2 for r = 1.44), under-reserving VRAM. Every replica here is
+    # planned with the current factor, as the reconciler does, and the factor must stay at r.
+    rec, store, clock = make_reconciler()
+    base = put_replica(store, "m-1")
+    rec.client.memory = _mem(CUDA0=872 * 1.44)
+    for _ in range(6):
+        f = store.mem_factor("m")
+        a = base.placement.assignments[0].model_copy(update={"est_mb": math.ceil(1000 * f)})
+        r = base.model_copy(update={"placement": base.placement.model_copy(
+            update={"mem_factor": f, "assignments": [a]})})
+        await rec._calibrate(r, SPEC, "http://a")
+    assert store.mem_factor("m") == pytest.approx(1.44, abs=0.005)
 
 
 async def test_launch_calibrates_from_head_memory_and_emits_event(mock_health):

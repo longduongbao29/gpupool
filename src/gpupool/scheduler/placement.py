@@ -640,4 +640,5 @@ def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id,
         model=spec.name, replica_id=replica_id, tier=tier, head_node=head_id, head_port=head_port,
         assignments=assignments, tensor_split=[float(a.layers) for a in assignments],
         est_total_mb=sum(a.est_mb for a in assignments), draft_est_mb=draft_mb,
+        mem_factor=_MEM_FACTOR.get(),
     )

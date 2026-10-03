@@ -214,6 +214,9 @@ class Placement(BaseModel):
     # Speculative "draft": the draft model's memory, placed on the head's first local CUDA device
     # (assignments[0]); included in that assignment's est_mb and in est_total_mb.
     draft_est_mb: int | None = None
+    # Calibrated memory factor every est_mb above was multiplied by. Calibration divides it back out:
+    # a sample against already-scaled estimates would converge on sqrt(true ratio), not the ratio.
+    mem_factor: float = 1.0
 
 
 class Occupant(BaseModel):

@@ -414,6 +414,9 @@ def test_mem_factor_scales_estimates_and_stays_within_usable():
         abs(sc.assignments[0].est_mb - base.assignments[0].est_mb * 1.2) <= 1
     assert sc.est_total_mb == sum(a.est_mb for a in sc.assignments)
     assert rank(m, SPEC, nodes, mem_factor=1.2)[0].est_total_mb == sc.est_total_mb
+    # the placement records the factor so calibration can divide it back out
+    assert base.mem_factor == 1.0 and sc.mem_factor == 1.2
+    assert rank(m, SPEC, nodes, mem_factor=1.2)[0].mem_factor == 1.2
 
 
 def test_mem_factor_scales_draft_reservation():

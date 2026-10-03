@@ -1187,18 +1187,20 @@ class Reconciler:
         """(measured MB, estimated MB) of a ready replica, or None when the data does not cover it.
 
         Measured: the head's per-device buffers summed over the placement's devices (the draft model
-        sits in the head device's buffers). Estimated: est_mb minus the per-device runtime context,
-        which llama.cpp does not report as buffers (a draft brings its own context: one more)."""
+        sits in the head device's buffers). Estimated: est_mb, unscaled by the factor the placement
+        was planned with, minus the per-device runtime context, which llama.cpp does not report as
+        buffers (a draft brings its own context: one more)."""
         devices = memory.get("devices") if isinstance(memory, dict) else None
         if not isinstance(devices, dict) or not devices:
             return None
         measured = estimated = 0.0
+        f = placement.mem_factor if placement.mem_factor > 0 else 1.0
         for a in placement.assignments:
             d = devices.get(a.llama_device)
             if not isinstance(d, dict) or not d.get("total_mb"):
                 return None  # partial data would bias the ratio low: skip the sample
             measured += float(d["total_mb"])
-            estimated += a.est_mb - CONTEXT_MB["cuda"]
+            estimated += a.est_mb / f - CONTEXT_MB["cuda"]
         if placement.draft_est_mb:
             estimated -= CONTEXT_MB["cuda"]
         if measured <= 0 or estimated <= 0:
