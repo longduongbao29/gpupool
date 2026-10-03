@@ -2,6 +2,45 @@
 
 > English version. Vietnamese version: [TEST_REPORT.vi.md](TEST_REPORT.vi.md). Keep both in sync.
 
+## 2026-10-03 (Hugging Face to GGUF conversion)
+
+Feature: the coordinator converts Hugging Face models to GGUF with a selectable quantization type
+(commit 6766ba1, design in [DESIGN.en.md](DESIGN.en.md#17-hugging-face-to-gguf-conversion-converter)). Machine: the
+same Windows 11 laptop, Docker in WSL2, llama.cpp b11342, coordinator image built with the conversion toolchain.
+
+### Results
+
+| Test | Result |
+| --- | --- |
+| Unit suite (`uv run pytest`) | 768 passed |
+| CI end-to-end (`scripts/ci_e2e.py`) with the conversion stage | 21/21 checks passed. `HuggingFaceTB/SmolLM2-135M-Instruct` converted to `Q4_K_M` (105,453,984 bytes) in 64 s including the download, served split over RPC, and answered a chat |
+| `Qwen/Qwen2.5-0.5B-Instruct` to `Q4_K_M` | 397,807,488 bytes. GGUF header ok, chat template present, tokenizer ids identical to Hugging Face on 8 of 8 cases (English, Vietnamese, code, numbers, emoji ZWJ sequence, spacing, newlines, CJK), generation "The capital of France is Paris..." |
+| Folders after the jobs | `.convert` and `.hf` under the models folder empty |
+| Coordinator image size | 1.77 GB with the toolchain (`WITH_CONVERT=1`), 560 MB without (`WITH_CONVERT=0`) |
+
+### Size estimate
+
+The estimate shown before converting was 24 % below the real file on Qwen2.5-0.5B, because it used one average
+bits-per-weight per type. Costing the embedding matrices and llama-quantize's fallback for rows not divisible by 256
+separately (see DESIGN section 17.5) brought it within about 2 %:
+
+| Model, type | Estimated | Real |
+| --- | --- | --- |
+| Qwen2.5-0.5B-Instruct, `Q4_K_M` | 390.7 MB | 397.8 MB |
+| SmolLM2-135M-Instruct, `Q4_K_M` | 103.1 MB | 105.5 MB |
+
+### Defects found by review and real runs (all fixed)
+
+| Defect | Effect | Fix |
+| --- | --- | --- |
+| Mistral repositories ship `consolidated.*` copies of the same weights | the download was doubled | `consolidated.*` files are skipped |
+| File names from a repository listing were not filtered | a hostile name such as `../x` could point outside the download folder | unsafe names (absolute, `..`, backslash, drive letter) are dropped when selecting files and checked again before use |
+| Size estimate from one average bpw per type | 24 % too low on Qwen2.5-0.5B, so the dialog and the disk check under-reported | embeddings and the K-quant fallback are costed separately; within about 2 % |
+
+Not covered by these runs: models of several GB or more (only 135M and 0.5B parameters were converted), a gated
+repository with a token, AWQ / pre-quantized sources, `allow_remote_code`, and a `needs_review` job from a real model
+(those paths are covered by unit tests only).
+
 ## 2026-10-03
 
 Machine: the same Windows 11 laptop (GTX 1650 Ti Max-Q, 4 GB), Docker in WSL2. Real llama.cpp b11342 throughout.

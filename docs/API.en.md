@@ -3,8 +3,9 @@
 > English version. Vietnamese version: [API.vi.md](API.vi.md). Keep both in sync.
 
 This reference was written from the code (`src/gpupool/coordinator/api.py`, `app.py`, `library_api.py`,
-`src/gpupool/router/proxy.py`, `src/gpupool/agent/app.py`, `src/gpupool/common/models.py`). It lists every
-HTTP route the two services expose: **42 routes** (coordinator 35, agent 7), plus the static web UI that the
+`src/gpupool/coordinator/convert_api.py`, `src/gpupool/converter/models.py`, `src/gpupool/router/proxy.py`,
+`src/gpupool/agent/app.py`, `src/gpupool/common/models.py`). It lists every
+HTTP route the two services expose: **51 routes** (coordinator 44, agent 7), plus the static web UI that the
 coordinator mounts at `/`. The full list is in section 11.
 
 | Scanned file | Routes |
@@ -12,6 +13,7 @@ coordinator mounts at `/`. The full list is in section 11.
 | `coordinator/api.py` (`/api`) | 16 |
 | `coordinator/library_api.py` | 6 (5 library routes, 1 file server) |
 | `coordinator/app.py` | 10 (`/healthz`, `/metrics`, 2 internal, 6 `/admin`) |
+| `coordinator/convert_api.py` (`/api/convert`) | 9 |
 | `router/proxy.py` (`/v1`) | 3 |
 | `agent/app.py` | 7 |
 
@@ -286,7 +288,7 @@ unreachable or unexpected answer.
 | --- | --- | --- |
 | `name` | string | unique file name, e.g. `qwen2.5-0.5b-instruct-q4_k_m.gguf` |
 | `path` | string | absolute path on the coordinator |
-| `source` | `"hf"` / `"path"` | downloaded from HF or registered local file |
+| `source` | `"hf"` / `"path"` / `"convert"` | downloaded from HF, registered local file, or written by a conversion job ([section 12](#12-conversion-apiconvert)) |
 | `hf_repo`, `hf_file` | string or null | HF origin |
 | `bytes` | int or null | total size when known |
 | `downloaded` | int | bytes written so far |
@@ -588,7 +590,7 @@ cache if missing; split GGUF parts are fetched together. Returns `{"path": "..."
 
 ## 11. Route index
 
-All 42 routes, for a completeness check:
+All 51 routes, for a completeness check:
 
 | # | Method | Path | Section |
 | --- | --- | --- | --- |
@@ -634,5 +636,191 @@ All 42 routes, for a completeness check:
 | 40 | GET | `/engines/{engine_id}/memory` (agent) | 10 |
 | 41 | DELETE | `/engines/{engine_id}` (agent) | 10 |
 | 42 | POST | `/models/ensure` (agent) | 10 |
+| 43 | GET | `/api/convert/options` | 12 |
+| 44 | POST | `/api/convert/inspect` | 12 |
+| 45 | POST | `/api/convert` | 12 |
+| 46 | GET | `/api/convert` | 12 |
+| 47 | GET | `/api/convert/{job_id}` | 12 |
+| 48 | POST | `/api/convert/{job_id}/cancel` | 12 |
+| 49 | POST | `/api/convert/{job_id}/retry` | 12 |
+| 50 | POST | `/api/convert/{job_id}/accept` | 12 |
+| 51 | DELETE | `/api/convert/{job_id}` | 12 |
 
-The count matches the route decorators found in the code: 16 + 6 + 10 + 3 + 7 = 42.
+The count matches the route decorators found in the code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
+
+## 12. Conversion (`/api/convert`)
+
+Converts a Hugging Face model (or a folder of weights on the coordinator machine) to GGUF and adds it to the model
+library. All 9 routes need the admin key and live in `coordinator/convert_api.py`; the shapes come from
+`converter/models.py`. How it works: [DESIGN.en.md](DESIGN.en.md#17-hugging-face-to-gguf-conversion-converter); how
+to use it: [QUICKSTART.en.md](QUICKSTART.en.md#serving-a-model-that-has-no-gguf-convert).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/convert/options` | is conversion available, every quantization type, what the cluster can hold |
+| POST | `/api/convert/inspect` | look at a source without downloading weights: facts, warnings, per-type estimates |
+| POST | `/api/convert` | start a conversion job |
+| GET | `/api/convert` | list jobs, newest first |
+| GET | `/api/convert/{job_id}` | one job |
+| POST | `/api/convert/{job_id}/cancel` | cancel a queued or running job |
+| POST | `/api/convert/{job_id}/retry` | queue a failed or cancelled job again |
+| POST | `/api/convert/{job_id}/accept` | add the file of a `needs_review` job to the library |
+| DELETE | `/api/convert/{job_id}` | delete a finished job and its leftovers |
+
+Status codes used by these routes (the body is always `{"detail": "<message>"}`):
+
+| Code | Meaning here |
+| --- | --- |
+| 400 | invalid repo id (not `owner/name`), invalid output name, unknown ggml type in `advanced`, invalid folder path |
+| 403 | the Hugging Face repo is gated or private: set `HF_TOKEN` and accept the licence |
+| 404 | repo or revision not found on Hugging Face, or unknown job id |
+| 409 | the output name is taken (library, a file in `models_dir`, or another unfinished job); the job is not in a state that allows the action |
+| 422 | the source cannot be converted: architecture not supported by the pinned converter (llama.cpp b11342), pre-quantized in a format the converter cannot read (AWQ, bitsandbytes...), no `config.json`, no safetensors / PyTorch weights; also a malformed body (for example both `hf_repo` and `path`) |
+| 502 | Hugging Face unreachable or answered with an unexpected error |
+| 503 | the conversion toolchain is not set up (`problem` of `/api/convert/options`) |
+| 507 | not enough free disk space. It is raised by the worker, so it appears as the `error` of a *failed* job, not as the response of a route |
+
+### Types
+
+**`QuantOption`** (an element of `quant_options` and of `InspectResult.options`):
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `type` | string | one of `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `Q3_K_S`, `Q2_K` |
+| `bpw` | float | bits per weight used for the estimate |
+| `tier` | string | `lossless`, `near_lossless`, `balanced`, `small` or `tiny` |
+| `note` | string | quality note, e.g. the perplexity change against F16 |
+| `via` | `"convert"` / `"quantize"` | `F16`, `BF16` and `Q8_0` are written by the converter directly, the rest by llama-quantize |
+| `est_bytes` | int or null | estimated file size; only filled by inspect |
+| `est_vram_mb` | int or null | file + KV cache at context 4096 + runtime overhead |
+| `fits_single_gpu`, `fits_pool` | bool or null | against the largest single GPU / the whole pool; null when there is no GPU server or the parameter count is unknown |
+| `recommended` | bool | the type inspect recommends |
+
+**`SourceSpec`**: exactly one of `hf_repo` (`"owner/name"`) or `path` (absolute folder on the coordinator machine,
+translated through `path_map` like library paths); `revision` (default `"main"`) applies to `hf_repo`.
+
+**`InspectResult`**:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `source` | `SourceSpec` | the input |
+| `architecture`, `model_type` | string or null | `architectures[0]` and `model_type` of `config.json` |
+| `supported` | bool or null | by the pinned converter; null = toolchain missing, so unknown |
+| `params`, `n_layers`, `context_length` | int or null | |
+| `weight_format` | `"safetensors"` / `"pytorch_bin"` / `"none"` | `none` means nothing to convert |
+| `prequantized` | string or null | `quantization_config.quant_method` (`awq`, `gptq`, `fp8`...) |
+| `prequant_supported` | bool or null | can the converter read that format |
+| `source_bytes` | int | bytes of the selected files (the download size for Hugging Face) |
+| `files`, `skipped` | `[{name, bytes}]`, `[string]` | files the conversion will use / files ignored |
+| `remote_code` | bool | the source ships `*.py` or `auto_map`; not downloaded or run unless allowed |
+| `gated` | bool | |
+| `base_model` | string or null | the card's base model: convert that instead of a pre-quantized repo |
+| `gguf_alternatives` | `[string]` | Hugging Face repos with ready GGUF builds |
+| `options` | `[QuantOption]` | every type with estimates |
+| `recommended`, `recommend_reasons` | `QuantType`, `[string]` | the recommended type and why |
+| `warnings` | `[string]` | |
+
+**`ConvertRequest`** (body of `POST /api/convert`):
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `source` | `SourceSpec` | required | |
+| `quant` | `QuantType` | `"Q4_K_M"` | |
+| `name` | string or null | `<model>-<QUANT>.gguf` | output file name: letters, digits, `.`, `_`, `-`, ending in `.gguf`, not a split-part name |
+| `keep_source` | bool | `false` | keep the downloaded Hugging Face files after success (folders are never touched) |
+| `advanced.intermediate` | `auto` / `f16` / `bf16` / `f32` | `auto` | 16/32-bit file written before quantizing |
+| `advanced.output_tensor_type`, `advanced.token_embedding_type` | ggml type name or null | null | `llama-quantize --output-tensor-type` / `--token-embedding-type` (e.g. `q8_0`) |
+| `advanced.leave_output_tensor` | bool | `false` | `llama-quantize --leave-output-tensor` |
+| `advanced.pure` | bool | `false` | `llama-quantize --pure` |
+| `advanced.allow_remote_code` | bool | `false` | download and run the repo's own `*.py` inside the coordinator (dangerous) |
+| `advanced.validate_generation` | bool | `true` | generate a few tokens on the CPU after converting |
+| `advanced.threads` | int >= 0 | `0` | `0` = `GPUPOOL_CONVERT_THREADS` |
+
+The `advanced` quantize options are ignored for `F16`, `BF16` and `Q8_0`.
+
+**`ConvertJob`**:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | 12 hex characters |
+| `request` | `ConvertRequest` | as submitted |
+| `state` | string | `queued`, `downloading`, `converting`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
+| `stage_progress` | float or null | 0..1 inside the current stage, null when unknown |
+| `bytes_done`, `bytes_total` | int, int or null | download stage |
+| `output_name` | string | file name in the library |
+| `output_bytes`, `est_output_bytes` | int or null | real and estimated size |
+| `validation` | `Validation` or null | see below |
+| `error` | string or null | why it failed, or the *needs review* note |
+| `log_tail` | `[string]` | last lines of the current or last tool |
+| `created_at`, `started_at`, `finished_at` | float or null | unix time |
+
+Active states are `queued`, `downloading`, `converting`, `quantizing`, `validating`; `done`, `failed` and `cancelled`
+are final; `needs_review` waits for `accept` or delete. A job from a folder passes through `downloading` too (it
+only links the files). `F16`, `BF16` and `Q8_0` skip `quantizing`.
+
+**`Validation`**: `header_ok` (bool or null), `architecture`, `n_layers`, `vocab_size`, `chat_template` (bool),
+`tokenizer_ok` (bool, null = could not run), `tokenizer_cases` (`[{text, hf, gguf, match}]`: the token ids of 8 probe
+texts from Hugging Face and from the GGUF), `generation_ok` (bool, null = skipped), `generation_sample` (string),
+`warnings`, `errors`. `header_ok: false` makes the job *failed*; `tokenizer_ok: false` or `generation_ok: false`
+make it `needs_review`; null values are not failures.
+
+### `GET /api/convert/options`
+
+Returns `{"available": bool, "problem": string or null, "quant_options": [QuantOption], "cluster": {"largest_gpu_mb",
+"pool_mb"}}`. `problem` says what is missing when the toolchain is not set up (the UI shows it). The estimates in
+`quant_options` are empty here; use inspect for a concrete model.
+
+### `POST /api/convert/inspect`
+
+Body: a `SourceSpec`. Reads the configuration and the file listing (for a folder, the safetensors headers) without
+downloading weights; returns an `InspectResult` with per-type sizes, VRAM, fit and the recommendation. It works
+without the toolchain, then `supported` is null. Errors: `400`, `403`, `404`, `422` (no `config.json`), `502`.
+
+### `POST /api/convert`
+
+Body: a `ConvertRequest`. Checks the toolchain, inspects the source, refuses what cannot work, and queues the job.
+Returns the `ConvertJob` (state `queued`). Errors: `400`, `403`, `404`, `409`, `422`, `502`, `503` as in the table
+above. Jobs run one at a time, in submission order.
+
+### `GET /api/convert`, `GET /api/convert/{job_id}`
+
+A list of `ConvertJob` (newest first), or one job (`404` unknown id). Poll one job to follow progress.
+
+### `POST /api/convert/{job_id}/cancel`
+
+Cancels a queued or running job: the running tool is killed and the job's scratch folder removed. Returns the job
+(state `cancelled`). `409` if the job is not active.
+
+### `POST /api/convert/{job_id}/retry`
+
+Queues a `failed` or `cancelled` job again with the same request; a finished download in the cache is reused. Returns
+the job (state `queued`). `409` if the job is in another state or its output name is taken meanwhile.
+
+### `POST /api/convert/{job_id}/accept`
+
+For a `needs_review` job: moves the converted file into the library despite the failed check. Returns the job
+(state `done`). `409` if the job is not in `needs_review`, the file is gone, or the name is taken.
+
+### `DELETE /api/convert/{job_id}`
+
+Deletes the job and its scratch folder (a *needs_review* file is discarded). Returns `{"ok": true}`. `409` while the
+job is active (cancel it first), `404` unknown.
+
+```bash
+# 1. look first
+curl -s -X POST $COORD/api/convert/inspect -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"hf_repo": "Qwen/Qwen2.5-0.5B-Instruct"}' | jq '{architecture, supported, params, recommended, recommend_reasons}'
+
+# 2. convert (a folder works too: "source": {"path": "/models/hf/my-model"})
+curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"source": {"hf_repo": "Qwen/Qwen2.5-0.5B-Instruct"}, "quant": "Q4_K_M"}' | jq .id
+
+# 3. follow it, then deploy the file from the library
+curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id> | jq '{state, stage_progress, error}'
+
+# needs_review: accept it (or DELETE the job)
+curl -s -X POST -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id>/accept | jq .state
+```
+
+A finished job adds a `LibraryItem` with `source: "convert"` (`hf_repo` set for Hugging Face sources), listed by
+`GET /api/library` like any other file and removable with `DELETE /api/library/{name}`.

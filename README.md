@@ -31,13 +31,18 @@ use too.
 - **Control state survives coordinator restarts** (SQLite), including recovery of launches interrupted by a crash.
 - **Deployment.** Docker images on GHCR (`ghcr.io/longduongbao29/gpupool-coordinator`, `ghcr.io/longduongbao29/gpupool-agent`),
   images that build without GitHub access, HTTP proxy support, model files taken from host paths.
+- **Convert Hugging Face models to GGUF.** A model published only as safetensors / PyTorch weights can be
+  converted inside the coordinator (UI or `/api/convert`) with a selectable quantization type (Q8_0 ... Q2_K),
+  size and VRAM estimates per type, and validation (GGUF header, tokenizer ids vs Hugging Face, a short CPU
+  generation) before it enters the model library. The Docker image ships the toolchain
+  (`WITH_CONVERT=0` builds the lean image without it).
 - **Web UI** for servers, GPUs, models, deployments, recommendations and events.
 
 ## Status
 
 Tested on one Windows laptop (GTX 1650 Ti, 4 GB): natively with emulated nodes against real llama.cpp,
 and as a simulated 3-server Docker cluster in WSL2 (`docker-compose.sim.yml`). A CPU-only 3-server
-end-to-end test also runs in CI. Not yet run on a real multi-server LAN. See
+end-to-end test also runs in CI, including a Hugging Face to GGUF conversion. Not yet run on a real multi-server LAN. See
 [docs/TEST_REPORT.en.md](docs/TEST_REPORT.en.md).
 
 ## How it works
@@ -81,19 +86,22 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
 ## Tests
 
 ```bash
-uv run pytest                 # unit tests (about 609)
+uv run pytest                 # unit tests (about 768)
 uv run pytest -m real         # needs llama.cpp in .cache/llama/b11342-cuda12.4 and a GGUF in .cache/models
 uv run python scripts/e2e_local.py   # 3 emulated nodes on one machine, real llama.cpp
 
 # simulated 3-server cluster on one machine (needs Docker + NVIDIA Container Toolkit)
 docker compose -f docker-compose.sim.yml up -d
 
-# CI end-to-end: coordinator + 3 CPU-only agents (docker-compose.ci.yml), tiny model split over RPC
-uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep]
+# CI end-to-end: coordinator + 3 CPU-only agents (docker-compose.ci.yml), tiny model split over RPC,
+# then a Hugging Face model is converted to GGUF in the coordinator and served
+uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
 ```
 
 `scripts/ci_e2e.py` needs the `gpupool-agent` and `gpupool-coordinator` images (override with
-`GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`); in GitHub Actions it is the `e2e` job.
+`GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`); in GitHub Actions it is the `e2e` job. The conversion
+stage needs a coordinator image built with the toolchain (the default) and internet access to
+huggingface.co; `--skip-convert` leaves it out.
 
 ## Documentation
 

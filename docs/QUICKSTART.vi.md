@@ -89,6 +89,167 @@ của bạn.
 
 Muốn bắt client gửi key: chạy coordinator với `-e GPUPOOL_API_KEYS=key1,key2`.
 
+## Serve model chưa có GGUF (chuyển đổi)
+
+gpupool phục vụ file GGUF. Nhiều model chỉ được phát hành dưới dạng trọng số Hugging Face (`safetensors` hoặc
+`.bin` của PyTorch). Coordinator có thể tự chuyển model đó sang GGUF và đưa vào thư viện model.
+
+**Nếu đã có bản GGUF thì nên dùng bản đó.** Tải file có sẵn nhanh hơn và không cần chuyển đổi. Bước inspect liệt
+kê các bản GGUF đã được phát hành của model (`gguf_alternatives`, kèm liên kết *download instead*). Chỉ dùng chuyển
+đổi khi chưa có bản nào, khi bạn muốn một kiểu lượng tử hoá chưa ai phát hành, hoặc khi trọng số đã nằm sẵn trên
+ổ đĩa của server.
+
+### Cách làm trên UI
+
+1. **Models → Convert a model**. (Hộp thoại **Add model** cũng có nút **Convert to GGUF** khi repo bạn nhập không
+   chứa file `.gguf` nào.) Chọn **Hugging Face repo** (`owner/name`, có thể kèm revision) hoặc **Folder on the
+   server** (đường dẫn tuyệt đối của thư mục có `config.json`, các file tokenizer và trọng số; đường dẫn trên máy
+   chủ được dịch giống đường dẫn thư viện, xem [Dùng file model có sẵn trên server](#dùng-file-model-có-sẵn-trên-server)).
+2. **Inspect**. Chưa tải gì cả: gpupool chỉ đọc config và danh sách file. Bạn thấy kiến trúc và việc bộ chuyển đổi
+   được ghim (llama.cpp b11342) có hỗ trợ hay không, số tham số, số lớp, độ dài ngữ cảnh, dung lượng tải về, cùng các
+   cảnh báo (repo gated, đã lượng tử hoá sẵn, kèm mã tuỳ biến, đã có bản GGUF).
+3. Chọn **loại lượng tử hoá** (mục kế tiếp). Mỗi dòng cho biết dung lượng file và VRAM ước lượng, vừa một GPU hay
+   chỉ vừa pool, và loại nào được đề xuất kèm lý do.
+4. Kiểm tra **tên file đầu ra** (mặc định `<model>-<LOẠI>.gguf`; phải kết thúc bằng `.gguf`), tuỳ chọn **Keep downloaded
+   source**, tuỳ chọn **Advanced**. Rồi bấm **Start conversion**.
+5. Theo dõi bảng **Conversions** ngay trên trang đó: các giai đoạn *Download → Convert → Quantize → Validate*, thanh
+   tiến độ, log và chi tiết kiểm tra. Các job chạy lần lượt từng cái, ở mức ưu tiên CPU thấp để việc inference trên
+   máy coordinator không bị chậm. Có sẵn **Cancel**, **Retry** (job lỗi hoặc đã huỷ) và xoá.
+6. Khi job ở trạng thái *done*, file đã nằm trong thư viện (nguồn `convert`). **Deploy this model** mở form model
+   mới với file đó.
+
+Các bước tương tự qua HTTP: [API.vi.md](API.vi.md#12-chuyển-đổi-apiconvert).
+
+### Chọn loại lượng tử hoá
+
+Lượng tử hoá làm file nhỏ đi và cần ít bộ nhớ hơn, đổi lại một phần chất lượng. Các con số chất lượng là mức thay đổi
+perplexity so với F16 trên Llama-3-8B do llama-quantize công bố (càng gần 0 càng tốt); *bpw* là số bit trên mỗi
+trọng số, tính trung bình cả model.
+
+| Loại | bpw | Chất lượng | Dùng khi |
+| --- | --- | --- | --- |
+| `BF16`, `F16` | 16 | không mất mát | bản tham chiếu, file lớn nhất; do bộ chuyển đổi ghi trực tiếp |
+| `Q8_0` | 8.52 | +0.0026, thực tế không phân biệt được với F16 | model nhỏ, hoặc dư VRAM; ghi trực tiếp |
+| `Q6_K` | 6.57 | +0.0217, rất gần bản gốc | ưu tiên chất lượng, khi vừa bộ nhớ |
+| `Q5_K_M` | 5.70 | +0.0569, rất tốt | mặc định tốt cho model nhỏ |
+| `Q5_K_S` | 5.57 | +0.1049 | nhỏ hơn và kém hơn `Q5_K_M` một chút |
+| `Q4_K_M` | 4.90 | +0.1754 | điểm cân bằng dung lượng/chất lượng thông dụng cho model lớn |
+| `Q4_K_S` | 4.67 | +0.2689 | nhỏ hơn `Q4_K_M` một chút |
+| `IQ4_XS` | 4.25 | gần `Q4_K_S` | nhỏ hơn `Q4_K_S` với chất lượng tương đương |
+| `Q4_0` | 4.64 | +0.4685 | định dạng cũ; thường `Q4_K_S` tốt hơn |
+| `Q3_K_L` | 4.31 | +0.5562, mất chất lượng thấy rõ | bộ nhớ eo hẹp |
+| `Q3_K_M` | 4.00 | +0.6569, mất chất lượng rõ | chỉ khi bộ nhớ eo hẹp |
+| `Q3_K_S` | 3.65 | +1.6321, mất nhiều | phương án cuối cùng |
+| `Q2_K` | 3.17 | +3.5199, mất rất nhiều | phương án cuối cùng |
+
+Các loại IQ1 và IQ2 không được cung cấp: llama-quantize từ chối chúng nếu không có importance matrix, mà gpupool
+không tính ma trận này.
+
+Loại được đề xuất theo các quy tắc sau:
+
+- **Model lớn** (từ 3 tỷ tham số trở lên): loại tốt nhất trong `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M` mà vừa **một GPU**;
+  nếu không loại nào vừa thì lấy loại tốt nhất vừa **cả pool** (khi đó model bị chia qua RPC, chậm hơn). Nếu ngay cả
+  `Q4_K_M` cũng không vừa, vẫn đề xuất `Q4_K_M` kèm lý do nói rõ điều đó; `Q3_K_M` và `Q2_K` vẫn nằm trong danh
+  sách như các lựa chọn.
+- **Model nhỏ** (dưới 3 tỷ): không bao giờ mặc định thấp hơn `Q5_K_M`, vì model nhỏ mất chất lượng nhanh nhất. Chỉ
+  khi không loại nào trong `Q8_0`, `Q6_K`, `Q5_K_M` vừa thì mới xét `Q4_K_M`, và lý do có nêu.
+- Khi cụm không có GPU nào (không có thông tin vừa/không vừa): `Q8_0` cho model nhỏ, `Q5_K_M` cho model dưới 15 tỷ,
+  còn lại `Q4_K_M`. Khi chưa biết số tham số: `Q4_K_M`.
+
+K-quant cần các hàng có số giá trị chia hết cho 256. Model có hidden size khác (SmolLM2-135M: 576, Qwen2.5-0.5B: 896)
+sẽ dùng một loại cũ hơn cho các tensor đó, nên file lớn hơn so với bảng. Dung lượng hiển thị trong hộp thoại đã tính
+đến điều này và cả các ma trận embedding.
+
+**Nguồn đã lượng tử hoá sẵn sẽ mất chất lượng hai lần** (lần của chính nó, rồi lần của bạn). gpupool đọc ngược được
+các nguồn `fp8`, `gptq`, `bitnet`, `compressed-tensors`, `modelopt` và `mxfp4` (kèm cảnh báo). **Model AWQ và
+bitsandbytes không được hỗ trợ**: yêu cầu bị từ chối với HTTP 422. Hãy chuyển model gốc (base model) của nó; hộp
+thoại gợi ý model đó khi model card có ghi.
+
+### Các tuỳ chọn nâng cao nói đơn giản
+
+| Tuỳ chọn | Tác dụng |
+| --- | --- |
+| Intermediate precision | File 16/32 bit được ghi trước khi lượng tử hoá. *Auto* giữ độ chính xác của chính model (trọng số bf16 giữ bf16, còn lại f16). f32 hiếm khi cần và làm gấp đôi dung lượng đĩa tạm |
+| Output tensor type, Token embedding type | Độ chính xác của lớp đầu ra và của bảng embedding từ. Giữ cao hơn (ví dụ `q8_0`) tốn thêm ít dung lượng và có thể giúp chất lượng ở các loại nhỏ. Mặc định để llama-quantize tự quyết |
+| Leave output tensor | Không lượng tử hoá lớp đầu ra: file lớn hơn một chút, chất lượng nhỉnh hơn một chút |
+| Pure | Dùng loại đã chọn cho mọi tensor thay vì hỗn hợp thông thường. Thường làm giảm chất lượng ở cùng dung lượng; để thử nghiệm |
+| Validate generation | Nạp file trên CPU và sinh vài token (bật mặc định). Kiểm tra header và tokenizer luôn chạy |
+| Allow remote code | Tải các file `*.py` của chính repo và chạy chúng trong coordinator. Xem mục Bảo mật bên dưới |
+| Threads | Số luồng CPU khi lượng tử hoá (`0` = `GPUPOOL_CONVERT_THREADS`; nếu biến đó cũng `0` = mọi CPU) |
+
+Với `F16`, `BF16` và `Q8_0`, bộ chuyển đổi ghi thẳng file cuối, nên các tuỳ chọn lượng tử hoá không áp dụng (UI làm
+mờ chúng).
+
+### Kiểm tra làm gì, và `needs_review`
+
+Trước khi file vào thư viện, gpupool kiểm tra nó:
+
+1. **Header GGUF**: đọc được, có kiến trúc và tokenizer. Nếu bước này lỗi, job ở trạng thái *failed* và không có gì
+   vào thư viện.
+2. **Tokenizer**: 8 đoạn văn cố định (tiếng Anh, tiếng Việt, code, số, emoji gồm cả cụm gia đình nối bằng ZWJ, khoảng
+   trắng lạ, dòng trống, tiếng Nhật/Trung) được Hugging Face và `llama-tokenize` (trên file GGUF) tách token. Các id
+   token phải trùng khớp hoàn toàn.
+3. **Sinh văn bản** (trừ khi tắt): model viết tiếp "The capital of France is" 16 token trên CPU. Bước này bị bỏ qua,
+   kèm cảnh báo, khi RAM trống thấp hơn 1.2 lần dung lượng file; hết thời gian chờ cũng chỉ là cảnh báo.
+
+Tokenizer lệch hoặc sinh văn bản lỗi sẽ đưa job vào **needs_review**: file có tồn tại nhưng **chưa** nằm trong thư
+viện. Mở bảng kiểm tra để xem những đoạn nào khác nhau. **Accept anyway** (`POST /api/convert/{id}/accept`) thêm file
+vào thư viện; xoá job thì bỏ file. Một bước kiểm tra không chạy được (ví dụ tokenizer của Hugging Face không nạp
+được) chỉ là cảnh báo và không chặn job.
+
+### Đĩa, RAM và thời gian
+
+- **Đĩa.** Đỉnh khoảng *nguồn + bản trung gian 16 bit + đầu ra*. Ước chừng, model 7 tỷ cần khoảng 14 GB tải về,
+  14 GB bản trung gian và khoảng 4 GB đầu ra ở `Q4_K_M`. gpupool kiểm tra dung lượng trống trước khi tải và trước mỗi
+  giai đoạn nặng (cộng biên 512 MB); nếu không đủ, job lỗi kèm thông báo cần bao nhiêu và đang trống bao nhiêu. Bản
+  trung gian bị xoá ngay khi có file đã lượng tử hoá. `F16`, `BF16` và `Q8_0` không có bản trung gian riêng.
+- **RAM.** Bộ chuyển đổi nạp trọng số qua PyTorch, nên hãy chuẩn bị RAM trống cỡ dung lượng model 16 bit (chưa đo).
+  Bước thử sinh văn bản cần RAM trống bằng 1.2 lần file đầu ra, nếu không sẽ bị bỏ qua.
+- **Thời gian.** Đo trên CPU trong CI, đã gồm thời gian tải: SmolLM2-135M-Instruct sang `Q4_K_M` mất 64 giây từ đầu
+  đến cuối; Qwen2.5-0.5B-Instruct khoảng 1 phút. Model lớn hơn tăng gần tỉ lệ với kích thước và tốc độ tải.
+
+### File nằm ở đâu
+
+| Đường dẫn (trong `GPUPOOL_MODELS_DIR`) | Nội dung |
+| --- | --- |
+| `<name>.gguf` | model hoàn chỉnh, đã đăng ký trong thư viện (nguồn `convert`) |
+| `.hf/<owner>__<name>@<revision>/` | cache tải về. Được dùng lại khi retry và bởi các job khác của cùng model (chuyển sang loại lượng tử hoá khác về sau sẽ bỏ qua bước tải nếu đã bật **Keep downloaded source**); nếu không thì bị xoá khi job kết thúc (job lỗi giữ lại cho lần retry cho đến khi job bị xoá) |
+| `.convert/<job id>/` | chỗ làm việc tạm của một job (liên kết tới file nguồn, bản trung gian, đầu ra). Bị xoá khi job kết thúc; job *needs_review* chỉ giữ lại file đầu ra ở đây |
+
+gpupool chỉ xoá bên trong `.convert` và `.hf`. Thư mục bạn đưa vào làm nguồn chỉ được đọc, không bao giờ bị sửa.
+Job sống sót qua lần khởi động lại coordinator: job bị ngắt quay lại hàng đợi và chạy lại từ đầu (bản tải đã xong không
+tải lại).
+
+### Bảo mật
+
+Bộ chuyển đổi nạp tokenizer với `trust_remote_code`, nên file Python của chính repo sẽ chạy bên trong coordinator.
+Vì vậy chúng **không bao giờ được tải hay đưa vào thư mục làm việc** trừ khi bạn bật **Allow remote code**. Bộ chuyển
+đổi cũng chạy ngoại tuyến (`HF_HUB_OFFLINE=1`) và chỉ thấy một thư mục chứa liên kết tới các file trọng số, config và
+tokenizer đã chọn. Chỉ bật tuỳ chọn này cho repo bạn tin cậy, và chỉ khi chuyển đổi lỗi nếu không có nó (tokenizer
+tuỳ biến). Tên file trong danh sách repo có thể thoát ra ngoài thư mục tải sẽ bị bỏ qua. Repo Mistral còn kèm các
+bản `consolidated.*` của cùng trọng số; chúng bị bỏ qua.
+
+Repo gated hoặc riêng tư cần `HF_TOKEN` trên coordinator (và đã chấp nhận giấy phép trên huggingface.co), nếu không
+inspect và tải về bị từ chối với HTTP 403.
+
+### Build image không kèm bộ công cụ, hoặc sau mirror
+
+Image coordinator mặc định có sẵn bộ công cụ chuyển đổi (`WITH_CONVERT=1`): bộ chuyển đổi của llama.cpp, một venv
+PyTorch chỉ dùng CPU, và bản build CPU tĩnh của `llama-quantize`, `llama-tokenize` và `llama-simple`. Đo được:
+**1.77 GB** có bộ công cụ so với **560 MB** không có. Coordinator không bao giờ chuyển đổi có thể dùng image gọn:
+
+```bash
+docker build --build-arg WITH_CONVERT=0 -f docker/coordinator.Dockerfile -t gpupool-coordinator .
+# với compose: WITH_CONVERT=0 docker compose -f docker-compose.coordinator.yml build
+```
+
+Không có bộ công cụ thì mọi thứ khác vẫn chạy; inspect vẫn mô tả được model nhưng không biết kiến trúc có được hỗ
+trợ không, và bắt đầu job trả về HTTP 503 kèm lời giải thích (UI hiện thành một thông báo). Nơi `download.pytorch.org`
+bị chặn, hãy build với mirror của chỉ mục wheel PyTorch CPU (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`;
+`docker-compose.coordinator.yml` đọc `TORCH_INDEX_URL` từ môi trường). Mã nguồn llama.cpp lấy từ
+`vendor/llama.cpp-b11342.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
+Ngoài Docker, đặt `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` và `GPUPOOL_LLAMA_TOOLS_DIR` (xem Thiết lập).
+
 ## Thử trên một máy (cụm 3 server giả lập)
 
 `docker-compose.sim.yml` chạy một coordinator và ba "server", tự join đúng như cài thật (`GPUPOOL_JOIN`), để
@@ -117,11 +278,15 @@ server bằng RPC của llama.cpp. Cần Docker, Python 3 (chỉ thư viện chu
 `GPUPOOL_COORDINATOR_IMAGE`), rồi:
 
 ```bash
-python scripts/ci_e2e.py                       # tuỳ chọn: --project gpupool-ci --port 8080 --keep
+python scripts/ci_e2e.py                       # tuỳ chọn: --project gpupool-ci --port 8080 --keep --skip-convert
 ```
 
 Nó kiểm tra: ba agent tự join, thư viện model, các API, start đến *running*, một chat completion, `/metrics`, và
-stop (không còn engine nào trên mọi agent). Mã thoát 0 nghĩa là qua hết; khi lỗi nó in `docker compose logs` và
+stop (không còn engine nào trên mọi agent). Giai đoạn cuối chạy một lần chuyển đổi
+(`HuggingFaceTB/SmolLM2-135M-Instruct` sang `Q4_K_M`, khoảng 100 MB, ngay trong coordinator), phục vụ file đã chuyển,
+chia qua RPC, rồi gửi một chat; nó cần image coordinator có bộ công cụ (`WITH_CONVERT=1`, mặc định) và truy cập được
+huggingface.co (đặt `HF_TOKEN` để tránh giới hạn tốc độ cho người dùng ẩn danh). `--skip-convert` bỏ giai đoạn này.
+Mã thoát 0 nghĩa là qua hết; khi lỗi nó in `docker compose logs` và
 thoát với mã 1. Cụm được xoá sau khi chạy, trừ khi có `--keep`. Model được cache trong `GPUPOOL_CI_MODELS_DIR`
 (mặc định `<repo>/.cache/ci-models`).
 
@@ -350,7 +515,7 @@ một số mục, bằng cờ CLI. Thứ tự ưu tiên: cờ CLI > biến môi 
 bằng dấu phẩy, dict (`GPUPOOL_PATH_MAP`, `GPUPOOL_BUDGET_MB`) là JSON, boolean nhận `1/0/true/false`, dải cổng
 viết `9000-9999`. Mọi mục dưới đây đều tuỳ chọn, trừ `GPUPOOL_JOIN` trên agent.
 
-### Coordinator (22 thiết lập)
+### Coordinator (26 thiết lập)
 
 | Biến | Mặc định | Tác dụng |
 | --- | --- | --- |
@@ -376,10 +541,16 @@ viết `9000-9999`. Mọi mục dưới đây đều tuỳ chọn, trừ `GPUPOO
 | `HF_TOKEN` (hoặc `GPUPOOL_HF_TOKEN`) | rỗng | cho repo Hugging Face bị giới hạn hoặc private |
 | `GPUPOOL_PUBLIC_URL` | tự dò | địa chỉ server dùng để gọi coordinator, nếu tự dò sai (dùng trong lệnh join) |
 | `GPUPOOL_WEBHOOK_URL` | rỗng | webhook Slack/Discord/JSON chung để nhận cảnh báo (server chết, mất GPU, thiếu VRAM) |
+| `GPUPOOL_CONVERT_DIR` | không có (image: `/opt/llama.cpp`) | thư mục chứa `convert_hf_to_gguf.py`, `conversion/` và `gguf-py/` của llama.cpp; không đặt = không chuyển đổi được (job nhận HTTP 503) |
+| `GPUPOOL_CONVERT_PYTHON` | `python3` (image: `/opt/convert-venv/bin/python`) | trình thông dịch có các thư viện của bộ chuyển đổi (PyTorch, transformers) |
+| `GPUPOOL_LLAMA_TOOLS_DIR` | không có (image: `/opt/llama/bin`) | thư mục chứa bản build CPU của `llama-quantize`, `llama-tokenize` và `llama-simple` |
+| `GPUPOOL_CONVERT_THREADS` | `0` | số luồng cho `llama-quantize`; `0` = mọi CPU (tuỳ chọn *Threads* của từng job thắng) |
 
 Image Docker đặt sẵn `GPUPOOL_HOST`, `GPUPOOL_PORT`, `GPUPOOL_DB_PATH`, `GPUPOOL_MODELS_DIR` và
-`GPUPOOL_MODEL_ROOTS` như trên. `docker-compose.coordinator.yml` còn đọc `GPUPOOL_HOST_MODELS_DIR` (thư mục trên
-máy chủ được mount vào `/models`) và các biến proxy.
+`GPUPOOL_MODEL_ROOTS` như trên, cộng thêm `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` và
+`GPUPOOL_LLAMA_TOOLS_DIR` khi được build kèm bộ công cụ chuyển đổi (mặc định). `docker-compose.coordinator.yml` còn
+đọc `GPUPOOL_HOST_MODELS_DIR` (thư mục trên máy chủ được mount vào `/models`), các biến proxy, và các thiết lập build
+`WITH_CONVERT` và `TORCH_INDEX_URL` (xem [Serve model chưa có GGUF](#serve-model-chưa-có-gguf-chuyển-đổi)).
 
 ### Agent, mỗi server GPU một agent (17 thiết lập)
 
@@ -416,6 +587,11 @@ arg ở trên. API HTTP: [API.vi.md](API.vi.md). Thiết kế bên trong: [DESIG
 | --- | --- |
 | Server không bao giờ hiện trên UI | `docker logs gpupool-agent`: "connection refused" → port 8080 bị chặn hoặc sai địa chỉ trong lệnh join (dùng IP LAN của coordinator); "wrong cluster token" → copy lại lệnh join |
 | Log agent báo server đã bị xoá | server đã bị xoá trên UI; thêm lại ở đó (Servers → Add Server → agent URL `http://<ip-server>:7070`) |
+| Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by llama.cpp b11342's converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
+| Chuyển đổi: HTTP 503 "conversion is not set up ..." | image được build với `WITH_CONVERT=0`, hoặc ngoài Docker thì `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` thiếu hoặc sai. Dùng image đầy đủ hoặc sửa đường dẫn; thông báo nêu rõ thiếu gì |
+| Chuyển đổi: job *failed* với "not enough free disk space ..." | job cần khoảng nguồn + bản trung gian 16 bit + đầu ra (xem *Đĩa, RAM và thời gian*). Giải phóng dung lượng, hoặc trỏ `GPUPOOL_MODELS_DIR` sang đĩa lớn hơn, rồi **Retry** (bản tải đã xong được dùng lại) |
+| Chuyển đổi: job ở *needs_review* ("the tokenizer differs from Hugging Face on N of 8 test texts") | GGUF tách token một số đoạn văn khác với bản gốc, nên model có thể chạy sai ở các đoạn đó. Mở bảng kiểm tra để xem đoạn nào. Chỉ chấp nhận nếu chịu được rủi ro; nếu không, xoá job và dùng bản GGUF có sẵn |
+| Chuyển đổi: HTTP 403 "repo is gated or private" | đặt `HF_TOKEN` trên coordinator và chấp nhận giấy phép trên trang model, rồi thử lại |
 | Model kẹt ở *failed*: "not enough VRAM" | giải phóng GPU, bật thêm GPU, thêm server, hoặc dùng bản quantize nhỏ hơn |
 | `could not select device driver "" with capabilities: [[gpu]]` | server đó chưa cài NVIDIA Container Toolkit |
 | Log agent: `RPC firewall unavailable (...); RPC ports are NOT restricted` | đã đặt `GPUPOOL_RPC_FIREWALL=1` nhưng thiếu iptables hoặc container không có root/`NET_ADMIN`: thêm `--cap-add NET_ADMIN` (compose `cap_add: [NET_ADMIN]`) rồi tạo lại container, hoặc bỏ biến đó và tự đặt tường lửa cho 9000–9999 |

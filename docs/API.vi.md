@@ -3,8 +3,9 @@
 > Bản tiếng Việt. Bản tiếng Anh: [API.en.md](API.en.md). Giữ hai bản đồng bộ.
 
 Tài liệu này được viết từ code (`src/gpupool/coordinator/api.py`, `app.py`, `library_api.py`,
-`src/gpupool/router/proxy.py`, `src/gpupool/agent/app.py`, `src/gpupool/common/models.py`). Nó liệt kê mọi
-route HTTP của hai dịch vụ: **42 route** (coordinator 35, agent 7), cùng giao diện web tĩnh mà coordinator
+`src/gpupool/coordinator/convert_api.py`, `src/gpupool/converter/models.py`, `src/gpupool/router/proxy.py`,
+`src/gpupool/agent/app.py`, `src/gpupool/common/models.py`). Nó liệt kê mọi
+route HTTP của hai dịch vụ: **51 route** (coordinator 44, agent 7), cùng giao diện web tĩnh mà coordinator
 mount tại `/`. Danh sách đầy đủ nằm ở mục 11.
 
 | File đã quét | Số route |
@@ -12,6 +13,7 @@ mount tại `/`. Danh sách đầy đủ nằm ở mục 11.
 | `coordinator/api.py` (`/api`) | 16 |
 | `coordinator/library_api.py` | 6 (5 route thư viện, 1 route phục vụ file) |
 | `coordinator/app.py` | 10 (`/healthz`, `/metrics`, 2 internal, 6 `/admin`) |
+| `coordinator/convert_api.py` (`/api/convert`) | 9 |
 | `router/proxy.py` (`/v1`) | 3 |
 | `agent/app.py` | 7 |
 
@@ -285,7 +287,7 @@ repo, `502` không tới được HF hoặc câu trả lời không như mong đ
 | --- | --- | --- |
 | `name` | string | tên file duy nhất, ví dụ `qwen2.5-0.5b-instruct-q4_k_m.gguf` |
 | `path` | string | đường dẫn tuyệt đối trên coordinator |
-| `source` | `"hf"` / `"path"` | tải từ HF hay file cục bộ đã đăng ký |
+| `source` | `"hf"` / `"path"` / `"convert"` | tải từ HF, file cục bộ đã đăng ký, hoặc do một job chuyển đổi ghi ra ([mục 12](#12-chuyển-đổi-apiconvert)) |
 | `hf_repo`, `hf_file` | string hoặc null | nguồn HF |
 | `bytes` | int hoặc null | tổng kích thước khi biết |
 | `downloaded` | int | số byte đã ghi |
@@ -586,7 +588,7 @@ file, `502` tải lỗi.
 
 ## 11. Chỉ mục route
 
-Cả 42 route, để kiểm tra đầy đủ:
+Cả 51 route, để kiểm tra đầy đủ:
 
 | # | Method | Đường dẫn | Mục |
 | --- | --- | --- | --- |
@@ -632,5 +634,191 @@ Cả 42 route, để kiểm tra đầy đủ:
 | 40 | GET | `/engines/{engine_id}/memory` (agent) | 10 |
 | 41 | DELETE | `/engines/{engine_id}` (agent) | 10 |
 | 42 | POST | `/models/ensure` (agent) | 10 |
+| 43 | GET | `/api/convert/options` | 12 |
+| 44 | POST | `/api/convert/inspect` | 12 |
+| 45 | POST | `/api/convert` | 12 |
+| 46 | GET | `/api/convert` | 12 |
+| 47 | GET | `/api/convert/{job_id}` | 12 |
+| 48 | POST | `/api/convert/{job_id}/cancel` | 12 |
+| 49 | POST | `/api/convert/{job_id}/retry` | 12 |
+| 50 | POST | `/api/convert/{job_id}/accept` | 12 |
+| 51 | DELETE | `/api/convert/{job_id}` | 12 |
 
-Số lượng khớp với các decorator route tìm thấy trong code: 16 + 6 + 10 + 3 + 7 = 42.
+Số lượng khớp với các decorator route tìm thấy trong code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
+
+## 12. Chuyển đổi (`/api/convert`)
+
+Chuyển một model Hugging Face (hoặc một thư mục trọng số trên máy coordinator) sang GGUF và thêm vào thư viện model.
+Cả 9 route đều cần admin key và nằm trong `coordinator/convert_api.py`; cấu trúc dữ liệu lấy từ
+`converter/models.py`. Cách hoạt động: [DESIGN.vi.md](DESIGN.vi.md#17-chuyển-hugging-face-sang-gguf-converter); cách
+dùng: [QUICKSTART.vi.md](QUICKSTART.vi.md#serve-model-chưa-có-gguf-chuyển-đổi).
+
+| Method | Đường dẫn | Mục đích |
+| --- | --- | --- |
+| GET | `/api/convert/options` | chuyển đổi có dùng được không, mọi loại lượng tử hoá, cụm đang chứa được bao nhiêu |
+| POST | `/api/convert/inspect` | xem một nguồn mà không tải trọng số: thông tin, cảnh báo, ước lượng theo từng loại |
+| POST | `/api/convert` | bắt đầu một job chuyển đổi |
+| GET | `/api/convert` | liệt kê job, mới nhất trước |
+| GET | `/api/convert/{job_id}` | một job |
+| POST | `/api/convert/{job_id}/cancel` | huỷ job đang chờ hoặc đang chạy |
+| POST | `/api/convert/{job_id}/retry` | xếp lại hàng đợi job đã lỗi hoặc đã huỷ |
+| POST | `/api/convert/{job_id}/accept` | thêm file của job `needs_review` vào thư viện |
+| DELETE | `/api/convert/{job_id}` | xoá job đã kết thúc và phần còn lại của nó |
+
+Các mã trạng thái mà những route này dùng (body luôn là `{"detail": "<thông báo>"}`):
+
+| Mã | Ý nghĩa ở đây |
+| --- | --- |
+| 400 | repo id không hợp lệ (không phải `owner/name`), tên đầu ra không hợp lệ, tên kiểu ggml lạ trong `advanced`, đường dẫn thư mục không hợp lệ |
+| 403 | repo Hugging Face là gated hoặc riêng tư: đặt `HF_TOKEN` và chấp nhận giấy phép |
+| 404 | không tìm thấy repo hoặc revision trên Hugging Face, hoặc job id không tồn tại |
+| 409 | tên đầu ra đã bị dùng (thư viện, một file trong `models_dir`, hoặc job khác chưa xong); job không ở trạng thái cho phép thao tác đó |
+| 422 | nguồn không chuyển đổi được: kiến trúc không được bộ chuyển đổi được ghim (llama.cpp b11342) hỗ trợ, đã lượng tử hoá sẵn theo định dạng bộ chuyển đổi không đọc được (AWQ, bitsandbytes...), không có `config.json`, không có trọng số safetensors / PyTorch; cũng là body sai cấu trúc (ví dụ đưa cả `hf_repo` và `path`) |
+| 502 | không tới được Hugging Face hoặc nó trả lỗi bất ngờ |
+| 503 | bộ công cụ chuyển đổi chưa được cài đặt (`problem` của `/api/convert/options`) |
+| 507 | không đủ dung lượng đĩa trống. Mã này do worker phát ra, nên nó xuất hiện trong `error` của job *failed*, không phải làm phản hồi của một route |
+
+### Kiểu dữ liệu
+
+**`QuantOption`** (phần tử của `quant_options` và của `InspectResult.options`):
+
+| Trường | Kiểu | Ý nghĩa |
+| --- | --- | --- |
+| `type` | string | một trong `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `Q3_K_S`, `Q2_K` |
+| `bpw` | float | số bit trên trọng số dùng để ước lượng |
+| `tier` | string | `lossless`, `near_lossless`, `balanced`, `small` hoặc `tiny` |
+| `note` | string | ghi chú chất lượng, ví dụ mức thay đổi perplexity so với F16 |
+| `via` | `"convert"` / `"quantize"` | `F16`, `BF16` và `Q8_0` do bộ chuyển đổi ghi trực tiếp, các loại còn lại do llama-quantize |
+| `est_bytes` | int hoặc null | dung lượng file ước lượng; chỉ inspect mới điền |
+| `est_vram_mb` | int hoặc null | file + KV cache ở ngữ cảnh 4096 + phần overhead của runtime |
+| `fits_single_gpu`, `fits_pool` | bool hoặc null | so với GPU đơn lớn nhất / cả pool; null khi chưa có server GPU hoặc chưa biết số tham số |
+| `recommended` | bool | loại mà inspect đề xuất |
+
+**`SourceSpec`**: đúng một trong `hf_repo` (`"owner/name"`) hoặc `path` (thư mục tuyệt đối trên máy coordinator, được
+dịch qua `path_map` giống đường dẫn thư viện); `revision` (mặc định `"main"`) áp dụng cho `hf_repo`.
+
+**`InspectResult`**:
+
+| Trường | Kiểu | Ý nghĩa |
+| --- | --- | --- |
+| `source` | `SourceSpec` | đầu vào |
+| `architecture`, `model_type` | string hoặc null | `architectures[0]` và `model_type` trong `config.json` |
+| `supported` | bool hoặc null | theo bộ chuyển đổi được ghim; null = thiếu bộ công cụ nên không biết |
+| `params`, `n_layers`, `context_length` | int hoặc null | |
+| `weight_format` | `"safetensors"` / `"pytorch_bin"` / `"none"` | `none` nghĩa là không có gì để chuyển |
+| `prequantized` | string hoặc null | `quantization_config.quant_method` (`awq`, `gptq`, `fp8`...) |
+| `prequant_supported` | bool hoặc null | bộ chuyển đổi có đọc được định dạng đó không |
+| `source_bytes` | int | số byte của các file được chọn (dung lượng tải với Hugging Face) |
+| `files`, `skipped` | `[{name, bytes}]`, `[string]` | các file sẽ dùng / các file bị bỏ qua |
+| `remote_code` | bool | nguồn có `*.py` hoặc `auto_map`; không tải hay chạy nếu chưa cho phép |
+| `gated` | bool | |
+| `base_model` | string hoặc null | base model trong model card: hãy chuyển cái đó thay vì repo đã lượng tử hoá |
+| `gguf_alternatives` | `[string]` | các repo Hugging Face đã có bản GGUF |
+| `options` | `[QuantOption]` | mọi loại kèm ước lượng |
+| `recommended`, `recommend_reasons` | `QuantType`, `[string]` | loại được đề xuất và lý do |
+| `warnings` | `[string]` | |
+
+**`ConvertRequest`** (body của `POST /api/convert`):
+
+| Trường | Kiểu | Mặc định | Ý nghĩa |
+| --- | --- | --- | --- |
+| `source` | `SourceSpec` | bắt buộc | |
+| `quant` | `QuantType` | `"Q4_K_M"` | |
+| `name` | string hoặc null | `<model>-<QUANT>.gguf` | tên file đầu ra: chữ, số, `.`, `_`, `-`, kết thúc bằng `.gguf`, không giống tên phần của file chia nhỏ |
+| `keep_source` | bool | `false` | giữ các file Hugging Face đã tải sau khi thành công (thư mục không bao giờ bị đụng tới) |
+| `advanced.intermediate` | `auto` / `f16` / `bf16` / `f32` | `auto` | file 16/32 bit ghi trước khi lượng tử hoá |
+| `advanced.output_tensor_type`, `advanced.token_embedding_type` | tên kiểu ggml hoặc null | null | `llama-quantize --output-tensor-type` / `--token-embedding-type` (ví dụ `q8_0`) |
+| `advanced.leave_output_tensor` | bool | `false` | `llama-quantize --leave-output-tensor` |
+| `advanced.pure` | bool | `false` | `llama-quantize --pure` |
+| `advanced.allow_remote_code` | bool | `false` | tải và chạy các file `*.py` của repo bên trong coordinator (nguy hiểm) |
+| `advanced.validate_generation` | bool | `true` | sinh vài token trên CPU sau khi chuyển đổi |
+| `advanced.threads` | int >= 0 | `0` | `0` = `GPUPOOL_CONVERT_THREADS` |
+
+Các tuỳ chọn lượng tử hoá trong `advanced` bị bỏ qua với `F16`, `BF16` và `Q8_0`.
+
+**`ConvertJob`**:
+
+| Trường | Kiểu | Ý nghĩa |
+| --- | --- | --- |
+| `id` | string | 12 ký tự hex |
+| `request` | `ConvertRequest` | đúng như đã gửi |
+| `state` | string | `queued`, `downloading`, `converting`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
+| `stage_progress` | float hoặc null | 0..1 trong giai đoạn hiện tại, null khi chưa biết |
+| `bytes_done`, `bytes_total` | int, int hoặc null | giai đoạn tải |
+| `output_name` | string | tên file trong thư viện |
+| `output_bytes`, `est_output_bytes` | int hoặc null | dung lượng thật và ước lượng |
+| `validation` | `Validation` hoặc null | xem bên dưới |
+| `error` | string hoặc null | vì sao lỗi, hoặc ghi chú *needs review* |
+| `log_tail` | `[string]` | các dòng cuối của công cụ hiện tại hoặc gần nhất |
+| `created_at`, `started_at`, `finished_at` | float hoặc null | thời gian unix |
+
+Các trạng thái đang hoạt động là `queued`, `downloading`, `converting`, `quantizing`, `validating`; `done`, `failed` và
+`cancelled` là trạng thái cuối; `needs_review` chờ `accept` hoặc xoá. Job lấy từ thư mục cũng đi qua `downloading` (nó
+chỉ tạo liên kết tới các file). `F16`, `BF16` và `Q8_0` bỏ qua `quantizing`.
+
+**`Validation`**: `header_ok` (bool hoặc null), `architecture`, `n_layers`, `vocab_size`, `chat_template` (bool),
+`tokenizer_ok` (bool, null = không chạy được), `tokenizer_cases` (`[{text, hf, gguf, match}]`: id token của 8 đoạn
+văn thử, từ Hugging Face và từ GGUF), `generation_ok` (bool, null = bỏ qua), `generation_sample` (string),
+`warnings`, `errors`. `header_ok: false` làm job *failed*; `tokenizer_ok: false` hoặc `generation_ok: false` đưa nó
+vào `needs_review`; giá trị null không phải là lỗi.
+
+### `GET /api/convert/options`
+
+Trả `{"available": bool, "problem": string hoặc null, "quant_options": [QuantOption], "cluster": {"largest_gpu_mb",
+"pool_mb"}}`. `problem` nói thiếu gì khi bộ công cụ chưa được cài đặt (UI hiển thị nó). Các ước lượng trong
+`quant_options` để trống ở đây; hãy dùng inspect cho một model cụ thể.
+
+### `POST /api/convert/inspect`
+
+Body: một `SourceSpec`. Đọc cấu hình và danh sách file (với thư mục thì đọc header safetensors) mà không tải trọng
+số; trả một `InspectResult` có dung lượng, VRAM, mức vừa/không vừa theo từng loại và phần đề xuất. Nó chạy được kể cả
+khi thiếu bộ công cụ, khi đó `supported` là null. Lỗi: `400`, `403`, `404`, `422` (không có `config.json`), `502`.
+
+### `POST /api/convert`
+
+Body: một `ConvertRequest`. Kiểm tra bộ công cụ, inspect nguồn, từ chối những gì không thể chạy, rồi xếp job vào hàng
+đợi. Trả `ConvertJob` (trạng thái `queued`). Lỗi: `400`, `403`, `404`, `409`, `422`, `502`, `503` như bảng trên. Các
+job chạy lần lượt từng cái, theo thứ tự gửi.
+
+### `GET /api/convert`, `GET /api/convert/{job_id}`
+
+Danh sách `ConvertJob` (mới nhất trước), hoặc một job (`404` nếu id không tồn tại). Hãy poll một job để theo dõi tiến độ.
+
+### `POST /api/convert/{job_id}/cancel`
+
+Huỷ job đang chờ hoặc đang chạy: công cụ đang chạy bị kill và thư mục tạm của job bị xoá. Trả job (trạng thái
+`cancelled`). `409` nếu job không còn hoạt động.
+
+### `POST /api/convert/{job_id}/retry`
+
+Xếp lại hàng đợi job `failed` hoặc `cancelled` với cùng yêu cầu; bản tải đã xong trong cache được dùng lại. Trả job
+(trạng thái `queued`). `409` nếu job đang ở trạng thái khác hoặc tên đầu ra đã bị dùng trong lúc đó.
+
+### `POST /api/convert/{job_id}/accept`
+
+Với job `needs_review`: chuyển file đã chuyển đổi vào thư viện bất chấp bước kiểm tra lỗi. Trả job (trạng thái `done`).
+`409` nếu job không ở `needs_review`, file đã mất, hoặc tên đã bị dùng.
+
+### `DELETE /api/convert/{job_id}`
+
+Xoá job và thư mục tạm của nó (file của job *needs_review* bị bỏ). Trả `{"ok": true}`. `409` khi job còn hoạt động
+(hãy huỷ trước), `404` nếu không tồn tại.
+
+```bash
+# 1. xem trước
+curl -s -X POST $COORD/api/convert/inspect -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"hf_repo": "Qwen/Qwen2.5-0.5B-Instruct"}' | jq '{architecture, supported, params, recommended, recommend_reasons}'
+
+# 2. chuyển đổi (thư mục cũng được: "source": {"path": "/models/hf/my-model"})
+curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"source": {"hf_repo": "Qwen/Qwen2.5-0.5B-Instruct"}, "quant": "Q4_K_M"}' | jq .id
+
+# 3. theo dõi, rồi deploy file từ thư viện
+curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id> | jq '{state, stage_progress, error}'
+
+# needs_review: chấp nhận (hoặc DELETE job)
+curl -s -X POST -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id>/accept | jq .state
+```
+
+Job hoàn tất thêm một `LibraryItem` với `source: "convert"` (`hf_repo` được đặt với nguồn Hugging Face), được
+`GET /api/library` liệt kê như mọi file khác và xoá được bằng `DELETE /api/library/{name}`.

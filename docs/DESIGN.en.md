@@ -125,7 +125,7 @@ Details, bodies and error codes are in [API.en.md](API.en.md). Groups:
 | Agent | cluster token (`/health` open) | `/health`, `/report`, `POST /engines`, `GET/DELETE /engines/{id}`, `GET /engines/{id}/memory` (buffer sizes parsed from the engine log), `POST /models/ensure` (download into `.part`, atomic rename; also fetches every part of a split GGUF, part 1 last) |
 | Coordinator internal | cluster token | `/internal/join` (self-registration), `/internal/heartbeat` (push, registered servers only), `GET /files/{name}` (library file for heads; name resolved through the library, never joined to a path), `/healthz` open |
 | Admin | admin key | `/admin/models`, `/admin/models/{name}/scale`, `/admin/deploy/{model}?dry_run=1`, `/admin/replicas/{id}`, `/admin/status` (the CLI uses these) |
-| Web UI API | admin key | `/api/state`, `/api/servers`, `/api/servers/{id}/gpus/{dev}` (enable/disable a GPU in the pool), `/api/models/{name}` (PUT, start, stop, scaling, plan, delete), `/api/capacity`, `/api/simulate`, `/api/rebalance`, `/api/recommend`, `/api/events`, `/api/library`, `/api/hf/files` |
+| Web UI API | admin key | `/api/state`, `/api/servers`, `/api/servers/{id}/gpus/{dev}` (enable/disable a GPU in the pool), `/api/models/{name}` (PUT, start, stop, scaling, plan, delete), `/api/capacity`, `/api/simulate`, `/api/rebalance`, `/api/recommend`, `/api/events`, `/api/library`, `/api/hf/files`, `/api/convert*` (Hugging Face to GGUF conversion, section 17) |
 | OpenAI | API keys | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions` (`stream: true` supported) |
 | Metrics | none | `GET /metrics` (Prometheus text) |
 
@@ -474,7 +474,7 @@ placement is missing from the data, the sample is skipped (partial data would bi
 ## 13. State persistence and crash recovery
 
 SQLite (WAL, busy timeout 5 s). Tables: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
-`gpu_flags`, `events` (last 1000), `control_state`, `model_calibration`, plus the library's own tables.
+`gpu_flags`, `events` (last 1000), `control_state`, `model_calibration`, `convert_jobs` (section 17.6), plus the library's own tables.
 
 | Persisted | Where | Survives restart |
 | --- | --- | --- |
@@ -530,7 +530,8 @@ src/gpupool/
   coordinator/
     app.py                    FastAPI wiring, /internal/*, /admin/*, /metrics, UI mount, watchdog
     api.py                    /api/* for the web UI
-    library.py, library_api.py  GGUF library (HF download, paths), /files/{name}
+    library.py, library_api.py  GGUF library (HF download, paths, converted files), /files/{name}
+    convert_api.py            /api/convert/* (9 routes of the conversion feature)
     store.py                  SQLite schema and accessors
     poller.py                 pulls /report from every registered agent
     reconciler.py             tick loop, launch, drain, failure, preemption, rebalance, calibration
@@ -541,10 +542,18 @@ src/gpupool/
   router/
     balancer.py               prefix key, rendezvous hash, outstanding counters
     proxy.py                  /v1/*, retries, streaming, cold-start wait, Prometheus metrics
+  converter/                  Hugging Face -> GGUF conversion (section 17)
+    models.py                 API contracts: SourceSpec, InspectResult, ConvertRequest, ConvertJob, Validation
+    quant.py                  quantization table, size/VRAM estimates, recommendation, output names
+    source.py                 HfClient, file selection, inspect
+    jobs.py                   ConvertManager: SQLite jobs, single worker, pipeline, cleanup
+    toolchain.py              tool discovery, command builders, run_tool, supported architectures
+    validate.py               header, tokenizer and generation checks
+    hf_tokenize.py            standalone script run by the converter's Python (HF token ids)
   ui/                         index.html, app.js, styles.css, vendor/alpine.min.js, favicon.svg
 tests/                        test_agent_*  test_scheduler_*  test_coordinator_*  test_router_*
                               test_library_unit  test_net  test_config_env  test_onecmd
-                              test_ui_static  test_ci_e2e_static
+                              test_ui_static  test_ci_e2e_static  test_converter_*  test_coordinator_convert_api
 scripts/                      e2e_local.py  ci_e2e.py  ui_mock_server.py
 docker/                       agent.Dockerfile  coordinator.Dockerfile
 docker-compose.*.yml          coordinator, agent, sim (simulated 3-server cluster), ci
@@ -566,6 +575,8 @@ Real-engine runs (results in [TEST_REPORT.en.md](TEST_REPORT.en.md)):
   a `CPU` device running a real `ggml-rpc-server -d CPU`, so RPC is real over TCP.
 - `scripts/ci_e2e.py` with `docker-compose.ci.yml`: a real coordinator and 3 real agents (Docker images, CPU
   only) serve a tiny model split over several servers; catches Dockerfile errors and wrong Python in images.
+  Its last stage converts a Hugging Face model (SmolLM2-135M-Instruct) to GGUF inside the coordinator, serves the
+  result split over RPC and sends a chat (`--skip-convert` leaves it out).
 - `docker-compose.sim.yml`: simulated 3-server cluster for demos; `GPUPOOL_FAKE_DEVICES` makes agents
   report different GPUs while sharing the one real card.
 - `scripts/ui_mock_server.py`: in-memory coordinator API for working on the UI without a cluster.
@@ -585,3 +596,155 @@ Real-engine runs (results in [TEST_REPORT.en.md](TEST_REPORT.en.md)):
   and llama.cpp binaries are passed via `llama_dir` or baked into the image.
 - No model size limit; the goal is to use the pool's total usable VRAM, so multi-node split is the main
   path for big models. Margins are configurable per node (`margin_pct`, `margin_min_mb`, `budget_mb`).
+
+## 17. Hugging Face to GGUF conversion (`converter/`)
+
+Only GGUF files can be served, but many models are published only as safetensors / PyTorch weights. The
+coordinator therefore runs **conversion jobs**: source files (a Hugging Face repo or a folder) →
+llama.cpp's `convert_hf_to_gguf.py` → `llama-quantize` → validation → the model library. Usage:
+[QUICKSTART.en.md](QUICKSTART.en.md#serving-a-model-that-has-no-gguf-convert); routes:
+[API.en.md](API.en.md#12-conversion-apiconvert).
+
+The toolchain is optional. `Toolchain.problem()` returns what is missing (`GPUPOOL_CONVERT_DIR`,
+`GPUPOOL_CONVERT_PYTHON`, `GPUPOOL_LLAMA_TOOLS_DIR`); without it everything else works and `POST /api/convert`
+answers 503 with that explanation. `convert_api.py` imports the converter lazily so the router loads either way.
+
+| Module | Job |
+| --- | --- |
+| `converter/models.py` | pydantic contracts: `SourceSpec`, `InspectResult`, `QuantOption`, `ConvertRequest`, `ConvertJob`, `Validation`, the state sets. Every field is part of the HTTP API and the UI |
+| `converter/quant.py` | the quantization table (bpw, tier, quality note), size and VRAM estimates, `recommend`, `plan_steps`, output naming |
+| `converter/source.py` | `HfClient` (listing, model info, `config.json`, download), `select_files`, `local_files`, `inspect_source` |
+| `converter/jobs.py` | `ConvertManager`: job table in SQLite, the single worker, the pipeline, cleanup |
+| `converter/toolchain.py` | where the tools are, command builders, `run_tool` (low priority, process-tree kill), supported architectures |
+| `converter/validate.py` | header, tokenizer and generation checks |
+| `converter/hf_tokenize.py` | runs *under the converter's Python*: token ids of the probe texts from Hugging Face (gpupool is not installed there) |
+| `coordinator/convert_api.py` | the 9 routes, mapping `ConvertError.status` to HTTP |
+
+### 17.1 Pipeline
+
+```
+queued → downloading → converting → quantizing → validating → done
+                                                          └→ needs_review → (accept) → done
+(any active state) → failed | cancelled
+```
+
+1. **Source files.** For Hugging Face the tree listing gives names and sizes; `select_files` keeps `config.json`,
+   tokenizer files and the weights, and drops everything else. Safetensors win over `pytorch_model*.bin` when both
+   exist; `consolidated.*` (the Mistral-native duplicate of the weights, which doubled the download) is skipped;
+   `*.py` is kept only with `allow_remote_code`; names that could escape the download folder (absolute, `..`,
+   backslash, drive letter, hidden or `onnx`/`openvino`/... directories) are dropped, and `_check_rel` re-checks the
+   selection before use.
+2. **Download** (Hugging Face only). One file at a time into `.part`, size checked against the listing and the
+   `Content-Length`, then an atomic rename; the writes run in a thread so the event loop that also serves inference
+   is never blocked. A file already in the cache with the expected size is not fetched again.
+3. **Stage.** The selected files are linked (symlink, else hardlink, else copy) into `.convert/<job>/src`.
+4. **Convert.** `convert_hf_to_gguf.py src --outfile <outtype>.gguf --outtype <t>` with `plan_steps`: `F16`, `BF16`
+   and `Q8_0` are written by the converter directly; every other type first writes a 16-bit intermediate (`auto` =
+   bf16 for bf16 weights, otherwise f16).
+5. **Quantize.** `llama-quantize [flags] intermediate out.gguf TYPE [threads]`; the intermediate is deleted at once.
+   The advanced flags are checked against a whitelist of ggml type names so a user value can never become an extra
+   command-line argument.
+6. **Validate** (17.4). **Publish**: move the file to `models_dir/<name>` and register it (`LibraryItem.source`
+   `"convert"`), then clean up, and only then report `done`.
+
+Progress comes from the tools' own output: tqdm percentages for download and conversion, `[ i/ n]` lines of
+llama-quantize; a progress bar that redraws one line is kept as its latest state, and the row is written to SQLite
+at most once a second. The last 200 lines are kept in memory and 50 in the database.
+
+### 17.2 One worker, FIFO, low priority
+
+One asyncio worker takes one job at a time, in submission order. Reasons: conversion and quantization use all the
+CPUs and a lot of RAM and disk, two at once would only slow each other down and could exhaust the disk; and the
+coordinator also serves the router. Every tool is started in its own process group at low priority
+(`BELOW_NORMAL_PRIORITY_CLASS` on Windows, `nice 10` elsewhere). Cancelling kills the whole process tree (the
+converter forks helpers), waits for any thread work still running, and only then deletes the scratch folder, so a
+cancelled job leaves no process and no open file. The converter runs with `HF_HUB_OFFLINE=1` and
+`TRANSFORMERS_OFFLINE=1`.
+
+Names are checked at submit time (library, a file in `models_dir`, an unfinished job) with no `await` between the
+check and the insert, so two submits cannot both pass; `retry` and `accept` check again.
+
+### 17.3 Caching and disk
+
+Downloads go to `models_dir/.hf/<owner>__<name>@<revision>/`, shared by retries and by other jobs for the same model
+and revision (several quantization types queued together, or later ones when `keep_source` kept the files): a file
+already there is not downloaded again. The cache is dropped when the job ends unless `keep_source` is set or another active job needs it; a failed or cancelled job keeps it for the retry, and
+deleting that job releases it. The scratch folder of a job is `models_dir/.convert/<job>/`.
+
+Free disk space is checked before each heavy stage with a 512 MB margin: before the download
+(`remaining download + intermediate + output`), before converting (`intermediate + output`) and before quantizing
+(`output`). The intermediate is estimated as `params × 2` bytes (×4 for f32), or the source size when the count is
+unknown. Failing early with the numbers beats a half-written multi-GB file; the check raises `ConvertError` with
+status 507, which the worker turns into a *failed* job whose `error` explains it.
+
+### 17.4 Validation and why the policy is what it is
+
+`validate.py` never raises for a bad model; problems land in the `Validation` result and `jobs.py` applies the policy:
+
+| Result | Outcome | Why |
+| --- | --- | --- |
+| `header_ok` false (unreadable GGUF, no architecture, no tokenizer) | job **failed** | such a file cannot be served at all; nothing is published |
+| `tokenizer_ok` false or `generation_ok` false | **needs_review**, file kept, not in the library | it may be a converter bug or an acceptable quirk: only a person can tell, so the decision (accept or delete) is theirs. A wrong tokenizer silently degrades answers, which is why it is checked at all |
+| a check that could not run (`null`) | warning only | not being able to check (no RAM for the CPU run, Hugging Face tokenizer failed to load, timeout) says nothing against the model, and blocking on it would make small coordinators unusable |
+
+The tokenizer check tokenizes 8 fixed probe texts (English, Vietnamese, code, numbers, emoji with a ZWJ sequence,
+odd spacing, blank lines, CJK) with Hugging Face (`hf_tokenize.py`, `add_special_tokens=False`) and with
+`llama-tokenize --no-bos --no-parse-special --no-escape -f <file>` on the GGUF, and compares the ids. These are the
+places converted tokenizers usually go wrong. The generation check runs `llama-simple -ngl 0` (always on the CPU, to
+leave the GPUs to inference) for 16 tokens of "The capital of France is"; it is skipped when free RAM is below
+1.2 × the file size, and its timeout is `120 s + 60 s per GB`. The GGUF is read with `gguf` and every derived object
+is dropped before returning, because on Windows a lingering memory map blocks moving the file afterwards.
+
+### 17.5 Size and VRAM estimates
+
+`inspect` lists every type with an estimated file size, VRAM (file + f16 KV cache at context 4096 + 300 MB) and
+whether it fits one GPU or the pool. The first version used one bits-per-weight average per type, taken from
+llama-quantize's Llama-3-8B sizes; on Qwen2.5-0.5B it came out **24 % low**. Two effects were missing:
+
+- **Embeddings.** llama-quantize keeps the token embedding and output matrices near 8 bits in the low-bit types.
+  They are about 13 % of Llama-3-8B but 28 % of Qwen2.5-0.5B. `estimate_bytes` costs them separately
+  (`vocab × hidden`, twice when input and output are not tied, at 8.5 bpw) and derives the bpw of the remaining
+  weights from the whole-model reference.
+- **K-quant fallback.** K-quants and `IQ4_XS` need rows that are a multiple of 256 values. When the hidden size is
+  not (Qwen2.5-0.5B: 896, SmolLM2-135M: 576), llama-quantize falls back per tensor to a legacy type (`Q4_K` →
+  `Q5_0`, `Q5_K` → `Q5_1`, `Q6_K` → `Q8_0`, the others → `IQ4_NL`), so the table lists the bpw of those fallbacks
+  (4.5 to 8.5).
+
+With both, the estimate is within about 2 % of the real files (Qwen2.5-0.5B `Q4_K_M`: 390.7 MB estimated, 397.8 MB
+real; SmolLM2-135M: 103.1 against 105.5 MB). The same estimate is stored on the job (`est_output_bytes`) and drives
+the disk checks.
+
+The recommendation (`quant.recommend`) walks the ladder `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M` and takes the first that
+fits one GPU, then the first that fits the pool (split over RPC is slower, and the reason says so). Models under
+3 B parameters use only `Q8_0`, `Q6_K`, `Q5_K_M`, because small models lose quality fastest. Without GPUs there is
+no fit information and a size-based default applies (`Q8_0` below 3 B, `Q5_K_M` below 15 B, else `Q4_K_M`).
+`IQ1`/`IQ2` types are not offered (llama-quantize needs an importance matrix for them).
+
+### 17.6 Persistence, restart and cleanup boundaries
+
+Job rows live in the coordinator's SQLite database (table `convert_jobs`, its own connection like the library,
+WAL), written on every state change and at most once a second for progress. On startup, jobs a previous process
+left in an active state other than `queued` go back to `queued` with progress reset (their partial outputs are
+discarded, finished downloads stay in the cache) and the worker starts; a sweep removes scratch folders no job
+owns. A clean shutdown cancels the worker and leaves the row active, so the next start requeues it.
+
+What gets deleted is deliberately narrow:
+
+- Only paths **inside** `models_dir/.convert` and `models_dir/.hf` are ever removed (`_rmtree` resolves the path
+  and refuses anything else, never follows links). Nothing else under `models_dir` is touched except the library
+  file of a deleted `convert` item, and only when it is a regular file directly inside `models_dir`.
+- A folder given as the source is never modified: the converter reads a staging folder of links, and `local_files`
+  does not enter symlinked directories.
+- A `needs_review` job keeps only its output file in `.convert/<job>/`; its cache is released.
+- If registering the file in the library fails after the move, the file is removed again, so no unregistered file
+  stays under a taken name. A cleanup problem after a successful publish is logged and does not fail the job.
+
+### 17.7 Security
+
+`convert_hf_to_gguf.py` loads tokenizers with `trust_remote_code=True`, which executes `*.py` files found next to
+the weights. A repository's Python code would therefore run inside the coordinator, with its permissions. So repo
+`*.py` files are never downloaded or staged unless the request sets `allow_remote_code`, the converter runs offline
+and sees only the staging folder, and the UI marks the option as dangerous. The same flag is passed to the Hugging
+Face tokenizer of the validation step. The image runs
+the toolchain from `/opt` (llama.cpp's converter and a CPU-only PyTorch venv, plus static CPU builds of
+`llama-quantize`, `llama-tokenize`, `llama-simple`); `WITH_CONVERT=0` leaves all of it out.

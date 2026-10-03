@@ -123,7 +123,7 @@ Chi tiết, body và mã lỗi nằm trong [API.vi.md](API.vi.md). Các nhóm:
 | Agent | cluster token (`/health` để mở) | `/health`, `/report`, `POST /engines`, `GET/DELETE /engines/{id}`, `GET /engines/{id}/memory` (kích thước buffer parse từ log engine), `POST /models/ensure` (tải vào `.part`, đổi tên nguyên tử; cũng tải mọi phần của GGUF bị chia nhỏ, phần 1 sau cùng) |
 | Coordinator nội bộ | cluster token | `/internal/join` (tự đăng ký), `/internal/heartbeat` (push, chỉ server đã đăng ký), `GET /files/{name}` (file thư viện cho head; tên được phân giải qua library, không bao giờ ghép vào đường dẫn), `/healthz` để mở |
 | Admin | admin key | `/admin/models`, `/admin/models/{name}/scale`, `/admin/deploy/{model}?dry_run=1`, `/admin/replicas/{id}`, `/admin/status` (CLI dùng nhóm này) |
-| API cho Web UI | admin key | `/api/state`, `/api/servers`, `/api/servers/{id}/gpus/{dev}` (bật/tắt một GPU trong pool), `/api/models/{name}` (PUT, start, stop, scaling, plan, delete), `/api/capacity`, `/api/simulate`, `/api/rebalance`, `/api/recommend`, `/api/events`, `/api/library`, `/api/hf/files` |
+| API cho Web UI | admin key | `/api/state`, `/api/servers`, `/api/servers/{id}/gpus/{dev}` (bật/tắt một GPU trong pool), `/api/models/{name}` (PUT, start, stop, scaling, plan, delete), `/api/capacity`, `/api/simulate`, `/api/rebalance`, `/api/recommend`, `/api/events`, `/api/library`, `/api/hf/files`, `/api/convert*` (chuyển Hugging Face sang GGUF, mục 17) |
 | OpenAI | API key | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions` (hỗ trợ `stream: true`) |
 | Metrics | không | `GET /metrics` (text Prometheus) |
 
@@ -457,7 +457,7 @@ placement thì mẫu bị bỏ (dữ liệu thiếu sẽ làm lệch tỉ lệ x
 ## 13. Lưu trạng thái và phục hồi sau sự cố
 
 SQLite (WAL, busy timeout 5 s). Các bảng: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
-`gpu_flags`, `events` (1000 dòng cuối), `control_state`, `model_calibration`, cộng các bảng riêng của library.
+`gpu_flags`, `events` (1000 dòng cuối), `control_state`, `model_calibration`, `convert_jobs` (mục 17.6), cộng các bảng riêng của library.
 
 | Được lưu | Ở đâu | Sống sót sau restart |
 | --- | --- | --- |
@@ -510,7 +510,8 @@ src/gpupool/
   coordinator/
     app.py                    ghép FastAPI, /internal/*, /admin/*, /metrics, mount UI, watchdog
     api.py                    /api/* cho web UI
-    library.py, library_api.py  thư viện GGUF (tải HF, đường dẫn), /files/{name}
+    library.py, library_api.py  thư viện GGUF (tải HF, đường dẫn, file đã chuyển đổi), /files/{name}
+    convert_api.py            /api/convert/* (9 route của tính năng chuyển đổi)
     store.py                  schema SQLite và các hàm truy cập
     poller.py                 kéo /report từ mọi agent đã đăng ký
     reconciler.py             vòng tick, launch, drain, lỗi, preemption, rebalance, hiệu chỉnh
@@ -521,10 +522,18 @@ src/gpupool/
   router/
     balancer.py               prefix key, rendezvous hash, bộ đếm outstanding
     proxy.py                  /v1/*, retry, streaming, chờ cold start, metric Prometheus
+  converter/                  chuyển Hugging Face -> GGUF (mục 17)
+    models.py                 hợp đồng API: SourceSpec, InspectResult, ConvertRequest, ConvertJob, Validation
+    quant.py                  bảng lượng tử hoá, ước lượng dung lượng/VRAM, đề xuất, tên file đầu ra
+    source.py                 HfClient, chọn file, inspect
+    jobs.py                   ConvertManager: job trong SQLite, worker duy nhất, pipeline, dọn dẹp
+    toolchain.py              tìm công cụ, dựng câu lệnh, run_tool, kiến trúc được hỗ trợ
+    validate.py               kiểm tra header, tokenizer và sinh văn bản
+    hf_tokenize.py            script độc lập chạy dưới Python của bộ chuyển đổi (id token HF)
   ui/                         index.html, app.js, styles.css, vendor/alpine.min.js, favicon.svg
 tests/                        test_agent_*  test_scheduler_*  test_coordinator_*  test_router_*
                               test_library_unit  test_net  test_config_env  test_onecmd
-                              test_ui_static  test_ci_e2e_static
+                              test_ui_static  test_ci_e2e_static  test_converter_*  test_coordinator_convert_api
 scripts/                      e2e_local.py  ci_e2e.py  ui_mock_server.py
 docker/                       agent.Dockerfile  coordinator.Dockerfile
 docker-compose.*.yml          coordinator, agent, sim (cluster 3 server giả lập), ci
@@ -546,6 +555,8 @@ Các lần chạy với engine thật (kết quả trong [TEST_REPORT.vi.md](TES
   device `CPU` chạy `ggml-rpc-server -d CPU` thật, nên RPC là thật qua TCP.
 - `scripts/ci_e2e.py` với `docker-compose.ci.yml`: một coordinator thật và 3 agent thật (image Docker, chỉ CPU)
   phục vụ một model nhỏ chia trên nhiều server; bắt lỗi Dockerfile và Python sai trong image.
+  Giai đoạn cuối của nó chuyển một model Hugging Face (SmolLM2-135M-Instruct) sang GGUF ngay trong coordinator, phục
+  vụ kết quả chia qua RPC rồi gửi một chat (`--skip-convert` bỏ giai đoạn này).
 - `docker-compose.sim.yml`: cluster 3 server giả lập cho demo; `GPUPOOL_FAKE_DEVICES` làm agent báo các GPU
   khác nhau trong khi dùng chung một card thật.
 - `scripts/ui_mock_server.py`: API coordinator trong bộ nhớ để làm việc với UI mà không cần cluster.
@@ -565,3 +576,156 @@ Các lần chạy với engine thật (kết quả trong [TEST_REPORT.vi.md](TES
   được truyền qua `llama_dir` hoặc đóng sẵn vào image.
 - Không giới hạn kích thước model; mục tiêu là dùng tổng VRAM usable của pool, nên chia multi-node là đường
   chính cho model lớn. Margin cấu hình được theo từng node (`margin_pct`, `margin_min_mb`, `budget_mb`).
+
+## 17. Chuyển Hugging Face sang GGUF (`converter/`)
+
+Chỉ file GGUF mới serve được, nhưng nhiều model chỉ được phát hành dưới dạng trọng số safetensors / PyTorch. Vì vậy
+coordinator chạy các **job chuyển đổi**: file nguồn (một repo Hugging Face hoặc một thư mục) →
+`convert_hf_to_gguf.py` của llama.cpp → `llama-quantize` → kiểm tra → thư viện model. Cách dùng:
+[QUICKSTART.vi.md](QUICKSTART.vi.md#serve-model-chưa-có-gguf-chuyển-đổi); các route:
+[API.vi.md](API.vi.md#12-chuyển-đổi-apiconvert).
+
+Bộ công cụ là tuỳ chọn. `Toolchain.problem()` trả về những gì còn thiếu (`GPUPOOL_CONVERT_DIR`,
+`GPUPOOL_CONVERT_PYTHON`, `GPUPOOL_LLAMA_TOOLS_DIR`); khi thiếu thì mọi thứ khác vẫn chạy và `POST /api/convert`
+trả 503 kèm lời giải thích đó. `convert_api.py` import converter một cách lười (lazy) nên router vẫn nạp được trong
+cả hai trường hợp.
+
+| Module | Việc |
+| --- | --- |
+| `converter/models.py` | các hợp đồng pydantic: `SourceSpec`, `InspectResult`, `QuantOption`, `ConvertRequest`, `ConvertJob`, `Validation`, các tập trạng thái. Mọi trường đều là một phần của API HTTP và UI |
+| `converter/quant.py` | bảng lượng tử hoá (bpw, tier, ghi chú chất lượng), ước lượng dung lượng và VRAM, `recommend`, `plan_steps`, đặt tên file đầu ra |
+| `converter/source.py` | `HfClient` (danh sách file, thông tin model, `config.json`, tải về), `select_files`, `local_files`, `inspect_source` |
+| `converter/jobs.py` | `ConvertManager`: bảng job trong SQLite, worker duy nhất, pipeline, dọn dẹp |
+| `converter/toolchain.py` | vị trí các công cụ, hàm dựng câu lệnh, `run_tool` (ưu tiên thấp, kill cả cây tiến trình), danh sách kiến trúc được hỗ trợ |
+| `converter/validate.py` | các bước kiểm tra header, tokenizer và sinh văn bản |
+| `converter/hf_tokenize.py` | chạy *dưới Python của bộ chuyển đổi*: id token của các đoạn văn thử theo Hugging Face (gpupool không được cài ở đó) |
+| `coordinator/convert_api.py` | 9 route, ánh xạ `ConvertError.status` sang HTTP |
+
+### 17.1 Pipeline
+
+```
+queued → downloading → converting → quantizing → validating → done
+                                                          └→ needs_review → (accept) → done
+(mọi trạng thái đang hoạt động) → failed | cancelled
+```
+
+1. **File nguồn.** Với Hugging Face, danh sách cây thư mục cho tên và dung lượng; `select_files` giữ `config.json`, các
+   file tokenizer và trọng số, bỏ mọi thứ khác. Safetensors được ưu tiên hơn `pytorch_model*.bin` khi có cả hai;
+   `consolidated.*` (bản trọng số gốc của Mistral, trùng với bản kia và từng làm gấp đôi lượng tải) bị bỏ qua; `*.py`
+   chỉ được giữ khi có `allow_remote_code`; tên có thể thoát ra ngoài thư mục tải (tuyệt đối, `..`, dấu gạch ngược,
+   ký tự ổ đĩa, thư mục ẩn hoặc `onnx`/`openvino`/...) bị loại, và `_check_rel` kiểm tra lại phần đã chọn trước khi dùng.
+2. **Tải về** (chỉ Hugging Face). Mỗi lần một file vào `.part`, kiểm tra dung lượng so với danh sách và
+   `Content-Length`, rồi đổi tên nguyên tử; việc ghi chạy trong một thread để event loop (vốn còn phục vụ inference)
+   không bao giờ bị chặn. File đã có trong cache với đúng dung lượng thì không tải lại.
+3. **Staging.** Các file đã chọn được liên kết (symlink, không được thì hardlink, không nữa thì copy) vào
+   `.convert/<job>/src`.
+4. **Chuyển đổi.** `convert_hf_to_gguf.py src --outfile <outtype>.gguf --outtype <t>` theo `plan_steps`: `F16`, `BF16` và
+   `Q8_0` do bộ chuyển đổi ghi trực tiếp; mọi loại khác trước hết ghi một bản trung gian 16 bit (`auto` = bf16 nếu
+   trọng số là bf16, còn lại f16).
+5. **Lượng tử hoá.** `llama-quantize [cờ] bản-trung-gian out.gguf LOẠI [luồng]`; bản trung gian bị xoá ngay. Các cờ
+   nâng cao được đối chiếu với danh sách tên kiểu ggml cho phép, nên giá trị người dùng nhập không thể trở thành một
+   đối số dòng lệnh thừa.
+6. **Kiểm tra** (17.4). **Xuất bản**: chuyển file tới `models_dir/<name>` và đăng ký (`LibraryItem.source`
+   `"convert"`), rồi dọn dẹp, và chỉ sau đó mới báo `done`.
+
+Tiến độ lấy từ chính output của các công cụ: phần trăm tqdm cho bước tải và chuyển đổi, các dòng `[ i/ n]` của
+llama-quantize; thanh tiến độ vẽ lại trên một dòng chỉ giữ trạng thái mới nhất, và dòng trong SQLite được ghi tối đa
+mỗi giây một lần. 200 dòng cuối được giữ trong bộ nhớ và 50 dòng trong cơ sở dữ liệu.
+
+### 17.2 Một worker, FIFO, ưu tiên thấp
+
+Một worker asyncio lấy mỗi lần một job, theo thứ tự gửi. Lý do: chuyển đổi và lượng tử hoá dùng mọi CPU cùng nhiều RAM
+và đĩa, chạy hai cái cùng lúc chỉ làm chậm nhau và có thể làm đầy đĩa; và coordinator còn phải phục vụ router. Mọi công
+cụ được khởi chạy trong nhóm tiến trình riêng với ưu tiên thấp (`BELOW_NORMAL_PRIORITY_CLASS` trên Windows, `nice 10`
+ở nơi khác). Huỷ job sẽ kill cả cây tiến trình (bộ chuyển đổi tạo tiến trình con), chờ các việc thread đang chạy, và chỉ
+sau đó mới xoá thư mục tạm, nên job bị huỷ không để lại tiến trình hay file đang mở. Bộ chuyển đổi chạy với
+`HF_HUB_OFFLINE=1` và `TRANSFORMERS_OFFLINE=1`.
+
+Tên được kiểm tra khi gửi (thư viện, một file trong `models_dir`, một job chưa xong) và không có `await` nào giữa
+bước kiểm tra và bước chèn, nên hai lần gửi không thể cùng qua; `retry` và `accept` kiểm tra lại.
+
+### 17.3 Cache và đĩa
+
+Bản tải về nằm ở `models_dir/.hf/<owner>__<name>@<revision>/`, dùng chung cho retry và cho các job khác của cùng model
+và revision (nhiều loại lượng tử hoá được xếp hàng cùng lúc, hoặc các lần sau nếu `keep_source` đã giữ file): file đã
+có ở đó thì không tải lại. Cache bị bỏ khi job kết thúc, trừ khi đặt `keep_source` hoặc một job đang hoạt động khác
+cần nó; job lỗi hoặc đã huỷ giữ nó cho lần retry, và xoá job đó sẽ giải phóng nó. Thư mục tạm của một job là
+`models_dir/.convert/<job>/`.
+
+Dung lượng đĩa trống được kiểm tra trước mỗi giai đoạn nặng, với biên 512 MB: trước khi tải
+(`phần còn phải tải + bản trung gian + đầu ra`), trước khi chuyển đổi (`bản trung gian + đầu ra`) và trước khi lượng
+tử hoá (`đầu ra`). Bản trung gian được ước lượng là `params × 2` byte (×4 với f32), hoặc bằng dung lượng nguồn khi chưa
+biết số tham số. Lỗi sớm kèm con số còn hơn một file nhiều GB ghi dở; bước kiểm tra phát `ConvertError` với mã 507,
+worker biến nó thành job *failed* có `error` giải thích.
+
+### 17.4 Kiểm tra, và vì sao chính sách là như vậy
+
+`validate.py` không bao giờ ném lỗi vì một model xấu; vấn đề được ghi vào kết quả `Validation` và `jobs.py` áp dụng
+chính sách:
+
+| Kết quả | Hệ quả | Vì sao |
+| --- | --- | --- |
+| `header_ok` false (GGUF không đọc được, không có kiến trúc, không có tokenizer) | job **failed** | file như vậy hoàn toàn không serve được; không xuất bản gì |
+| `tokenizer_ok` false hoặc `generation_ok` false | **needs_review**, giữ file, chưa vào thư viện | có thể là lỗi của bộ chuyển đổi hoặc một sai khác chấp nhận được: chỉ con người mới phân biệt được, nên quyết định (chấp nhận hay xoá) thuộc về họ. Tokenizer sai âm thầm làm câu trả lời kém đi, vì thế nó mới được kiểm tra |
+| một bước kiểm tra không chạy được (`null`) | chỉ cảnh báo | không kiểm tra được (không đủ RAM để chạy CPU, tokenizer Hugging Face không nạp được, hết thời gian chờ) không nói lên điều gì chống lại model, và chặn vì điều đó sẽ làm coordinator nhỏ không dùng được |
+
+Bước kiểm tra tokenizer tách token 8 đoạn văn thử cố định (tiếng Anh, tiếng Việt, code, số, emoji có chuỗi ZWJ, khoảng
+trắng lạ, dòng trống, CJK) bằng Hugging Face (`hf_tokenize.py`, `add_special_tokens=False`) và bằng
+`llama-tokenize --no-bos --no-parse-special --no-escape -f <file>` trên file GGUF, rồi so sánh các id. Đó là những chỗ
+tokenizer sau khi chuyển đổi thường sai. Bước sinh văn bản chạy `llama-simple -ngl 0` (luôn trên CPU, để dành GPU cho
+inference) 16 token cho câu "The capital of France is"; nó bị bỏ qua khi RAM trống dưới 1.2 × dung lượng file, và thời
+gian chờ tối đa là `120 s + 60 s mỗi GB`. File GGUF được đọc bằng `gguf` và mọi đối tượng dẫn xuất được bỏ đi trước khi
+trả về, vì trên Windows một memory map còn sót sẽ chặn việc di chuyển file sau đó.
+
+### 17.5 Ước lượng dung lượng và VRAM
+
+`inspect` liệt kê mọi loại kèm dung lượng file ước lượng, VRAM (file + KV cache f16 ở ngữ cảnh 4096 + 300 MB) và việc
+nó vừa một GPU hay vừa pool. Phiên bản đầu dùng một giá trị bit-trên-trọng-số trung bình cho mỗi loại, lấy từ dung
+lượng llama-quantize công bố cho Llama-3-8B; trên Qwen2.5-0.5B nó ra **thấp hơn 24 %**. Thiếu hai yếu tố:
+
+- **Embedding.** llama-quantize giữ ma trận token embedding và ma trận đầu ra gần 8 bit ở các loại bit thấp. Chúng
+  chiếm khoảng 13 % Llama-3-8B nhưng 28 % Qwen2.5-0.5B. `estimate_bytes` tính chúng riêng
+  (`vocab × hidden`, gấp đôi khi embedding vào và ra không dùng chung, ở 8.5 bpw) và suy ra bpw của phần trọng số còn
+  lại từ giá trị trung bình tham chiếu của cả model.
+- **Phương án dự phòng của K-quant.** K-quant và `IQ4_XS` cần các hàng có số giá trị chia hết cho 256. Khi hidden size
+  không như vậy (Qwen2.5-0.5B: 896, SmolLM2-135M: 576), llama-quantize dự phòng theo từng tensor sang một loại cũ hơn
+  (`Q4_K` → `Q5_0`, `Q5_K` → `Q5_1`, `Q6_K` → `Q8_0`, các loại còn lại → `IQ4_NL`), nên bảng có bpw của các loại dự
+  phòng đó (4.5 đến 8.5).
+
+Với cả hai yếu tố, ước lượng sai lệch khoảng 2 % so với file thật (Qwen2.5-0.5B `Q4_K_M`: ước lượng 390.7 MB, thật
+397.8 MB; SmolLM2-135M: 103.1 so với 105.5 MB). Cùng ước lượng đó được lưu trên job (`est_output_bytes`) và điều khiển
+các bước kiểm tra đĩa.
+
+Phần đề xuất (`quant.recommend`) đi theo bậc thang `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M` và lấy loại đầu tiên vừa một GPU,
+rồi loại đầu tiên vừa pool (chia qua RPC chậm hơn, và lý do có nói rõ). Model dưới 3 tỷ tham số chỉ dùng `Q8_0`, `Q6_K`,
+`Q5_K_M`, vì model nhỏ mất chất lượng nhanh nhất. Khi không có GPU thì không có thông tin vừa/không vừa và áp dụng giá
+trị mặc định theo kích thước (`Q8_0` dưới 3 tỷ, `Q5_K_M` dưới 15 tỷ, còn lại `Q4_K_M`). Các loại `IQ1`/`IQ2` không được
+cung cấp (llama-quantize cần importance matrix cho chúng).
+
+### 17.6 Lưu trạng thái, khởi động lại và ranh giới dọn dẹp
+
+Các dòng job nằm trong cơ sở dữ liệu SQLite của coordinator (bảng `convert_jobs`, kết nối riêng giống library, WAL), ghi
+mỗi lần đổi trạng thái và tối đa mỗi giây một lần cho tiến độ. Khi khởi động, các job mà tiến trình trước để ở trạng
+thái hoạt động khác `queued` được đưa về `queued` và đặt lại tiến độ (đầu ra dang dở bị bỏ, bản tải đã xong vẫn ở
+cache) rồi worker chạy; một lượt quét xoá các thư mục tạm không job nào sở hữu. Tắt máy sạch sẽ huỷ worker và để dòng
+ở trạng thái hoạt động, nên lần khởi động sau sẽ xếp lại hàng đợi.
+
+Phạm vi xoá được giữ rất hẹp có chủ đích:
+
+- Chỉ các đường dẫn **bên trong** `models_dir/.convert` và `models_dir/.hf` mới bị xoá (`_rmtree` phân giải đường dẫn
+  và từ chối mọi thứ khác, không bao giờ đi theo liên kết). Không đụng tới thứ gì khác trong `models_dir`, trừ file
+  thư viện của một mục `convert` bị xoá, và chỉ khi đó là một file thường nằm trực tiếp trong `models_dir`.
+- Thư mục được đưa vào làm nguồn không bao giờ bị sửa: bộ chuyển đổi đọc một thư mục staging chứa liên kết, và
+  `local_files` không đi vào các thư mục là symlink.
+- Job `needs_review` chỉ giữ file đầu ra trong `.convert/<job>/`; cache của nó được giải phóng.
+- Nếu đăng ký file vào thư viện lỗi sau khi đã chuyển, file bị xoá lại, nên không có file chưa đăng ký nào nằm dưới một
+  tên đã bị chiếm. Sự cố dọn dẹp sau một lần xuất bản thành công chỉ được ghi log và không làm job lỗi.
+
+### 17.7 Bảo mật
+
+`convert_hf_to_gguf.py` nạp tokenizer với `trust_remote_code=True`, tức là thực thi các file `*.py` nằm cạnh trọng
+số. Mã Python của một repo vì thế sẽ chạy bên trong coordinator, với quyền của nó. Cho nên các file `*.py` của repo
+không bao giờ được tải hay đưa vào staging trừ khi yêu cầu đặt `allow_remote_code`, bộ chuyển đổi chạy ngoại tuyến và
+chỉ thấy thư mục staging, và UI đánh dấu tuỳ chọn này là nguy hiểm. Cùng cờ đó được truyền cho tokenizer Hugging Face
+của bước kiểm tra. Image chạy bộ công cụ từ `/opt` (bộ chuyển đổi của llama.cpp và một venv PyTorch chỉ dùng CPU, cùng
+các bản build CPU tĩnh của `llama-quantize`, `llama-tokenize`, `llama-simple`); `WITH_CONVERT=0` bỏ toàn bộ chúng.

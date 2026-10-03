@@ -91,6 +91,169 @@ your real address.
 
 To require a key from clients, start the coordinator with `-e GPUPOOL_API_KEYS=key1,key2`.
 
+## Serving a model that has no GGUF (convert)
+
+gpupool serves GGUF files. Many models are published only as Hugging Face weights (`safetensors` or PyTorch
+`.bin`). The coordinator can convert such a model to GGUF itself and put it in the model library.
+
+**Prefer an existing GGUF build when there is one.** Downloading a ready-made file is faster and needs no
+conversion. The inspect step lists published GGUF builds of the model (`gguf_alternatives`, shown with a
+*download instead* link). Use convert when none exists, when you want a quantization nobody published, or when the
+weights are already on the server's disk.
+
+### How, in the UI
+
+1. **Models → Convert a model**. (The **Add model** dialog offers **Convert to GGUF** when the repository you typed
+   holds no `.gguf` file.) Choose **Hugging Face repo** (`owner/name`, optional revision) or **Folder on the
+   server** (absolute path of a folder with `config.json`, the tokenizer files and the weights; host paths are
+   translated like library paths, see [Using model files already on the server](#using-model-files-already-on-the-server)).
+2. **Inspect**. Nothing is downloaded: gpupool reads the config and the file listing. You see the architecture and
+   whether the pinned converter (llama.cpp b11342) supports it, parameters, layers, context length, download
+   size, and warnings (gated repo, already quantized, ships custom code, ready-made GGUF builds).
+3. Pick a **quantization type** (next section). Each row shows the estimated file size and VRAM, whether it fits
+   one GPU or only the pool, and which type is recommended, with the reasons.
+4. Check the **output file name** (default `<model>-<TYPE>.gguf`; must end in `.gguf`), optionally **Keep downloaded
+   source**, optionally **Advanced**. Then **Start conversion**.
+5. Watch the **Conversions** panel on the same page: stages *Download → Convert → Quantize → Validate*, a progress
+   bar, the log and the validation details. Jobs run one at a time, at low CPU priority so inference on the
+   coordinator host stays responsive. **Cancel**, **Retry** (failed or cancelled jobs) and delete are there too.
+6. When the job is *done* the file is in the library (source `convert`). **Deploy this model** opens the new-model
+   form with it.
+
+The same steps are available over HTTP: [API.en.md](API.en.md#12-conversion-apiconvert).
+
+### Choosing a quantization type
+
+Quantization shrinks the file and the memory it needs at some cost in quality. The quality figures are
+llama-quantize's published perplexity change against F16 on Llama-3-8B (closer to 0 is better); *bpw* is bits per
+weight for the whole model.
+
+| Type | bpw | Quality | Typical use |
+| --- | --- | --- | --- |
+| `BF16`, `F16` | 16 | lossless | reference copy, largest file; written by the converter directly |
+| `Q8_0` | 8.52 | +0.0026, indistinguishable from F16 in practice | small models, or plenty of VRAM; written directly |
+| `Q6_K` | 6.57 | +0.0217, very close to the original | quality first, when it fits |
+| `Q5_K_M` | 5.70 | +0.0569, excellent | a good default for small models |
+| `Q5_K_S` | 5.57 | +0.1049 | slightly smaller and lossier than `Q5_K_M` |
+| `Q4_K_M` | 4.90 | +0.1754 | the usual size/quality sweet spot for large models |
+| `Q4_K_S` | 4.67 | +0.2689 | a little smaller than `Q4_K_M` |
+| `IQ4_XS` | 4.25 | close to `Q4_K_S` | smaller than `Q4_K_S` for similar quality |
+| `Q4_0` | 4.64 | +0.4685 | legacy; `Q4_K_S` is usually better |
+| `Q3_K_L` | 4.31 | +0.5562, noticeable loss | tight memory |
+| `Q3_K_M` | 4.00 | +0.6569, clear loss | only when memory is tight |
+| `Q3_K_S` | 3.65 | +1.6321, large loss | last resort |
+| `Q2_K` | 3.17 | +3.5199, severe loss | last resort |
+
+IQ1 and IQ2 types are not offered: llama-quantize refuses them without an importance matrix, which gpupool does
+not compute.
+
+The recommended type follows these rules:
+
+- **Large models** (3 B parameters or more): the best of `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M` that fits **one GPU**;
+  if none does, the best that fits the **pool** (the model is then split over RPC, which is slower). If even
+  `Q4_K_M` does not fit, `Q4_K_M` is still suggested, with a reason saying so; `Q3_K_M` and `Q2_K` stay in the
+  list as options.
+- **Small models** (under 3 B): never defaulted below `Q5_K_M`, because small models lose quality fastest. Only
+  when nothing from `Q8_0`, `Q6_K`, `Q5_K_M` fits is `Q4_K_M` considered, and the reason says so.
+- With no GPU in the cluster (no fit information): `Q8_0` for small models, `Q5_K_M` below 15 B, otherwise
+  `Q4_K_M`. When the parameter count is unknown: `Q4_K_M`.
+
+K-quants need rows that are a multiple of 256 values. Models with another hidden size (SmolLM2-135M: 576,
+Qwen2.5-0.5B: 896) get a legacy type for those tensors, which makes the file bigger than the table suggests. The
+sizes shown in the dialog already account for that and for the embedding matrices.
+
+**A source that is already quantized loses quality twice** (its own quantization, then yours). gpupool can read
+`fp8`, `gptq`, `bitnet`, `compressed-tensors`, `modelopt` and `mxfp4` sources (with a warning). **AWQ and
+bitsandbytes models are not supported**: the request is refused with HTTP 422. Convert the model's original (base)
+model instead; the dialog offers it when the model card names one.
+
+### Advanced options in plain words
+
+| Option | What it does |
+| --- | --- |
+| Intermediate precision | The 16/32-bit file written before quantizing. *Auto* keeps the model's own precision (bf16 weights stay bf16, otherwise f16). f32 is rarely needed and doubles the temporary disk space |
+| Output tensor type, Token embedding type | Precision of the output layer and of the word-embedding table. Keeping them higher (for example `q8_0`) costs a little size and can help quality on small types. Default lets llama-quantize decide |
+| Leave output tensor | Do not quantize the output layer at all: a slightly bigger file, slightly better quality |
+| Pure | Use the chosen type for every tensor instead of the usual mix. Usually lowers quality for the same size; for experiments |
+| Validate generation | Load the file on the CPU and generate a few tokens (on by default). The header and tokenizer checks always run |
+| Allow remote code | Download the repository's own `*.py` files and run them inside the coordinator. See Security below |
+| Threads | CPU threads for quantizing (`0` = `GPUPOOL_CONVERT_THREADS`; that one at `0` = all CPUs) |
+
+For `F16`, `BF16` and `Q8_0` the converter writes the final file directly, so the quantization options do not
+apply (the UI greys them out).
+
+### What validation does, and `needs_review`
+
+Before a file enters the library gpupool checks it:
+
+1. **GGUF header**: readable, with an architecture and a tokenizer. If this fails the job is *failed* and nothing
+   enters the library.
+2. **Tokenizer**: 8 fixed texts (English, Vietnamese, code, numbers, emoji including a ZWJ family, odd spacing,
+   blank lines, Japanese/Chinese) are tokenized by Hugging Face and by `llama-tokenize` on the GGUF. The token ids
+   must be identical.
+3. **Generation** (unless switched off): the model continues "The capital of France is" for 16 tokens on the CPU.
+   It is skipped, with a warning, when free RAM is below 1.2 times the file size; a timeout is also only a warning.
+
+A tokenizer mismatch or a failed generation parks the job in **needs_review**: the file exists but is **not** in
+the library. Open the validation panel to see which texts differ. **Accept anyway**
+(`POST /api/convert/{id}/accept`) adds it to the library; deleting the job discards it. A check that could not run
+at all (for example the Hugging Face tokenizer failed to load) is only a warning and does not block the job.
+
+### Disk, RAM and time
+
+- **Disk.** The peak is about *source + 16-bit intermediate + output*. Roughly, a 7 B model needs about 14 GB of
+  download, 14 GB of intermediate and about 4 GB of output at `Q4_K_M`. gpupool checks the free space before the
+  download and before each heavy stage (with a 512 MB margin); if there is not enough the job fails with a message
+  saying how much is needed and how much is free. The intermediate is deleted as soon as the quantized file
+  exists. `F16`, `BF16` and `Q8_0` have no separate intermediate.
+- **RAM.** The converter loads the weights through PyTorch, so plan free RAM of the order of the 16-bit model size
+  (not measured). The generation check needs free RAM of 1.2 times the output file, else it is skipped.
+- **Time.** Measured on CPU in CI, download included: SmolLM2-135M-Instruct to `Q4_K_M` in 64 s end to end;
+  Qwen2.5-0.5B-Instruct about 1 min. Bigger models scale roughly with their size and with the download speed.
+
+### Where files go
+
+| Path (under `GPUPOOL_MODELS_DIR`) | What |
+| --- | --- |
+| `<name>.gguf` | the finished model, registered in the library (source `convert`) |
+| `.hf/<owner>__<name>@<revision>/` | download cache. Reused by retries and by other jobs for the same model (converting another quantization type later skips the download if **Keep downloaded source** was on); otherwise removed when the job ends (a failed job keeps it for the retry until the job is deleted) |
+| `.convert/<job id>/` | scratch space of one job (links to the source files, the intermediate, the output). Removed when the job ends; a *needs_review* job keeps only its output file here |
+
+gpupool only ever deletes inside `.convert` and `.hf`. A folder you give as the source is only read, never changed.
+Jobs survive a coordinator restart: an interrupted job goes back to the queue and starts again (a finished download
+is not repeated).
+
+### Security
+
+The converter loads tokenizers with `trust_remote_code`, so a repository's own Python files would run inside the
+coordinator. They are therefore **never downloaded or staged** unless you turn on **Allow remote code**. The
+converter also runs offline (`HF_HUB_OFFLINE=1`) and sees only a staging folder of links to the selected weight,
+config and tokenizer files. Turn the option on only for a repository you trust, and only when the conversion fails
+without it (custom tokenizers). File names in a repository listing that could escape the download folder are
+ignored. Mistral repositories also ship `consolidated.*` copies of the same weights; those are skipped.
+
+Gated or private repositories need `HF_TOKEN` on the coordinator (and the licence accepted on huggingface.co),
+otherwise inspect and download are refused with HTTP 403.
+
+### Building the image without the toolchain, or behind a mirror
+
+The coordinator image ships the conversion toolchain by default (`WITH_CONVERT=1`): llama.cpp's converter, a
+CPU-only PyTorch venv, and static CPU builds of `llama-quantize`, `llama-tokenize` and `llama-simple`. Measured:
+**1.77 GB** with the toolchain against **560 MB** without. A coordinator that never converts can use the lean image:
+
+```bash
+docker build --build-arg WITH_CONVERT=0 -f docker/coordinator.Dockerfile -t gpupool-coordinator .
+# with compose: WITH_CONVERT=0 docker compose -f docker-compose.coordinator.yml build
+```
+
+Without the toolchain everything else works; inspect still describes the model but cannot tell whether its
+architecture is supported, and starting a job returns HTTP 503 with an explanation (the UI shows it as a notice).
+Where `download.pytorch.org` is blocked, build with a mirror of the PyTorch CPU wheel index
+(`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`; `docker-compose.coordinator.yml` reads
+`TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11342.tar.gz` when it is
+there, like the agent image, see [Building without GitHub](#building-without-github). Outside Docker set
+`GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` and `GPUPOOL_LLAMA_TOOLS_DIR` (see Settings).
+
 ## Try it on one machine (simulated 3-server cluster)
 
 `docker-compose.sim.yml` starts a coordinator and three "servers" joined exactly like a real install
@@ -119,11 +282,15 @@ for the first model download (verified by SHA-256, then cached). Build the image
 `GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`), then:
 
 ```bash
-python scripts/ci_e2e.py                       # options: --project gpupool-ci --port 8080 --keep
+python scripts/ci_e2e.py                       # options: --project gpupool-ci --port 8080 --keep --skip-convert
 ```
 
 It checks: the three agents self-join, the model library, the API surface, start to *running*, a chat
-completion, `/metrics`, and stop (no engine left on any agent). Exit code 0 means all passed; on failure
+completion, `/metrics`, and stop (no engine left on any agent). The last stage runs a conversion
+(`HuggingFaceTB/SmolLM2-135M-Instruct` to `Q4_K_M`, about 100 MB, inside the coordinator), serves the converted
+file split over RPC and sends a chat; it needs a coordinator image with the toolchain (`WITH_CONVERT=1`, the
+default) and internet access to huggingface.co (set `HF_TOKEN` to avoid anonymous rate limits). `--skip-convert`
+leaves it out. Exit code 0 means all passed; on failure
 it prints `docker compose logs` and exits 1. The cluster is removed afterwards unless `--keep` is given.
 The model is cached in `GPUPOOL_CI_MODELS_DIR` (default `<repo>/.cache/ci-models`).
 
@@ -354,7 +521,7 @@ for a few, a CLI flag. Precedence: CLI flag > environment > TOML file > default.
 dicts (`GPUPOOL_PATH_MAP`, `GPUPOOL_BUDGET_MB`) are JSON, booleans accept `1/0/true/false`, a port range is
 `9000-9999`. Everything below is optional except `GPUPOOL_JOIN` on an agent.
 
-### Coordinator (22 settings)
+### Coordinator (26 settings)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -380,10 +547,16 @@ dicts (`GPUPOOL_PATH_MAP`, `GPUPOOL_BUDGET_MB`) are JSON, booleans accept `1/0/t
 | `HF_TOKEN` (or `GPUPOOL_HF_TOKEN`) | empty | for gated or private Hugging Face repos |
 | `GPUPOOL_PUBLIC_URL` | detected | address servers use to reach the coordinator, if detection is wrong (used in the join command) |
 | `GPUPOOL_WEBHOOK_URL` | empty | Slack/Discord/generic JSON webhook for alerts (server down, GPU lost, not enough VRAM) |
+| `GPUPOOL_CONVERT_DIR` | none (image: `/opt/llama.cpp`) | folder with llama.cpp's `convert_hf_to_gguf.py`, `conversion/` and `gguf-py/`; unset = conversion unavailable (jobs get HTTP 503) |
+| `GPUPOOL_CONVERT_PYTHON` | `python3` (image: `/opt/convert-venv/bin/python`) | interpreter with the converter's dependencies (PyTorch, transformers) |
+| `GPUPOOL_LLAMA_TOOLS_DIR` | none (image: `/opt/llama/bin`) | folder with the CPU builds of `llama-quantize`, `llama-tokenize` and `llama-simple` |
+| `GPUPOOL_CONVERT_THREADS` | `0` | threads for `llama-quantize`; `0` = all CPUs (a job's own *Threads* option wins) |
 
 The Docker image sets `GPUPOOL_HOST`, `GPUPOOL_PORT`, `GPUPOOL_DB_PATH`, `GPUPOOL_MODELS_DIR` and
-`GPUPOOL_MODEL_ROOTS` as shown. `docker-compose.coordinator.yml` also reads `GPUPOOL_HOST_MODELS_DIR` (host folder
-mounted at `/models`) and the proxy variables.
+`GPUPOOL_MODEL_ROOTS` as shown, plus `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` and `GPUPOOL_LLAMA_TOOLS_DIR`
+when it is built with the conversion toolchain (the default). `docker-compose.coordinator.yml` also reads
+`GPUPOOL_HOST_MODELS_DIR` (host folder mounted at `/models`), the proxy variables, and the build settings
+`WITH_CONVERT` and `TORCH_INDEX_URL` (see [Serving a model that has no GGUF](#serving-a-model-that-has-no-gguf-convert)).
 
 ### Agent, one per GPU server (17 settings)
 
@@ -420,6 +593,11 @@ described above. HTTP API: [API.en.md](API.en.md). Internals: [DESIGN.en.md](DES
 | --- | --- |
 | Server never appears in the UI | `docker logs gpupool-agent`: "connection refused" → port 8080 blocked or wrong address in the join command (use the coordinator's LAN IP); "wrong cluster token" → copy the join command again |
 | Agent log says the server was removed | it was deleted in the UI; add it again there (Servers → Add Server → agent URL `http://<server-ip>:7070`) |
+| Convert: inspect or the job says the architecture is not supported ("not supported by llama.cpp b11342's converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
+| Convert: HTTP 503 "conversion is not set up ..." | the image was built with `WITH_CONVERT=0`, or `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` are missing or wrong outside Docker. Use the full image or fix the paths; the message names what is missing |
+| Convert: a job *failed* with "not enough free disk space ..." | the job needs about source + 16-bit intermediate + output (see *Disk, RAM and time*). Free space, or point `GPUPOOL_MODELS_DIR` at a bigger disk, then **Retry** (finished downloads are reused) |
+| Convert: the job is in *needs_review* ("the tokenizer differs from Hugging Face on N of 8 test texts") | the GGUF tokenizes some texts differently from the original, so the model may misbehave on them. Open the validation panel to see which texts. Accept only if you can live with it; otherwise delete the job and use a ready-made GGUF |
+| Convert: HTTP 403 "repo is gated or private" | set `HF_TOKEN` on the coordinator and accept the licence on the model page, then try again |
 | Model stuck in *failed*: "not enough VRAM" | free GPUs, enable more GPUs, add a server, or use a smaller quantization |
 | `could not select device driver "" with capabilities: [[gpu]]` | the NVIDIA Container Toolkit is not installed on that server |
 | Agent log: `RPC firewall unavailable (...); RPC ports are NOT restricted` | `GPUPOOL_RPC_FIREWALL=1` but iptables is missing or the container lacks root/`NET_ADMIN`: add `--cap-add NET_ADMIN` (compose `cap_add: [NET_ADMIN]`) and recreate the container, or unset the variable and firewall 9000–9999 yourself |

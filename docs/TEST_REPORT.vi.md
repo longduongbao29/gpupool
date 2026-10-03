@@ -2,6 +2,45 @@
 
 > Bản tiếng Việt. Bản tiếng Anh: [TEST_REPORT.en.md](TEST_REPORT.en.md). Hai bản phải được cập nhật cùng nhau.
 
+## 2026-10-03 (chuyển Hugging Face sang GGUF)
+
+Tính năng: coordinator chuyển model Hugging Face sang GGUF với loại lượng tử hoá tuỳ chọn
+(commit 6766ba1, thiết kế ở [DESIGN.vi.md](DESIGN.vi.md#17-chuyển-hugging-face-sang-gguf-converter)). Máy: cùng
+laptop Windows 11, Docker trong WSL2, llama.cpp b11342, image coordinator được build kèm bộ công cụ chuyển đổi.
+
+### Kết quả
+
+| Test | Kết quả |
+| --- | --- |
+| Unit test (`uv run pytest`) | 768 pass |
+| End-to-end trong CI (`scripts/ci_e2e.py`) có giai đoạn chuyển đổi | 21/21 kiểm tra pass. `HuggingFaceTB/SmolLM2-135M-Instruct` được chuyển sang `Q4_K_M` (105,453,984 byte) trong 64 s gồm cả tải về, serve chia qua RPC, và trả lời một chat |
+| `Qwen/Qwen2.5-0.5B-Instruct` sang `Q4_K_M` | 397,807,488 byte. Header GGUF ổn, có chat template, id token trùng Hugging Face ở 8/8 trường hợp (tiếng Anh, tiếng Việt, code, số, chuỗi emoji ZWJ, khoảng trắng, xuống dòng, CJK), sinh văn bản "The capital of France is Paris..." |
+| Thư mục sau các job | `.convert` và `.hf` trong thư mục model trống |
+| Dung lượng image coordinator | 1.77 GB có bộ công cụ (`WITH_CONVERT=1`), 560 MB không có (`WITH_CONVERT=0`) |
+
+### Ước lượng dung lượng
+
+Ước lượng hiển thị trước khi chuyển đổi từng thấp hơn file thật 24 % trên Qwen2.5-0.5B, vì nó dùng một giá trị
+bit-trên-trọng-số trung bình cho mỗi loại. Tính riêng các ma trận embedding và phương án dự phòng của llama-quantize
+cho hàng không chia hết cho 256 (xem DESIGN mục 17.5) đã đưa sai lệch về khoảng 2 %:
+
+| Model, loại | Ước lượng | Thật |
+| --- | --- | --- |
+| Qwen2.5-0.5B-Instruct, `Q4_K_M` | 390.7 MB | 397.8 MB |
+| SmolLM2-135M-Instruct, `Q4_K_M` | 103.1 MB | 105.5 MB |
+
+### Lỗi phát hiện khi review và chạy thật (đã sửa hết)
+
+| Lỗi | Hậu quả | Cách sửa |
+| --- | --- | --- |
+| Repo Mistral kèm các bản `consolidated.*` của cùng trọng số | lượng tải bị gấp đôi | bỏ qua các file `consolidated.*` |
+| Tên file trong danh sách repo không được lọc | một tên độc hại như `../x` có thể trỏ ra ngoài thư mục tải | tên không an toàn (tuyệt đối, `..`, dấu gạch ngược, ký tự ổ đĩa) bị loại khi chọn file và được kiểm tra lại trước khi dùng |
+| Ước lượng dung lượng dùng một bpw trung bình cho mỗi loại | thấp hơn 24 % trên Qwen2.5-0.5B, nên hộp thoại và bước kiểm tra đĩa báo thiếu | embedding và phương án dự phòng K-quant được tính riêng; sai lệch khoảng 2 % |
+
+Chưa được các lần chạy này bao phủ: model vài GB trở lên (chỉ chuyển model 135M và 0.5B tham số), repo gated có
+token, nguồn AWQ / đã lượng tử hoá sẵn, `allow_remote_code`, và một job `needs_review` từ model thật (các đường này
+chỉ có unit test).
+
 ## 2026-10-03
 
 Máy: cùng laptop Windows 11 (GTX 1650 Ti Max-Q, 4 GB), Docker trong WSL2. llama.cpp b11342 thật xuyên suốt.
