@@ -38,7 +38,11 @@ acme/NovelNet-7B (unsupported architecture), meta-llama/Llama-3.1-8B-Instruct (g
 acme/Quirky-3B (ships remote code: the job fails unless allow_remote_code) and the server folders /models/hf/smollm2-135m and
 /models/hf/broken-model (fails while converting). Those repos have no .gguf files in GET /api/hf/files. Jobs walk queued -> downloading
 -> converting -> quantizing -> validating in about 20 s of wall-clock time. Three jobs are seeded at start: done (in the library),
-failed (Quirky-3B) and a running Qwen2.5-7B job. POST /api/_mock/convert_available {"available": false} simulates a missing toolchain.
+failed (Quirky-3B) and a running Qwen2.5-7B job. POST /api/_mock/convert_available {"available": false} simulates a missing toolchain; {"imatrix_available": false} a coordinator
+without llama-imatrix (importance-matrix types are refused, options.imatrix_available false); {"disk_free_gb": 100} a small disk
+(acme/Huge-400B, the 72B model, ... then answer 507 at submit). Types that need an importance matrix (IQ1/IQ2/IQ3_XXS/IQ3_XS) and
+every type under 4 bits (auto) walk through a "calibrating" stage; imatrix off for those types is 422. A calibration path ending in
+corrupt.txt fails in calibrating. Failed and cancelled jobs carry failed_stage; inspect carries name_stem.
 """
 from __future__ import annotations
 
@@ -174,11 +178,38 @@ def vanish_gpu(node_id: str, device_id: str) -> None:
         add_event("warning", "gpu_missing", f"GPU {device_id} disappeared from {node_id}", node_id)
 
 
+def _pinned(pins: list, node: str, device: str) -> bool:
+    """pin_devices is an allowed set: "<node>/<device>" or "<node>/*" (every device of that server, also GPUs added later)."""
+    return not pins or f"{node}/{device}" in pins or f"{node}/*" in pins
+
+
+def _check_pins(pins: object) -> list:
+    """Validate pin_devices like the real API: a list of "<node>/<device>" or "<node>/*" strings naming known servers."""
+    if not isinstance(pins, list) or not all(isinstance(p, str) and p.count("/") == 1 and all(p.split("/")) for p in pins):
+        raise HTTPException(422, 'pin_devices: must be a list of "<node>/<device>" or "<node>/*" strings')
+    for p in pins:
+        if p.split("/")[0] not in SERVERS:
+            raise HTTPException(422, f"pin_devices entry names an unregistered server {p.split('/')[0]!r}")
+    return list(pins)
+
+
+def _pin_devices(pins: list) -> list[tuple[str, str]]:
+    """Expand pins to (node, device) pairs, "<node>/*" to every device the server has now."""
+    out: list[tuple[str, str]] = []
+    for p in pins:
+        node, dev = p.split("/", 1)
+        if dev == "*":
+            out += [(node, g["device_id"]) for g in SERVERS[node]["gpus"]] if node in SERVERS else []
+        else:
+            out.append((node, dev))
+    return out
+
+
 def _place(m: dict, replicas: int = 1) -> None:
     """Fake scheduler: first enabled GPUs of the first alive server (or the pinned ones)."""
     pins = m["spec"]["pin_devices"]
     cands = [(s["node_id"], g["device_id"]) for s in SERVERS.values() if s["alive"] for g in s["gpus"]
-             if s["gpu_enabled"].get(g["device_id"], True) and (not pins or f"{s['node_id']}/{g['device_id']}" in pins)]
+             if s["gpu_enabled"].get(g["device_id"], True) and _pinned(pins, s["node_id"], g["device_id"])]
     if not cands:
         raise HTTPException(409, "No enabled GPU is available")
     cands.sort(key=lambda c: c[0] != "CTG-Server-2")  # prefer Server-2 so the outage demo has something to move
@@ -479,10 +510,11 @@ def put_model(name: str, body: dict) -> dict:
     if file not in LIBRARY:
         raise HTTPException(404, f"{file} is not in the library")
     perf = _perf_fields(body, file)  # validate before touching any state
+    pins_in = _check_pins(body.get("pin_devices") or [])
     m = MODELS.setdefault(name, {"spec": {"name": name, "replicas": 0}, "state": "stopped", "error": None, "replicas": [], "_t": 0.0})
     m["file"] = file
     m["spec"].update(source=f"coordinator://{file}", ctx_size=int(body.get("ctx_size", 4096)), parallel=int(body.get("parallel", 1)),
-                     pin_devices=list(body.get("pin_devices", [])), priority=_int_in(body.get("priority", 50), 0, 100, "priority"),
+                     pin_devices=pins_in, priority=_int_in(body.get("priority", 50), 0, 100, "priority"),
                      preemptible=_bool(body.get("preemptible", True), "preemptible"),
                      spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
     m["spec"].update(_scaling_fields(body))
@@ -595,7 +627,7 @@ def plan_model(name: str) -> dict:
     if m["spec"]["ctx_size"] > 32768:
         raise HTTPException(409, "Not enough free VRAM: needs 41.0 GB, pool has 120.5 GB usable but no single placement fits")
     pins = m["spec"]["pin_devices"]
-    chosen = [tuple(p.split("/", 1)) for p in pins][:3] or [("CTG-Server-1", "CUDA0"), ("CTG-Server-2", "CUDA0")]
+    chosen = _pin_devices(pins)[:3] or [("CTG-Server-1", "CUDA0"), ("CTG-Server-2", "CUDA0")]
     return _placement(name, chosen)
 
 
@@ -614,10 +646,10 @@ def recommend(body: dict) -> dict:
     perf = _perf_fields(body, body["file"])
     kv_f = KV_FACTOR[perf["kv_cache_type"]]
     draft_mb = _draft_mb(perf["draft"])
-    pins = list(body.get("pin_devices") or [])
+    pins = _check_pins(body.get("pin_devices") or [])
     alive = [s for s in SERVERS.values() if s["alive"]]
     gpus = [(s["node_id"], g) for s in alive for g in s["gpus"]
-            if s["gpu_enabled"].get(g["device_id"], True) and (not pins or f"{s['node_id']}/{g['device_id']}" in pins)]
+            if s["gpu_enabled"].get(g["device_id"], True) and _pinned(pins, s["node_id"], g["device_id"])]
     need = _need_mb(item["bytes"], ctx, parallel, perf["kv_cache_type"]) + (draft_mb or 0)
     fixed = _need_mb(item["bytes"], 0, 1) + (draft_mb or 0)
     biggest_gpu = max((g["usable_mb"] for _, g in gpus), default=0)
@@ -812,29 +844,39 @@ def mock_kill(node_id: str) -> dict:
 # ---------------------------------------------------------------------------------------------------------------------
 # Model conversion (Hugging Face / folder -> GGUF): mirrors the routes and JSON shapes of the real coordinator API.
 # ---------------------------------------------------------------------------------------------------------------------
-# (type, bits per weight, tier, via, quality note), best quality first. Same order and notes as the real option list.
+# (type, bits per weight, tier, via, quality note, needs_imatrix), best quality first. Same order as the real option list.
 QUANTS = [
-    ("F16", 16.0, "lossless", "convert", "16-bit floats, no quantization loss (~14.0 GB for a 7B model)"),
-    ("BF16", 16.0, "lossless", "convert", "16-bit brain floats, same size as F16 and a wider value range"),
-    ("Q8_0", 8.5, "near_lossless", "convert", "+0.0026 ppl @ Llama-3-8B, practically indistinguishable from F16"),
-    ("Q6_K", 6.5625, "near_lossless", "quantize", "+0.0217 ppl @ Llama-3-8B"),
-    ("Q5_K_M", 5.69, "balanced", "quantize", "+0.0569 ppl @ Llama-3-8B, very good quality"),
-    ("Q5_K_S", 5.54, "balanced", "quantize", "+0.1049 ppl @ Llama-3-8B"),
-    ("Q4_K_M", 4.89, "balanced", "quantize", "+0.1754 ppl @ Llama-3-8B, the usual sweet spot of size and quality"),
-    ("Q4_K_S", 4.58, "small", "quantize", "+0.2689 ppl @ Llama-3-8B"),
-    ("IQ4_XS", 4.25, "small", "quantize", "4.25 bits per weight, close to Q4_K_S at a smaller size"),
-    ("Q4_0", 4.55, "small", "quantize", "+0.4685 ppl @ Llama-3-8B, legacy format"),
-    ("Q3_K_L", 4.3, "small", "quantize", "+0.5562 ppl @ Llama-3-8B, noticeable quality loss"),
-    ("Q3_K_M", 3.91, "tiny", "quantize", "+0.6569 ppl @ Llama-3-8B"),
-    ("Q3_K_S", 3.5, "tiny", "quantize", "+1.6321 ppl @ Llama-3-8B, clear quality loss"),
-    ("Q2_K", 3.35, "tiny", "quantize", "+3.5199 ppl @ Llama-3-8B, last resort"),
+    ("F16", 16.0, "lossless", "convert", "16-bit floats, no quantization loss (~14.0 GB for a 7B model)", False),
+    ("BF16", 16.0, "lossless", "convert", "16-bit brain floats, same size as F16 and a wider value range", False),
+    ("Q8_0", 8.5, "near_lossless", "convert", "+0.0026 ppl @ Llama-3-8B, practically indistinguishable from F16", False),
+    ("Q6_K", 6.5625, "near_lossless", "quantize", "+0.0217 ppl @ Llama-3-8B", False),
+    ("Q5_K_M", 5.69, "balanced", "quantize", "+0.0569 ppl @ Llama-3-8B, very good quality", False),
+    ("Q5_K_S", 5.54, "balanced", "quantize", "+0.1049 ppl @ Llama-3-8B", False),
+    ("Q4_K_M", 4.89, "balanced", "quantize", "+0.1754 ppl @ Llama-3-8B, the usual sweet spot of size and quality", False),
+    ("Q4_K_S", 4.58, "small", "quantize", "+0.2689 ppl @ Llama-3-8B", False),
+    ("IQ4_XS", 4.25, "small", "quantize", "4.25 bits per weight, close to Q4_K_S at a smaller size", False),
+    ("Q4_0", 4.55, "small", "quantize", "+0.4685 ppl @ Llama-3-8B, legacy format", False),
+    ("Q3_K_L", 4.3, "small", "quantize", "+0.5562 ppl @ Llama-3-8B, noticeable quality loss", False),
+    ("Q3_K_M", 3.91, "tiny", "quantize", "+0.6569 ppl @ Llama-3-8B", False),
+    ("IQ3_M", 3.66, "tiny", "quantize", "3.66 bits per weight, better than Q3_K_M at a similar size", False),
+    ("IQ3_S", 3.44, "tiny", "quantize", "3.44 bits per weight, better than Q3_K_S at a similar size", False),
+    ("Q3_K_S", 3.5, "tiny", "quantize", "+1.6321 ppl @ Llama-3-8B, clear quality loss", False),
+    ("IQ3_XS", 3.3, "tiny", "quantize", "3.3 bits per weight, needs an importance matrix", True),
+    ("IQ3_XXS", 3.06, "tiny", "quantize", "3.06 bits per weight, needs an importance matrix", True),
+    ("Q2_K", 3.35, "tiny", "quantize", "+3.5199 ppl @ Llama-3-8B, last resort", False),
+    ("IQ2_M", 2.7, "tiny", "quantize", "2.7 bits per weight, strong quality loss, needs an importance matrix", True),
+    ("IQ2_S", 2.5, "tiny", "quantize", "2.5 bits per weight, strong quality loss, needs an importance matrix", True),
+    ("IQ2_XS", 2.31, "tiny", "quantize", "2.31 bits per weight, strong quality loss, needs an importance matrix", True),
+    ("IQ2_XXS", 2.06, "tiny", "quantize", "2.06 bits per weight, severe quality loss, needs an importance matrix", True),
+    ("IQ1_M", 1.75, "tiny", "quantize", "1.75 bits per weight, severe quality loss, needs an importance matrix", True),
+    ("IQ1_S", 1.56, "tiny", "quantize", "1.56 bits per weight, extreme quality loss, needs an importance matrix", True),
 ]
 QUANT_BY_TYPE = {q[0]: q for q in QUANTS}
-ACTIVE_JOB_STATES = ("queued", "downloading", "converting", "quantizing", "validating")
-CONVERT: dict = {"problem": None}  # a string makes the toolchain "missing": options.available false, POST /api/convert 503
+ACTIVE_JOB_STATES = ("queued", "downloading", "converting", "calibrating", "quantizing", "validating")
+CONVERT: dict = {"problem": None, "imatrix": True, "disk_free_gb": 500.0}  # imatrix: llama-imatrix installed; disk_free_gb: free space for the 507 check; a string makes the toolchain "missing": options.available false, POST /api/convert 503
 JOBS: dict[str, dict] = {}
 INSPECT_DELAY = [0.0]  # seconds a real run adds to inspect so the spinner is visible (set in __main__)
-STAGE_SECONDS = {"queued": 1.5, "downloading": 6.0, "converting": 5.0, "quantizing": 5.0, "validating": 3.0}
+STAGE_SECONDS = {"queued": 1.5, "downloading": 6.0, "converting": 5.0, "calibrating": 6.0, "quantizing": 5.0, "validating": 3.0}
 
 # Fake Hugging Face repos (all lower-cased keys). `files` are (name, bytes); the rest of the fields is what inspect reports.
 _ST = "safetensors"
@@ -871,6 +913,10 @@ REPOS: dict[str, dict] = {
                                                                        enumerate((4_976_698_672, 4_999_802_720, 4_915_916_176, 1_168_138_808), 1)],
         skipped=["README.md", "LICENSE"], gated=True, alts=["bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"],
         warnings=["Gated repository: the download needs a Hugging Face token that has been granted access (HF_TOKEN)."]),
+    "acme/huge-400b": dict(
+        repo="acme/Huge-400B", arch="LlamaForCausalLM", model_type="llama", params=405_000_000_000, layers=126, ctx=131072,
+        files=[("config.json", 900), ("tokenizer.json", 17_000_000)] + [(f"model-{i:05d}-of-00191.safetensors", 4_250_000_000) for i in range(1, 192)],
+        skipped=["README.md"], warnings=["This is a very large model: converting it needs several hundred GB of free disk."]),
     "acme/quirky-3b": dict(
         repo="acme/Quirky-3B", arch="QuirkyForCausalLM", model_type="llama", params=3_212_749_824, layers=28, ctx=8192,
         files=[("config.json", 900), ("tokenizer_config.json", 4_000), ("model.safetensors", 6_425_499_648)], skipped=["tokenization_quirky.py", "modeling_quirky.py"],
@@ -892,10 +938,10 @@ def _cluster() -> dict:
 
 def _options(params: int, layers: int, cluster: dict) -> list[dict]:
     out = []
-    for t, bpw, tier, via, note in QUANTS:
+    for t, bpw, tier, via, note, need in QUANTS:
         est = int(params * bpw / 8 * 1.01)
         vram = int(est / 1048576 + layers * 8.4 + 500)  # file + KV cache at ctx 4096 + runtime overhead
-        out.append({"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "est_bytes": est, "est_vram_mb": vram,
+        out.append({"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "needs_imatrix": need, "est_bytes": est, "est_vram_mb": vram,
                     "fits_single_gpu": vram <= cluster["largest_gpu_mb"], "fits_pool": vram <= cluster["pool_mb"], "recommended": False})
     return out
 
@@ -903,7 +949,7 @@ def _options(params: int, layers: int, cluster: dict) -> list[dict]:
 def _recommend(opts: list[dict], cluster: dict) -> tuple[str, list[str]]:
     """Best non-lossless type that leaves 30 % headroom on the largest GPU, else the best one that fits at all."""
     big = cluster["largest_gpu_mb"]
-    lossy = [o for o in opts if o["type"] not in ("F16", "BF16")]
+    lossy = [o for o in opts if o["type"] not in ("F16", "BF16") and o["bpw"] >= 3.3 and not o["needs_imatrix"]]
     roomy = next((o for o in lossy if o["est_vram_mb"] <= big * 0.7), None)
     if roomy:
         return roomy["type"], [f"Best quality that leaves 30% of the largest GPU ({big // 1024} GB) free for context and batching",
@@ -916,7 +962,7 @@ def _recommend(opts: list[dict], cluster: dict) -> tuple[str, list[str]]:
     if pool:
         return pool["type"], ["No single GPU can hold it: this is the best type that fits the whole pool",
                               "It will run split over several GPUs (slower, over the network)"]
-    return "Q2_K", ["Nothing fits the cluster at the moment; Q2_K is the smallest type available"]
+    return "Q2_K", ["Nothing fits the cluster at the moment; Q2_K is the smallest type that needs no importance matrix"]
 
 
 def _translate_folder(p: str) -> str:
@@ -957,7 +1003,7 @@ def _inspect(spec: dict) -> dict:
             "prequant_supported": d.get("prequant_supported") if d.get("prequantized") else None, "source_bytes": sum(f["bytes"] for f in files),
             "files": files, "skipped": list(d.get("skipped", [])), "remote_code": bool(d.get("remote_code")), "gated": bool(d.get("gated")),
             "base_model": d.get("base"), "gguf_alternatives": list(d.get("alts", [])), "options": opts, "recommended": rec,
-            "recommend_reasons": reasons, "warnings": list(d.get("warnings", []))}
+            "name_stem": _model_base(source), "recommend_reasons": reasons, "warnings": list(d.get("warnings", []))}
 
 
 def _model_base(spec: dict) -> str:
@@ -990,7 +1036,18 @@ def _normalize_request(body: dict) -> dict:
     for k in ("leave_output_tensor", "pure", "allow_remote_code", "validate_generation"):
         if k in adv and not isinstance(adv[k], bool):
             raise HTTPException(422, f"advanced.{k}: must be a boolean")
-    advanced = {"intermediate": inter, "output_tensor_type": adv.get("output_tensor_type") or None,
+    imatrix = adv.get("imatrix", "auto")
+    if imatrix not in ("auto", "on", "off"):
+        raise HTTPException(422, "advanced.imatrix: must be one of auto, on, off")
+    chunks = adv.get("imatrix_chunks", 0)
+    if not isinstance(chunks, int) or isinstance(chunks, bool) or chunks < 0:
+        raise HTTPException(422, "advanced.imatrix_chunks: must be an integer >= 0")
+    calib = adv.get("calibration_path") or None
+    if calib is not None and (not isinstance(calib, str) or not calib.startswith("/")):
+        raise HTTPException(422, "advanced.calibration_path: must be an absolute path on the server")
+    if calib is not None and not calib.lower().endswith(".txt"):
+        raise HTTPException(422, "advanced.calibration_path: the calibration text must be a .txt file")
+    advanced = {"intermediate": inter, "imatrix": imatrix, "calibration_path": calib, "imatrix_chunks": chunks, "output_tensor_type": adv.get("output_tensor_type") or None,
                 "token_embedding_type": adv.get("token_embedding_type") or None,
                 "leave_output_tensor": bool(adv.get("leave_output_tensor", False)), "pure": bool(adv.get("pure", False)),
                 "allow_remote_code": bool(adv.get("allow_remote_code", False)),
@@ -1025,6 +1082,9 @@ def _conv_fail_point(j: dict) -> tuple[str, float, str] | None:
     if repo == "acme/quirky-3b" and not adv["allow_remote_code"]:
         return "converting", 0.4, ("convert_hf_to_gguf.py exited with code 1: ValueError: Loading acme/Quirky-3B requires executing custom code "
                                   "(tokenization_quirky.py). Enable 'Allow remote code' if you trust the repository.")
+    if adv["calibration_path"] and adv["calibration_path"].lower().endswith("corrupt.txt") and j["imatrix_used"]:
+        return "calibrating", 0.5, ("llama-imatrix exited with code 1: the calibration text is not valid UTF-8 "
+                                   f"({adv['calibration_path']})")
     if s.get("path") == "/models/hf/broken-model":
         return "converting", 0.6, ("convert_hf_to_gguf.py exited with code 1: KeyError: 'rope_theta' while reading config.json "
                                   "(the folder looks truncated)")
@@ -1043,6 +1103,10 @@ def _conv_logs(state: str, frac: float, j: dict) -> list[str]:
         return ["INFO:hf-to-gguf:Loading model: " + (j["request"]["source"].get("hf_repo") or j["request"]["source"].get("path")), "INFO:hf-to-gguf:gguf: loading model weight map",
                 f"INFO:hf-to-gguf:blk.{int(frac * 27)}.attn_q.weight, torch.bfloat16 --> F16, shape = {{3584, 3584}}",
                 f"Writing: {int(frac * 100):3d}%|{'#' * int(frac * 20):<20}| {int(frac * 15):d}.2G/15.2G"]
+    if state == "calibrating":
+        return ["compute_imatrix: tokenizing the input ..", "compute_imatrix: tokenization took 41.2 ms",
+                f"compute_imatrix: computing over {j['request']['advanced']['imatrix_chunks'] or 100} chunks, n_ctx=512, batch_size=512",
+                f"[{max(1, int(frac * 100))}]5.8142,{int(frac * 100)} chunks processed"]
     if state == "quantizing":
         return ["main: build = 11342", f"[{n:4d}/ 339] blk.{int(frac * 27)}.ffn_up.weight - [3584, 18944, 1, 1], type = f16, converting to q4_K .. size = 129.50 MiB -> 36.51 MiB"]
     return ["tokenizer check: 4 test strings", "generation check: 8 tokens on the CPU"]
@@ -1058,6 +1122,8 @@ def _conv_stages(j: dict) -> list[tuple[str, float]]:
     if j["request"]["source"].get("hf_repo"):
         out.append(("downloading", STAGE_SECONDS["downloading"]))
     out.append(("converting", STAGE_SECONDS["converting"]))
+    if j["imatrix_used"]:
+        out.append(("calibrating", STAGE_SECONDS["calibrating"]))
     if QUANT_BY_TYPE[j["request"]["quant"]][3] == "quantize":
         out.append(("quantizing", STAGE_SECONDS["quantizing"]))
     out.append(("validating", STAGE_SECONDS["validating"]))
@@ -1065,6 +1131,8 @@ def _conv_stages(j: dict) -> list[tuple[str, float]]:
 
 
 def _conv_finish(j: dict, state: str, error: str | None = None) -> None:
+    if state == "failed":
+        j["failed_stage"] = j["state"]
     j["state"], j["error"], j["finished_at"] = state, error, time.time()
     if state == "failed":
         return
@@ -1112,10 +1180,17 @@ def _conv_advance(j: dict) -> None:
     _conv_finish(j, _conv_outcome(j))
 
 
+def _imatrix_used(req: dict) -> bool:
+    """auto = on when the type needs an importance matrix or is under 4 bits; the direct types never run one."""
+    q = QUANT_BY_TYPE[req["quant"]]
+    mode = req["advanced"]["imatrix"]
+    return q[3] == "quantize" and (mode == "on" or (mode == "auto" and (q[5] or q[1] < 4.0)))
+
+
 def _conv_new(request: dict, name: str, insp: dict, created: float) -> dict:
     opt = next(o for o in insp["options"] if o["type"] == request["quant"])
     j = {"id": uuid.uuid4().hex[:12], "request": request, "state": "queued", "stage_progress": None, "bytes_done": 0, "bytes_total": None,
-         "output_name": name, "output_bytes": None, "est_output_bytes": opt["est_bytes"], "validation": None, "error": None, "log_tail": [],
+         "output_name": name, "failed_stage": None, "imatrix_used": _imatrix_used(request), "output_bytes": None, "est_output_bytes": opt["est_bytes"], "validation": None, "error": None, "log_tail": [],
          "created_at": created, "started_at": None, "finished_at": None, "_t0": created, "_src_bytes": insp["source_bytes"]}
     JOBS[j["id"]] = j
     return j
@@ -1137,7 +1212,7 @@ def _conv_job(job_id: str) -> dict:
 def seed_conversions() -> None:
     """Three jobs of the demo: one finished (and in the library), one failed, one running that ends in needs_review."""
     JOBS.clear()
-    CONVERT["problem"] = None
+    CONVERT.update(problem=None, imatrix=True, disk_free_gb=500.0)
     done_req = _normalize_request({"source": {"hf_repo": "HuggingFaceTB/SmolLM2-135M-Instruct"}, "quant": "Q6_K",
                                    "name": "SmolLM2-135M-Instruct-Q6_K.gguf"})
     j = _conv_new(done_req, "SmolLM2-135M-Instruct-Q6_K.gguf", _inspect(done_req["source"]), T0 - 3600)
@@ -1150,7 +1225,7 @@ def seed_conversions() -> None:
     bad_req = _normalize_request({"source": {"hf_repo": "acme/Quirky-3B"}, "quant": "Q4_K_M", "name": "Quirky-3B-Q4_K_M.gguf"})
     j = _conv_new(bad_req, "Quirky-3B-Q4_K_M.gguf", _inspect(bad_req["source"]), T0 - 1800)
     fp = _conv_fail_point(j)
-    j.update(started_at=T0 - 1798, bytes_done=j["_src_bytes"], bytes_total=j["_src_bytes"], state="failed", stage_progress=fp[1], error=fp[2],
+    j.update(started_at=T0 - 1798, bytes_done=j["_src_bytes"], bytes_total=j["_src_bytes"], state="failed", failed_stage="converting", stage_progress=fp[1], error=fp[2],
              finished_at=T0 - 1780, log_tail=_conv_logs("converting", 0.4, j) + ["ERROR: " + fp[2].split(": ", 1)[-1]])
     run_req = _normalize_request({"source": {"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}, "quant": "Q4_K_M", "name": "Qwen2.5-7B-Instruct-Q4_K_M.gguf"})
     _conv_new(run_req, "Qwen2.5-7B-Instruct-Q4_K_M.gguf", _inspect(run_req["source"]), time.time())
@@ -1158,9 +1233,11 @@ def seed_conversions() -> None:
 
 @app.get("/api/convert/options", dependencies=[api])
 def convert_options() -> dict:
-    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"], "cluster": _cluster(),
-            "quant_options": [{"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "est_bytes": None, "est_vram_mb": None,
-                               "fits_single_gpu": None, "fits_pool": None, "recommended": False} for t, bpw, tier, via, note in QUANTS]}
+    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"], "imatrix_available": CONVERT["imatrix"],
+            "cluster": _cluster(),
+            "quant_options": [{"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "needs_imatrix": need, "est_bytes": None,
+                               "est_vram_mb": None, "fits_single_gpu": None, "fits_pool": None, "recommended": False}
+                              for t, bpw, tier, via, note, need in QUANTS]}
 
 
 @app.post("/api/convert/inspect", dependencies=[api])
@@ -1183,6 +1260,22 @@ def convert_start(body: dict) -> dict:
         raise HTTPException(400, "No safetensors or PyTorch weights were found in the source")
     name = _check_output_name(req["name"] or f"{_model_base(req['source'])}-{req['quant']}.gguf")
     req["name"] = name
+    q = QUANT_BY_TYPE[req["quant"]]
+    if req["advanced"]["imatrix"] == "off" and q[5]:
+        raise HTTPException(422, f"{req['quant']} needs an importance matrix (llama-quantize refuses it without one): "
+                                 "set the importance matrix to Auto or On")
+    if _imatrix_used(req) and not CONVERT["imatrix"]:
+        raise HTTPException(503, "llama-imatrix is not installed: rebuild the coordinator image (the importance matrix is needed for "
+                                 f"{req['quant']})")
+    gb = 1024 ** 3
+    opt = next(o for o in insp["options"] if o["type"] == req["quant"])
+    dl = insp["source_bytes"] if req["source"].get("hf_repo") else 0
+    inter = 0 if q[3] == "convert" else int(insp["params"] * 2)
+    need = dl + inter + opt["est_bytes"] + gb // 2
+    if need > CONVERT["disk_free_gb"] * gb:
+        raise HTTPException(507, f"Not enough disk space in {MODEL_ROOT}/.hf: this conversion needs about {need / gb:.0f} GB "
+                                 f"(download {dl / gb:.0f} GB + 16-bit intermediate {inter / gb:.0f} GB + output {opt['est_bytes'] / gb:.0f} GB "
+                                 f"+ 0.5 GB margin) but only {CONVERT['disk_free_gb']:.0f} GB are free. Free some space or pick a smaller type.")
     if name in LIBRARY or any(j["output_name"] == name and j["state"] not in ("done", "failed", "cancelled") for j in JOBS.values()):
         raise HTTPException(409, f"{name} already exists in the library or is being produced by another job; pick another name")
     return _conv_json(_conv_new(req, name, insp, time.time()))
@@ -1203,7 +1296,7 @@ def convert_cancel(job_id: str) -> dict:
     j = _conv_job(job_id)
     if j["state"] not in ACTIVE_JOB_STATES:
         raise HTTPException(409, f"Job {job_id} is {j['state']}, only an active job can be cancelled")
-    j["state"], j["finished_at"], j["error"] = "cancelled", time.time(), None
+    j["failed_stage"], j["state"], j["finished_at"], j["error"] = j["state"], "cancelled", time.time(), None
     j["log_tail"] = j["log_tail"] + ["cancelled by the user"]
     return _clean(j)
 
@@ -1215,8 +1308,8 @@ def convert_retry(job_id: str) -> dict:
         raise HTTPException(409, f"Job {job_id} is {j['state']}, only a failed or cancelled job can be retried")
     if CONVERT["problem"] is not None:
         raise HTTPException(503, CONVERT["problem"])
-    j.update(state="queued", stage_progress=None, bytes_done=0, bytes_total=None, output_bytes=None, validation=None, error=None, log_tail=[],
-             started_at=None, finished_at=None, _t0=time.time())
+    j.update(state="queued", stage_progress=None, bytes_done=0, bytes_total=None, output_bytes=None, validation=None, error=None, log_tail=[], failed_stage=None,
+             imatrix_used=_imatrix_used(j["request"]), started_at=None, finished_at=None, _t0=time.time())
     return _clean(j)
 
 
@@ -1243,9 +1336,14 @@ def convert_delete(job_id: str) -> dict:
 @app.post("/api/_mock/convert_available")
 def mock_convert_available(body: dict) -> dict:
     """Dev helper: {"available": false} makes the toolchain "missing" (problem text, jobs refuse to start)."""
+    if "imatrix_available" in body:
+        CONVERT["imatrix"] = bool(body["imatrix_available"])
+    if "disk_free_gb" in body:
+        CONVERT["disk_free_gb"] = float(body["disk_free_gb"])
     CONVERT["problem"] = None if body.get("available", True) else str(
         body.get("problem") or "The conversion toolchain is not installed: llama-quantize was not found in /opt/llama/bin (set GPUPOOL_LLAMA_TOOLS_DIR).")
-    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"]}
+    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"], "imatrix_available": CONVERT["imatrix"],
+            "disk_free_gb": CONVERT["disk_free_gb"]}
 
 
 

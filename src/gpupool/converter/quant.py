@@ -5,12 +5,19 @@ import re
 from typing import Any
 
 from gpupool.converter.models import (
-    ConvertError, Intermediate, QuantOption, QuantType, SourceSpec,
+    ConvertError, ImatrixMode, Intermediate, QuantOption, QuantType, SourceSpec,
 )
 
 # bpw comes from llama-quantize's published Llama-3-8B sizes (8.03B parameters). Those sizes are
 # GiB (llama.cpp prints binary units): bpw = GiB * 2**30 * 8 / 8.03e9. Q4_K_M 4.58 GiB -> 4.90.
 _E = "ppl delta vs F16 on Llama-3-8B"
+# The IQ rows are different: llama-quantize's own descriptions give the nominal format size
+# (IQ3_M 3.66, IQ3_S 3.44, IQ3_XS 3.3, IQ3_XXS 3.06, IQ2_M 2.7, IQ2_S 2.5, IQ2_XS 2.31, IQ2_XXS 2.06,
+# IQ1_M 1.75, IQ1_S 1.56 bpw), but whole files are bigger because llama-quantize keeps the output
+# matrix and the most sensitive tensors at higher types. The table's bpw is a whole-model average
+# (see above), so these rows use the whole-file sizes community quantizers publish for Llama-3-8B
+# (IQ1_S 2.0 GB ... IQ3_M 3.8 GB); the nominal figure is quoted in the note.
+_IQ_NEEDS = "needs an importance matrix (gpupool computes one)"
 _RAW: list[tuple[str, float, str, str, str]] = [
     ("BF16", 16.0, "lossless", "Original precision, no quality loss. Largest file.", "convert"),
     ("F16", 16.0, "lossless", "Half precision, practically no quality loss. Largest file.", "convert"),
@@ -24,12 +31,37 @@ _RAW: list[tuple[str, float, str, str, str]] = [
     ("Q4_0", 4.64, "small", f"+0.4685 {_E}. Legacy format, Q4_K_S is usually better.", "quantize"),
     ("Q3_K_L", 4.31, "small", f"+0.5562 {_E}. Noticeable quality loss.", "quantize"),
     ("Q3_K_M", 4.00, "tiny", f"+0.6569 {_E}. Clear quality loss; only when memory is tight.", "quantize"),
+    ("IQ3_M", 3.76, "small", "3.66 bits per weight in the format; usually better than Q3_K_M at a smaller "
+     "size. An importance matrix helps (gpupool computes one).", "quantize"),
+    ("IQ3_S", 3.67, "small", "3.44 bits per weight in the format; better than Q3_K_S at a similar size. "
+     "An importance matrix helps (gpupool computes one).", "quantize"),
     ("Q3_K_S", 3.65, "tiny", f"+1.6321 {_E}. Large quality loss.", "quantize"),
+    ("IQ3_XS", 3.50, "tiny", f"3.3 bits per weight in the format; {_IQ_NEEDS}. Clear quality loss.", "quantize"),
+    ("IQ3_XXS", 3.26, "tiny", f"3.06 bits per weight in the format; {_IQ_NEEDS}. Large quality loss.", "quantize"),
     ("Q2_K", 3.17, "tiny", f"+3.5199 {_E}. Severe quality loss; a last resort.", "quantize"),
+    ("IQ2_M", 2.94, "tiny", f"2.7 bits per weight in the format; {_IQ_NEEDS}. Heavy quality loss, "
+     "for when nothing larger fits.", "quantize"),
+    ("IQ2_S", 2.75, "tiny", f"2.5 bits per weight in the format; {_IQ_NEEDS}. Heavy quality loss, "
+     "for when nothing larger fits.", "quantize"),
+    ("IQ2_XS", 2.60, "tiny", f"2.31 bits per weight in the format; {_IQ_NEEDS}. Heavy quality loss, "
+     "for when nothing larger fits.", "quantize"),
+    ("IQ2_XXS", 2.39, "tiny", f"2.06 bits per weight in the format; {_IQ_NEEDS}. Heavy quality loss, "
+     "for when nothing larger fits.", "quantize"),
+    ("IQ1_M", 2.15, "tiny", f"1.75 bits per weight in the format; {_IQ_NEEDS}. Extreme quality loss; "
+     "only for very large models that must fit.", "quantize"),
+    ("IQ1_S", 2.01, "tiny", f"1.56 bits per weight in the format; {_IQ_NEEDS}. Extreme quality loss; "
+     "only for very large models that must fit.", "quantize"),
 ]
 
+# llama-quantize b11342 refuses these without an importance matrix (IQ2_M and IQ3_XS files contain
+# IQ2_XS / IQ3_XXS tensors, which it also refuses).
+_NEEDS_IMATRIX = frozenset({"IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS"})
+# Below this many bits per weight an importance matrix noticeably helps: auto mode computes one.
+IMATRIX_AUTO_BPW = 4.0
+
 QUANT_OPTIONS: list[QuantOption] = [
-    QuantOption(type=t, bpw=bpw, tier=tier, note=note, via=via)  # type: ignore[arg-type]
+    QuantOption(type=t, bpw=bpw, tier=tier, note=note, via=via,  # type: ignore[arg-type]
+                needs_imatrix=t in _NEEDS_IMATRIX)
     for t, bpw, tier, note, via in _RAW
 ]
 _BY_TYPE = {o.type: o for o in QUANT_OPTIONS}
@@ -43,6 +75,20 @@ _RUNTIME_OVERHEAD_MB = 300
 
 def option(t: QuantType) -> QuantOption:
     return _BY_TYPE[t]
+
+
+def imatrix_wanted(t: QuantType, mode: ImatrixMode) -> bool:
+    """Whether a job of type `t` computes an importance matrix under `mode`.
+
+    Types the converter writes directly (F16/BF16/Q8_0) never do: there is no llama-quantize step
+    to feed one into. Otherwise on = yes, off = no, auto = yes when the type needs one or is below
+    4 bits per weight. (off for a type that needs one is refused by the job manager, not here.)"""
+    o = _BY_TYPE[t]
+    if o.via == "convert" or mode == "off":
+        return False
+    if mode == "on":
+        return True
+    return o.needs_imatrix or o.bpw < IMATRIX_AUTO_BPW
 
 
 # llama-quantize keeps the token embedding / output matrices near 8 bits in the low-bit types.
@@ -79,6 +125,10 @@ def embedding_params(config: dict) -> int:
 _FALLBACK_BPW: dict[str, float] = {
     "Q2_K": 4.5, "Q3_K_S": 4.5, "Q3_K_M": 4.5, "Q3_K_L": 4.5, "IQ4_XS": 4.5,
     "Q4_K_S": 5.5, "Q4_K_M": 5.5, "Q5_K_S": 6.0, "Q5_K_M": 6.0, "Q6_K": 8.5,
+    # tensor_type_fallback in llama-quant.cpp: every 256-block IQ type (IQ1_*, IQ2_*, IQ3_*, IQ4_XS)
+    # falls back to IQ4_NL, 4.5 bits per weight.
+    "IQ3_M": 4.5, "IQ3_S": 4.5, "IQ3_XS": 4.5, "IQ3_XXS": 4.5, "IQ2_M": 4.5, "IQ2_S": 4.5,
+    "IQ2_XS": 4.5, "IQ2_XXS": 4.5, "IQ1_M": 4.5, "IQ1_S": 4.5,
 }
 
 
@@ -142,12 +192,17 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$")
 
 
-def default_output_name(spec: SourceSpec, t: QuantType) -> str:
+def name_stem(spec: SourceSpec) -> str:
+    """Sanitized last component of the repo / folder: the part of the default output name before
+    "-<QUANT>.gguf"."""
     raw = spec.hf_repo if spec.hf_repo is not None else (spec.path or "")
     parts = [p for p in raw.replace("\\", "/").split("/") if p not in ("", ".", "..")]
     last = parts[-1] if parts else "model"
-    stem = _UNSAFE.sub("-", last).strip(".-_") or "model"
-    return f"{stem}-{t}.gguf"
+    return _UNSAFE.sub("-", last).strip(".-_") or "model"
+
+
+def default_output_name(spec: SourceSpec, t: QuantType) -> str:
+    return f"{name_stem(spec)}-{t}.gguf"
 
 
 def check_output_name(name: str) -> str:
@@ -195,7 +250,9 @@ def recommend(params: int | None, options: list[QuantOption]) -> tuple[QuantType
                            "above Q4_K_M fits the cluster right now.")
     if hit is None:
         reasons.append("Q4_K_M does not fit the current cluster. Lower types (Q3_K_M, Q2_K) "
-                       "are listed as options and lose noticeable quality.")
+                       "are listed as options and lose noticeable quality. The IQ3 and IQ2 types "
+                       "are smaller still; they need an importance matrix, which gpupool computes "
+                       "automatically (it makes the conversion slower).")
         return "Q4_K_M", reasons
     t, scope = hit
     if scope == "single":

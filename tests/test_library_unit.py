@@ -770,3 +770,25 @@ def test_browse_skips_dot_directories(lib):
     (lib.models_dir / "top.gguf").write_bytes(b"x")
     names = sorted(Path(f["path"]).relative_to(lib.models_dir).as_posix() for f in lib.browse()["files"])
     assert names == ["keep/x.gguf", "top.gguf"]
+
+
+def test_locate_file(lib, tmp_path):
+    f = tmp_path / "calib.txt"
+    f.write_text("hello")
+    assert lib.locate_file(str(f)) == f
+    with pytest.raises(LibraryError, match="absolute"):
+        lib.locate_file("calib.txt")
+    with pytest.raises(LibraryError, match="not a regular file"):
+        lib.locate_file(str(tmp_path))
+    with pytest.raises(LibraryError, match="no such file"):
+        lib.locate_file(str(tmp_path / "nope.txt"))
+
+
+def test_locate_file_translates_host_paths(tmp_path):
+    inside = tmp_path / "mounted" / "c.txt"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("x")
+    lb = Library(":memory:", tmp_path / "models", http=httpx.AsyncClient(),
+                 path_map={"/host/data": str(tmp_path / "mounted")})
+    assert lb.locate_file("/host/data/c.txt") == inside
+    lb._db.close()

@@ -423,6 +423,14 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .place b { color: var(--text); font-weight: 600; }
 .gpu-pick { border: 1px solid var(--border-strong); border-radius: var(--r-control); max-height: 240px; overflow: auto; background: var(--field-bg); }
 .gpu-pick .grp { padding: 6px var(--s-3); background: var(--surface-2); color: var(--text-muted); font-size: var(--fs-xs); font-weight: 600; position: sticky; top: 0; }
+.gpu-pick label.grp { color: var(--text); font-weight: 600; }
+.gpu-pick label.child { padding-left: var(--s-6); }
+.gpu-pick label.off { opacity: .6; }
+.gpu-pick input[type=checkbox] { flex: none; accent-color: var(--accent-solid); }
+.endpoint.ep { flex-direction: column; align-items: stretch; gap: 2px; padding: 3px var(--s-1) 3px var(--s-3); }
+.ep-line { display: flex; align-items: center; gap: var(--s-2); min-width: 0; flex-wrap: wrap; }
+.ep-line > .muted { width: 62px; flex: none; }
+.ep-line > code.grow { flex: 1 1 120px; min-width: 0; }
 .gpu-pick label { display: flex; align-items: center; gap: 10px; padding: 7px var(--s-3); cursor: pointer; }
 .gpu-pick label:hover { background: var(--hover); }
 .result { margin-top: 10px; padding: 10px var(--s-3); border-radius: var(--r-control); font-size: var(--fs-sm); }
@@ -619,12 +627,19 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .opt-row .txt { flex: 1; min-width: 0; }
 .opt-row .help { margin-bottom: 0; }
 .danger-note { color: var(--danger-text); font-weight: 500; }
+.qopt.disabled { opacity: .6; cursor: not-allowed; }
+.qopt.disabled:hover { border-color: var(--border-strong); }
+.adv h4.sub { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s-2); padding-top: var(--s-3); border-top: 1px solid var(--border); }
+.seg button:disabled { opacity: .45; cursor: not-allowed; }
+.seg button:disabled:hover { color: var(--text-muted); }
+.stepper li.stopped { color: var(--warning-text); font-weight: 600; }
+.stepper li.stopped .sd { background: var(--warning); border-color: var(--warning); }
 @media (max-width: 900px) {
   .qopt { flex-wrap: wrap; }
   .qopt .qmain { flex: 1 1 calc(100% - 36px); }
   .qopt .qnums { margin-left: 28px; text-align: left; }
   .stepper li span.lbl { display: none; }
-  .stepper li.active span.lbl, .stepper li.failed span.lbl { display: inline; }
+  .stepper li.active span.lbl, .stepper li.failed span.lbl, .stepper li.stopped span.lbl { display: inline; }
 }
 
 /* ---------- reduced motion: no non-essential animation ---------- */

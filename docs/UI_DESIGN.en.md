@@ -34,7 +34,7 @@ one button. Everything ships as Docker images.
     download with a progress bar) or tab **Path** (absolute path to a `.gguf` on the coordinator machine;
     in Docker, a mounted folder).
   - Each model row: name, size, status (stopped / starting / running / failed + error), endpoint,
-    replicas, ctx, **GPU picker** (Auto or tick GPUs across servers), **Start** / **Stop** buttons.
+    replicas, ctx, **allowed servers/GPUs** (all, or only the ticked ones; see section 10), **Start** / **Stop** buttons.
 - **Settings**: shows the API base URL, the OpenAI client snippet, the agent install command.
 
 ## 3. Contract changes (`common/models.py`, all new fields optional, so old agents keep working)
@@ -61,7 +61,7 @@ class NodeReport(BaseModel):
 
 class ModelSpec(BaseModel):
     ...                  # existing fields
-    pin_devices: list[str] = []  # "node_id/device_id"; empty = scheduler chooses
+    pin_devices: list[str] = []  # allowed set: "node_id/device_id" or "node_id/*"; empty = all
 ```
 
 New store tables: `servers(node_id, agent_url, added_at)`, `gpu_flags(node_id, device_id, enabled)` (the second column holds the GPU's `uuid` when the agent reports one, so a flag follows the physical card; legacy rows keyed by `CUDA<i>` are migrated on the first report carrying uuids),
@@ -149,3 +149,134 @@ Requests in flight on a replica that dies are lost unless they had not received 
 retries those on another replica). New requests go to the remaining replicas immediately; if a model had
 a single replica, it is unavailable until the re-allocation is ready (seconds for small models, longer
 when weights must travel over RPC).
+
+## 9. Model conversion UI (Hugging Face / folder to GGUF)
+
+The coordinator turns Hugging Face weights into GGUF (see PLATFORM_DESIGN for the pipeline). The UI has
+two parts: the **Convert dialog** and the **Conversions panel** on the Models page. Both use the
+existing design tokens (`--surface-2`, `--accent`, `--warning-soft`, `--danger-soft`, `--info-soft`,
+`.pill`, `.chip`, `.notice`, `.seg`, `.tabs`); no literal colours.
+
+### 9.1 Entry points
+
+- **Convert a model** button in the library header and in the Conversions panel header.
+- In *Add model*: when a Hugging Face repo has no `.gguf` files, a notice offers **Convert to GGUF**
+  (the repo is prefilled and inspected at once); a "Not a GGUF repository? Convert it" link shows
+  while nothing is listed yet.
+- Library rows of converted files show the source **Converted**.
+
+### 9.2 Convert dialog
+
+1. **Source tabs**: *Hugging Face repo* (repo id, optional revision, Inspect) and *Folder on the
+   server* (absolute path; host paths are translated like library paths when the coordinator is in
+   Docker). Enter in a field starts the inspection. Errors (404, gated, bad folder, **507 not enough
+   disk**: the message names the folder, needed and free GB) appear in a red block under the tabs.
+2. **Inspect facts**: architecture, parameters, layers, context length, weight format, download size
+   (or size on disk) in a six-cell grid, a status pill (Supported / Not supported / Support unknown /
+   Cannot convert), a collapsible list of the files used and skipped.
+3. **Notices** (only those that apply): cannot convert (with *Inspect the base model instead* when the
+   repo is pre-quantized), gated repository, already quantized, ships its own Python code, ready-made
+   GGUF alternatives (*download instead* hands over to Add model), converter warnings.
+4. **Quantization picker**: a radio list, best quality first. Each row: type, tier pill (Lossless,
+   Near-lossless, Balanced, Small, Tiny), *Recommended*, **Needs calibration** badge (types that need
+   an importance matrix), a fit badge (*Fits one GPU* / *Needs several GPUs* / *Does not fit the
+   cluster*), the quality note, estimated file size and VRAM. The recommendation and its reasons are
+   shown above the list. Types below 3 bits per weight (IQ2, IQ1) are folded behind **Show smaller,
+   lower-quality types (n)**; the selected type is always visible. When `imatrix_available` is false
+   in `GET /api/convert/options`, the types that need an importance matrix are greyed, disabled and
+   say why.
+5. **Output file name**: built from `name_stem` of the inspection plus the type
+   (`<name_stem>-<QUANT>.gguf`); it follows the type until the user edits it. Invalid names block
+   Start.
+6. **Keep downloaded source** (Hugging Face only) and the collapsible **Advanced** section:
+   intermediate precision, output tensor type, token embedding type, leave output tensor, pure
+   (these four are disabled for F16/BF16/Q8_0, which the converter writes directly),
+   **Importance matrix**, validate generation, allow remote code (red warning), threads.
+   - *Importance matrix* is a three-way control **Auto / On / Off**. Help text: what it is (a pass
+     over sample text that records which weights matter, so quantizing keeps those precise), that
+     Auto means on for types under about 4 bits and for types that need it, that On costs extra time
+     (roughly one pass of the model over the text, on the CPU), and that Off is not possible for
+     types that need it (the button is disabled; picking such a type while Off is set switches to
+     Auto). A line under the control says whether a Calibrate step will run. For F16/BF16/Q8_0 the
+     whole block is disabled with an explanation. Without llama-imatrix the control is fixed to Off.
+   - **Calibration text** (optional): absolute path of a `.txt` file on the server, at most 20 MB;
+     empty = gpupool's built-in multilingual text. Validated in the browser (absolute, `.txt`).
+   - **Calibration chunks**: number of 512-token pieces; 0 = default (100).
+7. Footer: the reason Start is disabled (toolchain missing, invalid name, bad calibration path), and
+   **Start conversion**. On success the dialog closes, the Models page opens and a toast confirms.
+
+### 9.3 Conversions panel
+
+One card per job, newest first:
+
+- Header: output name, state pill (spinner while running), quant chip, an *importance matrix* chip
+  when the job computes one; source and timing line (*queued 2m ago*, *started 2m ago*, or
+  *ran 3m 20s, finished 5m ago* from `started_at` / `finished_at`).
+- **Stepper**: Download, Convert, **Calibrate** (only when `imatrix_used`), Quantize, Validate.
+  Done steps are green, the running step pulses, a failed job marks `failed_stage` in red, a
+  cancelled job marks it in the warning colour; Download is dashed (skipped) for folders and Quantize
+  for the direct types. Jobs without `failed_stage` fall back to the last stage seen while polling.
+  On mobile only the running or failed step keeps its label.
+- Progress bar (determinate for download and for stages with `stage_progress`, otherwise a moving
+  bar) with text (bytes, percent, "Computing the importance matrix on the CPU: 45%").
+- Meta: estimated size, final size, source files kept.
+- Error box (`error`), a *Needs your review* notice for `needs_review`.
+- **Validation panel** (collapsible, open by itself for needs_review): check chips (GGUF header,
+  tokenizer, generated text, chat template), architecture / layers / vocabulary, errors and warnings,
+  the tokenizer table (HF ids against GGUF ids, mismatching rows highlighted) and the generation
+  sample.
+- **Log** (collapsible): `log_tail`.
+- Actions by state: *Deploy this model* (done, opens the New model form), *Accept anyway*
+  (needs_review, asks for confirmation), *Cancel* (active), *Retry* (failed / cancelled), delete icon
+  (not active), each with a confirmation where it destroys something.
+
+### 9.4 Polling, toasts, states
+
+- `GET /api/convert` every 2 s while a job is active, every 10 s otherwise while the Models page is
+  open. Transitions seen between two polls raise toasts: converted (and the library refreshes),
+  needs review, failed.
+- Empty state: "No conversions yet". Unavailable state: a warning notice with the reason from
+  `options.problem` (inspecting still works, starting is disabled); 404 means the coordinator has
+  no conversion support. Polling errors show in a red block, never as an empty list.
+
+### 9.5 Mobile and accessibility
+
+- The dialog is a bottom-fitting modal; quant rows wrap (numbers move under the text), the facts
+  grid collapses, no horizontal scroll (checked at 375 px).
+- The picker is a `radiogroup` with a label per radio; the low-bit toggle has `aria-expanded`; the
+  importance-matrix control is a `radiogroup`; progress bars use `role="progressbar"`; stepper steps
+  carry a screen-reader state; errors use `role="alert"`; the dialog has `aria-modal` and a title.
+  Colour is never the only signal (labels and text accompany every pill).
+
+## 10. Model card: copy buttons, and limiting a model to some servers or GPUs
+
+### 10.1 Copy
+
+The endpoint row of a model card has two lines: **endpoint** with a *Copy endpoint* icon button, and
+**model** (the name clients put in `"model"`) with a *Copy model name* icon button and a small
+*Copy curl* action that copies a ready `curl` for this model (with an `Authorization` header
+placeholder when API keys are set). Each shows a "Copied" toast. The lines wrap instead of overflowing
+on mobile.
+
+### 10.2 Allowed servers and GPUs (`pin_devices`)
+
+`pin_devices` is an **allowed set**, not a manual placement: the scheduler still picks the best
+placement, but only on devices in the set. Entries are `"<node>/<device>"` (one GPU) or
+`"<node>/*"` (every device of that server, GPUs added later included). Empty = everything. It does not
+change the Servers tab: GPUs stay enabled in the pool for other models.
+
+In the New / Edit model form:
+
+- **Use**: a two-way control *All servers and GPUs* (default) / *Only selected ones*, with the help
+  text above.
+- **Selection tree** (shown for *Only selected ones*): a checkbox per server (checked = `"<node>/*"`,
+  indeterminate when only some GPUs are picked) with its GPUs below, each with free and usable
+  memory. Checking a server stores `"<node>/*"` and drops that server's single-GPU pins; unchecking
+  one GPU of a whole-server pick turns it into the explicit remaining `"<node>/<device>"` pins.
+  Offline servers and disabled GPUs are greyed with the reason but stay selectable.
+- A summary ("3 of 7 GPUs on 2 servers"); with nothing selected a warning is shown and Save refuses
+  (an empty list would mean "everything").
+- Saved pins, including wildcards, load back into the tree when the form is reopened. Recommend,
+  Check placement and Preview impact send the same `pin_devices`.
+- The model card shows a chip such as *Limited to server-a, server-b/CUDA1* (`/*` is shown as the
+  server name).

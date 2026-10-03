@@ -26,6 +26,7 @@ def job(jid="j1", state="queued") -> ConvertJob:
 class FakeManager:
     def __init__(self):
         self.problem: str | None = None
+        self.imatrix = True
         self.jobs = {"j1": job("j1"), "j2": job("j2", "failed")}
         self.fail: ConvertError | None = None
         self.started = self.stopped = 0
@@ -39,6 +40,9 @@ class FakeManager:
 
     def available(self):
         return self.problem
+
+    def imatrix_available(self):
+        return self.imatrix
 
     def list(self):
         return list(reversed(self.jobs.values()))
@@ -114,6 +118,10 @@ async def test_options_content(env):
     from gpupool.converter import quant
     assert [o["type"] for o in body["quant_options"]] == [o.type for o in quant.QUANT_OPTIONS]
     assert all(o["est_bytes"] is None for o in body["quant_options"])
+    assert body["imatrix_available"] is True
+    assert any(o["needs_imatrix"] for o in body["quant_options"])
+    mgr.imatrix = False
+    assert (await c.get("/api/convert/options", headers=AD)).json()["imatrix_available"] is False
     mgr.problem = "llama-quantize not found"
     body = (await c.get("/api/convert/options", headers=AD)).json()
     assert body["available"] is False and body["problem"] == "llama-quantize not found"

@@ -29,6 +29,7 @@ def make_convert_router(manager, admin_dep, cluster_vram: Callable[[], ClusterVr
         problem = manager.available()
         return {"available": problem is None, "problem": problem,
                 "quant_options": [o.model_dump() for o in quant.QUANT_OPTIONS],
+                "imatrix_available": manager.imatrix_available(),
                 "cluster": cluster_vram().model_dump()}
 
     @r.post("/api/convert/inspect")

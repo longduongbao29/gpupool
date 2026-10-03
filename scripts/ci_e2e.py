@@ -9,8 +9,10 @@ the unit tests and only showed up when real images ran. Stdlib only, so it runs 
 Environment: GPUPOOL_AGENT_IMAGE / GPUPOOL_COORDINATOR_IMAGE (default gpupool-*:latest),
 GPUPOOL_CI_MODELS_DIR (where the GGUF is cached; default <repo>/.cache/ci-models).
 The last stage converts a Hugging Face model to GGUF inside the coordinator (download, convert,
-quantize, validate) and serves the result; --skip-convert leaves it out (it needs the coordinator
-image built with WITH_CONVERT=1 and network access to huggingface.co).
+quantize, validate) and serves the result; it then converts the same model from a local folder
+(direct Q8_0) and to IQ2_XS with an importance matrix (llama-imatrix). --skip-convert leaves all
+of that out (it needs the coordinator image built with WITH_CONVERT=1 and network access to
+huggingface.co).
 Exit code 0 = all checks passed; on failure `docker compose logs` is printed.
 """
 from __future__ import annotations
@@ -42,6 +44,17 @@ CONVERT_REPO = "HuggingFaceTB/SmolLM2-135M-Instruct"
 CONVERT_QUANT = "Q4_K_M"
 CONVERT_MODEL_NAME = "smol-converted"
 CONVERT_TIMEOUT = 1500  # seconds: download ~270 MB, convert, quantize, validate on a CI CPU
+# Folder source: the converter's own file selection of the same repo, downloaded by this script into
+# a subfolder of the models dir (mounted read-only at /models in the coordinator).
+FOLDER_FILES = ("config.json", "generation_config.json", "merges.txt", "model.safetensors",
+                "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json")
+FOLDER_SUBDIR = "smollm2-135m-src"
+FOLDER_QUANT = "Q8_0"  # a direct converter type: no llama-quantize step
+FOLDER_OUT_NAME = "smol-folder-Q8_0.gguf"
+# imatrix stage: IQ2_XS needs an importance matrix; 4 chunks keep the calibration run short.
+IMATRIX_QUANT = "IQ2_XS"
+IMATRIX_CHUNKS = 4
+IMATRIX_OUT_NAME = "smol-imatrix-IQ2_XS.gguf"
 CONVERT_FAIL_STATES = ("failed", "needs_review", "cancelled")
 ADMIN_KEY = "ci-admin"  # matches CI_ADMIN_KEY's default in docker-compose.ci.yml
 
@@ -136,16 +149,33 @@ def fmt_job(job: dict) -> str:
     return json.dumps({k: job.get(k) for k in ("state", "error", "validation", "log_tail", "output_name")}, indent=2)
 
 
-def run_convert_checks() -> None:
-    print("== 8. HF -> GGUF conversion in the coordinator", flush=True)
-    opts = api("GET", "/api/convert/options")
-    check("conversion toolchain available in the coordinator image", opts.get("available") is True,
-          str(opts.get("problem")))
-    t0 = time.monotonic()
-    job = api("POST", "/api/convert", {"source": {"hf_repo": CONVERT_REPO}, "quant": CONVERT_QUANT})
-    check("conversion job accepted", bool(job.get("id")), f"{job.get('id')} -> {job.get('output_name')}")
-    job_id, out_name = job["id"], job["output_name"]
+def ensure_folder_source(models_dir: Path) -> Path:
+    """Download the model files the converter would select into models_dir/FOLDER_SUBDIR."""
+    dest = models_dir / FOLDER_SUBDIR
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in FOLDER_FILES:
+        path = dest / name
+        if path.exists() and path.stat().st_size > 0:
+            continue
+        url = f"https://huggingface.co/{CONVERT_REPO}/resolve/main/{name}"
+        print(f"downloading {url}", flush=True)
+        req = urllib.request.Request(url)
+        if os.environ.get("HF_TOKEN"):
+            req.add_header("Authorization", f"Bearer {os.environ['HF_TOKEN']}")
+        tmp = path.with_name(name + ".part")
+        with urllib.request.urlopen(req, timeout=120) as r, tmp.open("wb") as f:
+            while block := r.read(1 << 20):
+                f.write(block)
+        tmp.replace(path)
+    return dest
 
+
+def run_job(body: dict, label: str) -> dict:
+    """Submit a conversion job, wait until it is done (any other end state aborts), return it."""
+    t0 = time.monotonic()
+    job = api("POST", "/api/convert", body)
+    check(f"{label}: job accepted", bool(job.get("id")), f"{job.get('id')} -> {job.get('output_name')}")
+    job_id = job["id"]
     last = {"state": ""}
 
     def finished():
@@ -154,10 +184,10 @@ def run_convert_checks() -> None:
             last["state"] = j["state"]
             print(f"     job {job_id}: {j['state']} ({time.monotonic() - t0:.0f}s)", flush=True)
         if j["state"] in CONVERT_FAIL_STATES:
-            raise SystemExit(f"conversion job ended in state {j['state']}: " + fmt_job(j))
+            raise SystemExit(f"{label}: job ended in state {j['state']}: " + fmt_job(j))
         return j if j["state"] == "done" else None
     try:
-        job = wait(finished, CONVERT_TIMEOUT, "conversion job done", every=5)
+        job = wait(finished, CONVERT_TIMEOUT, f"{label}: job done", every=5)
     except SystemExit:
         # A timeout reaches here too: show where the job was stuck.
         try:
@@ -165,11 +195,25 @@ def run_convert_checks() -> None:
         except Exception:
             pass
         raise
-    check("conversion job done", True, f"{time.monotonic() - t0:.0f}s, {job.get('output_bytes')} B")
+    check(f"{label}: job done", True, f"{time.monotonic() - t0:.0f}s, {job.get('output_bytes')} B")
+    return job
+
+
+def library_item(name: str) -> dict | None:
+    return next((i for i in api("GET", "/api/library") if i["name"] == name), None)
+
+
+def run_convert_checks(models_dir: Path) -> None:
+    print("== 8. HF -> GGUF conversion in the coordinator", flush=True)
+    opts = api("GET", "/api/convert/options")
+    check("conversion toolchain available in the coordinator image", opts.get("available") is True,
+          str(opts.get("problem")))
+    job = run_job({"source": {"hf_repo": CONVERT_REPO}, "quant": CONVERT_QUANT}, "HF repo -> " + CONVERT_QUANT)
+    out_name = job["output_name"]
     val = job.get("validation") or {}
     check("GGUF header validated", val.get("header_ok") is True, str(val.get("errors") or val.get("warnings")))
 
-    item = next((i for i in api("GET", "/api/library") if i["name"] == out_name), None)
+    item = library_item(out_name)
     check("library has the converted file with source convert",
           bool(item) and item["source"] == "convert" and item["status"] == "ready",
           str({k: item.get(k) for k in ("name", "source", "status", "bytes")} if item else "missing"))
@@ -196,6 +240,34 @@ def run_convert_checks() -> None:
     check("converted model answers a chat", bool(ans.strip()), repr(ans.strip()[:80]))
     api("POST", f"/api/models/{CONVERT_MODEL_NAME}/stop")
     wait(lambda: (conv_model() or {}).get("state") == "stopped", 180, "converted model stopped")
+
+    print("== 9. conversion from a local folder (direct Q8_0, no quantize)", flush=True)
+    folder = ensure_folder_source(models_dir)
+    check("folder source downloaded", all((folder / n).stat().st_size > 0 for n in FOLDER_FILES),
+          f"{len(FOLDER_FILES)} files in {folder.name}")
+    # The compose file mounts the models dir at /models (also a GPUPOOL_MODEL_ROOTS entry).
+    job = run_job({"source": {"path": f"/models/{FOLDER_SUBDIR}"}, "quant": FOLDER_QUANT,
+                   "name": FOLDER_OUT_NAME}, "folder -> " + FOLDER_QUANT)
+    check("folder job: no importance matrix for Q8_0", job.get("imatrix_used") is False)
+    item = library_item(FOLDER_OUT_NAME)
+    check("library has the folder-converted file",
+          bool(item) and item["source"] == "convert" and item["status"] == "ready",
+          str({k: item.get(k) for k in ("name", "source", "status", "bytes")} if item else "missing"))
+    check("source folder untouched", (folder / "model.safetensors").exists())
+
+    print("== 10. importance matrix (llama-imatrix) for a type that needs one", flush=True)
+    check("coordinator reports llama-imatrix available", opts.get("imatrix_available") is True,
+          str(opts.get("imatrix_available")))
+    job = run_job({"source": {"hf_repo": CONVERT_REPO}, "quant": IMATRIX_QUANT, "name": IMATRIX_OUT_NAME,
+                   "advanced": {"imatrix_chunks": IMATRIX_CHUNKS}}, "HF repo -> " + IMATRIX_QUANT)
+    check("imatrix job: imatrix_used", job.get("imatrix_used") is True)
+    val = job.get("validation") or {}
+    check("imatrix job: GGUF header validated", val.get("header_ok") is True,
+          str(val.get("errors") or val.get("warnings")))
+    item = library_item(IMATRIX_OUT_NAME)
+    check("library has the imatrix-quantized file",
+          bool(item) and item["source"] == "convert" and item["status"] == "ready",
+          str({k: item.get(k) for k in ("name", "source", "status", "bytes")} if item else "missing"))
 
 
 def run_checks() -> None:
@@ -286,7 +358,7 @@ def main() -> int:
         compose(args.project, "up", "-d")
         run_checks()
         if not args.skip_convert:
-            run_convert_checks()
+            run_convert_checks(models_dir)
         ok = True
     except BaseException as e:
         print(f"\nFAILED: {e}", file=sys.stderr, flush=True)

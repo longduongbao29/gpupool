@@ -325,8 +325,9 @@
                     <span class="cjob-title" x-text="j.output_name"></span>
                     <span class="pill lead" :class="[convStateClass(j), convIsRunning(j) ? 'spinning' : '', j.state === 'queued' ? '' : '']"><span class="spin" x-show="convIsRunning(j)"></span><span x-text="convStateText(j)"></span></span>
                     <span class="chip mono" x-text="j.request.quant"></span>
+                    <span class="chip" x-show="j.imatrix_used" title="An importance matrix is computed from a calibration text before quantizing">importance matrix</span>
                   </div>
-                  <div class="muted small ellipsis" style="margin-top:2px"><span x-text="convSource(j)"></span> &middot; started <span x-text="ago(j.created_at)"></span></div>
+                  <div class="muted small ellipsis" style="margin-top:2px"><span x-text="convSource(j)"></span> &middot; <span x-text="convTimes(j)"></span></div>
                 </div>
                 <div class="cjob-actions">
                   <button class="btn primary sm" x-show="j.state === 'done'" :disabled="!convInLibrary(j)" @click="convDeploy(j)" :title="convInLibrary(j) ? 'Open the new-model form with this file' : 'The file is not listed in the library yet'"><span x-html="icon('play')"></span> Deploy this model</button>
@@ -445,8 +446,12 @@
               </div>
               <div class="row wrap" style="gap:6px;margin-top:8px" x-show="specChips(m).length">
                 <template x-for="c in specChips(m)" :key="c"><span class="chip" x-text="c"></span></template></div>
-              <div class="endpoint"><code class="grow ellipsis" x-text="endpoint()"></code><span class="muted small">model:</span><code x-text="m.spec.name"></code>
-                <button class="btn sm ghost icon" @click="copy(endpoint())" title="Copy endpoint" aria-label="Copy endpoint" x-html="icon('copy')"></button></div>
+              <div class="endpoint ep">
+                <div class="ep-line"><span class="muted small">endpoint</span><code class="grow ellipsis" x-text="endpoint()"></code>
+                  <button class="btn sm ghost icon" @click="copy(endpoint())" title="Copy endpoint" aria-label="Copy endpoint" x-html="icon('copy')"></button></div>
+                <div class="ep-line"><span class="muted small">model</span><code class="grow ellipsis" x-text="m.spec.name"></code>
+                  <button class="btn sm ghost icon" @click="copy(m.spec.name)" title="Copy model name" aria-label="Copy model name" x-html="icon('copy')"></button>
+                  <button class="btn sm ghost" @click="copy(curlSnippet(m.spec.name))" title="Copy a ready curl command for this model" aria-label="Copy curl command for this model">Copy curl</button></div></div>
 
               <div class="metrics">
                 <div class="metric" :title="scalingOf(m) ? 'Replicas desired ' + scalingOf(m).desired : ''"><div class="l">Replicas</div>
@@ -783,17 +788,19 @@
             <div class="notice info" x-show="(conv.res.recommend_reasons || []).length" style="margin:0 0 var(--s-3)"><b>Recommended: <span x-text="conv.res.recommended"></span></b>
               <ul><template x-for="(r, i) in (conv.res.recommend_reasons || [])" :key="i"><li x-text="r"></li></template></ul></div>
             <div class="qlist" role="radiogroup" aria-label="Quantization type">
-              <template x-for="o in conv.res.options" :key="o.type">
-                <label class="qopt" :class="{sel: conv.quant === o.type}">
-                  <input type="radio" name="conv-quant" :value="o.type" :checked="conv.quant === o.type" @change="convPick(o.type)" :aria-label="'Quantization ' + o.type">
+              <template x-for="o in convVisibleOptions()" :key="o.type">
+                <label class="qopt" :class="{sel: conv.quant === o.type, disabled: convOptDisabled(o)}">
+                  <input type="radio" name="conv-quant" :value="o.type" :checked="conv.quant === o.type" :disabled="convOptDisabled(o)" @change="convPick(o.type)" :aria-label="'Quantization ' + o.type">
                   <div class="qmain">
                     <div class="row wrap" style="gap:6px">
                       <b class="qtype" x-text="o.type"></b>
                       <span class="pill" :class="tierClass(o.tier)" x-text="tierLabel(o.tier)"></span>
                       <span class="pill green" x-show="isRecommended(o)">Recommended</span>
+                      <span class="pill blue" x-show="o.needs_imatrix" title="llama-quantize cannot produce this type without an importance matrix: gpupool computes one from a calibration text first, which adds a Calibrate step">Needs calibration</span>
                       <template x-if="fitBadge(o)"><span class="pill lead chk" :class="fitBadge(o).cls" x-text="fitBadge(o).text"></span></template>
                     </div>
                     <div class="muted small" x-text="o.note"></div>
+                    <div class="small danger-note" x-show="convOptDisabled(o)">Not available: llama-imatrix is not installed on this coordinator, so the importance matrix this type needs cannot be computed.</div>
                   </div>
                   <div class="qnums">
                     <div><b x-text="o.est_bytes == null ? dash : bytes(o.est_bytes)"></b><span>file</span></div>
@@ -802,12 +809,18 @@
                 </label>
               </template>
             </div>
+            <div style="margin-top:var(--s-2)" x-show="convLowCount() > 0 && (convHiddenCount() > 0 || conv.showLow)">
+              <button type="button" class="link-btn" @click="conv.showLow = !conv.showLow" :aria-expanded="conv.showLow ? 'true' : 'false'">
+                <span class="chev-wrap" :class="{open: conv.showLow}" x-html="icon('chev')"></span>
+                <span x-text="conv.showLow ? 'Hide the smallest types' : 'Show smaller, lower-quality types (' + convHiddenCount() + ')'"></span></button>
+              <div class="help" style="margin:2px 0 0" x-show="!conv.showLow">IQ2 and IQ1 shrink the file below 3 bits per weight. Quality drops sharply, and they need an importance matrix.</div>
+            </div>
             <div class="notice warn" x-show="convOption() && convOption().fits_pool === false"><b>Too big for this cluster.</b> The file can be converted, but it cannot be served until more GPUs are added. A smaller type may fit.</div>
 
             <!-- 4. output -->
             <label class="field" style="margin-top:var(--s-4)"><span>Output file name</span>
               <input type="text" x-model="conv.name" @input="convNameInput(); conv.err = ''" autocomplete="off" spellcheck="false" :aria-invalid="!convNameOk()"></label>
-            <div class="help" style="margin-top:-6px">Name of the file in the model library. It must end in <code>.gguf</code>. Follows the quantization type until you edit it.</div>
+            <div class="help" style="margin-top:-6px">Name of the file in the model library. It must end in <code>.gguf</code>. Built from the model name and the quantization type until you edit it.</div>
             <div class="opt-row" x-show="conv.tab === 'hf'"><label class="switch"><input type="checkbox" x-model="conv.keepSource" aria-label="Keep the downloaded source"><span></span></label>
               <div class="txt"><div>Keep downloaded source</div><div class="help">Keep the Hugging Face files after a successful conversion, so converting the same model again (another quantization) skips the download. They take about <b x-text="conv.res.source_bytes ? bytes(conv.res.source_bytes) : 'as much as the model'"></b> of disk.</div></div></div>
 
@@ -829,6 +842,26 @@
                   <div class="txt"><div>Leave output tensor</div><div class="help">Do not quantize the output layer at all. Slightly bigger file, slightly better quality.</div></div></div>
                 <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.pure" :disabled="convViaConvert()" aria-label="Pure quantization"><span></span></label>
                   <div class="txt"><div>Pure</div><div class="help">Use the chosen type for every tensor instead of the usual mix of types. Usually lowers quality for the same size; mostly for experiments.</div></div></div>
+                <h4 class="sub">Importance matrix</h4>
+                <div class="help" style="margin-top:-2px">A short pass of the model over sample text that records which weights matter most, so quantizing can keep those more precise. It noticeably improves the small types. <b>Auto</b> turns it on for types under about 4 bits and for types that need it. <b>On</b> uses it for every type. It runs on the coordinator's CPU and is usually the slowest step: measured about 19 minutes for a 1.5B model on a laptop CPU, growing with model size (fewer calibration chunks is faster, at some quality cost). <b>Off</b> skips it, and is not possible for types that need it.</div>
+                <div class="help danger-note" x-show="!convImatrixApplies()">The selected type is written directly by the converter (no quantize step), so there is no importance matrix.</div>
+                <div class="help danger-note" x-show="convImatrixApplies() && !convOpts.imatrix_available">llama-imatrix is not installed on this coordinator, so the importance matrix is off. Rebuild the coordinator image to enable it.</div>
+                <div class="seg" role="radiogroup" aria-label="Importance matrix">
+                  <template x-for="m in [['auto', 'Auto'], ['on', 'On'], ['off', 'Off']]" :key="m[0]">
+                    <button type="button" role="radio" :aria-checked="convImatrixMode() === m[0] ? 'true' : 'false'" :class="{active: convImatrixMode() === m[0] && convImatrixApplies()}"
+                      :disabled="!convImatrixApplies() || !convOpts.imatrix_available || (m[0] === 'off' && convOption() && convOption().needs_imatrix)"
+                      :title="m[0] === 'off' && convOption() && convOption().needs_imatrix ? convOption().type + ' needs an importance matrix' : ''"
+                      @click="conv.adv.imatrix = m[0]" x-text="m[1]"></button>
+                  </template>
+                </div>
+                <div class="muted small" style="margin-top:6px" x-show="convImatrixApplies()"><span x-text="convImatrixWillRun() ? 'A Calibrate step will run before quantizing.' : 'No importance matrix: quantizing starts right after converting.'"></span></div>
+                <label class="field" style="margin-top:var(--s-3)"><span>Calibration text (optional)</span>
+                  <input type="text" x-model="conv.adv.calibration_path" :disabled="!convImatrixApplies() || !convOpts.imatrix_available" placeholder="/models/calibration/my-text.txt" autocomplete="off" spellcheck="false" :aria-invalid="!!convCalibPathErr()"></label>
+                <div class="help" style="margin-top:-6px">Absolute path of a <code>.txt</code> file on the coordinator machine, at most 20 MB. Leave empty to use gpupool's built-in multilingual text (prose, code, math, several languages). Text close to how you will use the model gives a better matrix.</div>
+                <div class="help danger-note" x-show="convImatrixApplies() && convCalibPathErr()" x-text="convCalibPathErr()"></div>
+                <label class="field" style="margin-bottom:0"><span>Calibration chunks</span>
+                  <input type="number" min="0" step="1" x-model="conv.adv.imatrix_chunks" :disabled="!convImatrixApplies() || !convOpts.imatrix_available" style="width:110px"></label>
+                <div class="help">How many 512-token pieces of the text to process. More chunks means a better matrix and a longer Calibrate step. 0 uses the default, 100.</div>
                 <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.validate_generation" aria-label="Validate generation"><span></span></label>
                   <div class="txt"><div>Validate generation</div><div class="help">After converting, load the file on the CPU and generate a few tokens to prove it works. Adds some seconds; the header and tokenizer checks always run.</div></div></div>
                 <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.allow_remote_code" aria-label="Allow remote code"><span></span></label>
@@ -919,19 +952,28 @@
           <label class="field grow"><span>Unload after (minutes idle)</span><input type="number" min="1" step="1" x-model="form.idleMin" style="width:100%"></label></div>
         <div class="muted small" style="margin:-4px 0 10px">Frees the GPUs after that long without requests; the next request loads the model again (the first one waits for the load).</div>
       </div>
-      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.auto" @change="form.plan = null"><span></span></label>
-        <div><div>Auto placement</div><div class="muted small">Let the scheduler pick GPUs. Turn off to choose GPUs yourself.</div></div></div>
-      <div class="gpu-pick" x-show="!form.auto">
-        <template x-for="s in servers()" :key="s.node_id">
-          <div>
-            <div class="grp"><span x-text="s.node_id"></span> <span class="pill red lead" x-show="!s.alive">Offline</span></div>
-            <template x-for="d in gpus(s)" :key="d.device_id">
-              <label><input type="checkbox" :checked="form.pins.indexOf(pinLabel(s,d)) >= 0" @change="togglePin(pinLabel(s,d), $event.target.checked)">
-                <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
-                <span class="muted small" x-text="'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
-            </template>
-          </div>
-        </template>
+      <div class="field" style="margin-bottom:10px"><span>Use</span>
+        <div class="seg" role="radiogroup" aria-label="Servers and GPUs this model may use">
+          <button type="button" role="radio" :aria-checked="form.auto ? 'true' : 'false'" :class="{active: form.auto}" @click="form.auto = true; form.plan = null; form.rec = null; form.sim = null">All servers and GPUs</button>
+          <button type="button" role="radio" :aria-checked="!form.auto ? 'true' : 'false'" :class="{active: !form.auto}" @click="form.auto = false; form.plan = null; form.rec = null; form.sim = null">Only selected ones</button></div>
+        <div class="help" style="margin:6px 0 0">The scheduler still chooses the best placement, but only inside this selection. Nothing changes in the Servers tab: the GPUs stay enabled for other models.</div></div>
+      <div x-show="!form.auto">
+        <div class="gpu-pick" role="group" aria-label="Allowed servers and GPUs">
+          <template x-for="s in servers()" :key="s.node_id">
+            <div>
+              <label class="grp" :class="{off: !s.alive}"><input type="checkbox" :checked="pinNodeState(s) === 'all'" x-effect="$el.indeterminate = pinNodeState(s) === 'some'" @change="toggleServer(s, $event.target.checked)" :aria-label="'Whole server ' + s.node_id">
+                <span class="grow"><span x-text="s.node_id"></span> <span class="muted small" x-text="gpus(s).length + ' GPU' + (gpus(s).length === 1 ? '' : 's') + (pinWhole(s) ? ' · whole server, including GPUs added later' : '')"></span></span>
+                <span class="pill red lead" x-show="!s.alive">Offline</span></label>
+              <template x-for="d in gpus(s)" :key="d.device_id">
+                <label class="child" :class="{off: !s.alive || !enabled(s, d)}"><input type="checkbox" :checked="pinHas(s, d)" @change="toggleGpu(s, d, $event.target.checked)" :aria-label="'GPU ' + d.device_id + ' of ' + s.node_id">
+                  <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
+                  <span class="muted small" x-text="(!s.alive ? 'server offline · ' : (!enabled(s, d) ? 'disabled in the pool · ' : '')) + 'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
+              </template>
+            </div>
+          </template>
+        </div>
+        <div class="muted small" style="margin-top:6px" x-show="form.pins.length" x-text="pinSummary()"></div>
+        <div class="notice warn" x-show="!form.pins.length" role="status"><b>Nothing selected.</b> Pick at least one server or GPU, or switch back to all servers and GPUs.</div>
       </div>
       <template x-if="form.plan && form.plan.ok"><div class="result ok">
         <b>Fits.</b> Tier <span x-text="form.plan.data.tier.replace('_',' ')"></span>, head <span x-text="form.plan.data.head_node"></span>, about

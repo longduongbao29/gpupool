@@ -84,6 +84,12 @@ class FakeLibrary:
             raise LibErr(f"no such folder: {path}", 404)
         return p
 
+    def locate_file(self, path):
+        p = Path(path)
+        if not p.is_file():
+            raise LibErr(f"no such file: {path}", 404)
+        return p
+
 
 class LibErr(Exception):
     """Like LibraryError: carries .message and .status."""
@@ -353,6 +359,11 @@ async def test_missing_tokenizer_in_output_is_failure(env, monkeypatch):
 
 
 async def test_disk_check_failure(env, monkeypatch):
+    # the early check at submit is covered below; this is the worker's own per-stage check
+    async def no_early_check(*a, **k):
+        return None
+
+    monkeypatch.setattr(env.mgr, "_early_disk_check", no_early_check)
     usage = types.SimpleNamespace(total=10**12, used=10**12 - 1_000_000, free=1_000_000)
     monkeypatch.setattr(shutil, "disk_usage", lambda p: usage)
     j = await run_job(env, hf_req())
@@ -720,3 +731,206 @@ async def test_log_tail_keeps_last_lines_and_collapses_progress(env):
     mgr2 = ConvertManager(env.db, env.models, env.tc, env.lib, env.hf)
     assert len(mgr2.get(j.id).log_tail) == 50
     await mgr2.shutdown()
+
+
+# ---- early disk check ----------------------------------------------------------------------------
+
+
+async def test_submit_507_when_disk_cannot_hold_the_job(env, monkeypatch):
+    usage = types.SimpleNamespace(total=10**12, used=10**12 - 1_000_000, free=1_000_000)
+    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage)
+    with pytest.raises(ConvertError) as ei:
+        await env.mgr.submit(hf_req())
+    assert ei.value.status == 507
+    assert str(env.models) in ei.value.message and "GB" in ei.value.message and "free" in ei.value.message
+    assert env.mgr.list() == [] and env.hf.network == []
+
+
+async def test_early_disk_check_counts_what_is_cached_and_the_intermediate(env, monkeypatch):
+    seen = []
+    monkeypatch.setattr(env.mgr, "_check_disk", lambda need, what: seen.append((need, what)))
+    files = [SourceFile(name="model.safetensors", bytes=5000)]
+    monkeypatch.setattr(jobs_mod, "inspect_source", fake_inspect_factory(files=files))
+    margin = jobs_mod._DISK_MARGIN
+    first = await env.mgr.submit(hf_req(quant="Q4_K_M", name="a.gguf"))
+    need, what = seen[0]
+    # 5000 download + 2000 params * 2 bytes of 16-bit intermediate + 3000 estimated output
+    assert need == 5000 + 4000 + 3000 + margin and REPO in what
+    # a direct type has no intermediate; a cached file is not downloaded again
+    cached = env.models / ".hf" / "acme__tiny-model@main"
+    cached.mkdir(parents=True, exist_ok=True)
+    (cached / "model.safetensors").write_bytes(b"W" * 5000)
+    second = await env.mgr.submit(hf_req(quant="Q8_0", name="b.gguf"))
+    assert seen[1][0] == 3000 + margin
+    for j in (first, second):
+        await env.mgr.cancel(j.id)
+
+
+# ---- importance matrix ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def calib(env, monkeypatch):
+    f = env.tmp / "builtin-calibration.txt"
+    f.write_text("builtin calibration text", encoding="utf-8")
+    monkeypatch.setattr(jobs_mod, "BUILTIN_CALIBRATION", f)
+    monkeypatch.setenv("FAKE_IMATRIX_LOG", str(env.tmp / "imatrix.jsonl"))
+    monkeypatch.setenv("FAKE_ARGV_LOG", str(env.tmp / "argv.jsonl"))
+    return f
+
+
+def imatrix_log(env):
+    f = env.tmp / "imatrix.jsonl"
+    return [json.loads(ln) for ln in f.read_text().splitlines()] if f.exists() else []
+
+
+async def test_auto_mode_decides_per_type(env, calib, monkeypatch):
+    monkeypatch.setenv("FAKE_CONVERT_MODE", "slow")  # jobs only need to be submitted
+    for quant, expect in (("Q6_K", False), ("Q4_K_M", False), ("Q3_K_M", False), ("Q3_K_S", True),
+                          ("Q2_K", True), ("IQ3_S", True), ("IQ2_M", True), ("IQ1_S", True),
+                          ("Q8_0", False), ("F16", False)):
+        job = await env.mgr.submit(hf_req(quant=quant, name=f"{quant}.gguf"))
+        assert job.imatrix_used is expect, quant
+        await env.mgr.cancel(job.id)
+
+
+async def test_imatrix_job_runs_calibrating_stage_and_feeds_quantize(env, calib):
+    job = await env.mgr.submit(hf_req(quant="IQ2_M", advanced={"imatrix_chunks": 7, "threads": 3}))
+    assert job.imatrix_used is True
+    states = []
+    while True:
+        j = env.mgr.get(job.id)
+        if not states or states[-1] != j.state:
+            states.append(j.state)
+        if j.state in ("done", "failed"):
+            break
+        await asyncio.sleep(0.005)
+    assert j.state == "done", j.error
+    order = [x for x in states if x in ("converting", "calibrating", "quantizing", "validating")]
+    assert order == ["converting", "calibrating", "quantizing", "validating"]
+    (rec,) = imatrix_log(env)
+    a = rec["args"]
+    assert a[a.index("--chunks") + 1] == "7" and a[a.index("-t") + 1] == "3" and "--no-ppl" in a
+    assert rec["calib"] == "builtin calibration text" and rec["model_exists"] is True
+    qargs = json.loads((env.tmp / "argv.jsonl").read_text().splitlines()[0])
+    assert qargs[0] == "--imatrix" and qargs[1].endswith("imatrix.gguf")
+    assert j.imatrix_used is True and j.failed_stage is None
+    assert work_dirs(env) == []
+
+
+async def test_default_chunks_and_user_calibration_text_is_copied(env, calib):
+    user = env.tmp / "mine.txt"
+    user.write_text("my own text", encoding="utf-8")
+    j = await run_job(env, hf_req(quant="Q2_K", advanced={"calibration_path": str(user)}))
+    assert j.state == "done", j.error
+    (rec,) = imatrix_log(env)
+    a = rec["args"]
+    assert a[a.index("--chunks") + 1] == "100"
+    assert rec["calib"] == "my own text"
+    assert Path(a[a.index("-f") + 1]) != user  # a snapshot in the work dir, not the user's file
+    assert a[a.index("-t") + 1] == "2"  # coordinator default threads
+
+
+async def test_imatrix_on_for_a_normal_type_and_off_skips_it(env, calib):
+    j = await run_job(env, hf_req(quant="Q5_K_M", advanced={"imatrix": "on"}))
+    assert j.state == "done" and j.imatrix_used is True and len(imatrix_log(env)) == 1
+    j = await run_job(env, hf_req(quant="Q2_K", name="off.gguf", advanced={"imatrix": "off"}))
+    assert j.state == "done" and j.imatrix_used is False and len(imatrix_log(env)) == 1
+
+
+async def test_direct_types_ignore_imatrix_on(env, calib):
+    job = await env.mgr.submit(hf_req(quant="Q8_0", advanced={"imatrix": "on"}))
+    assert job.imatrix_used is False
+    j = await wait_for(env.mgr, job.id, ("done", "failed"))
+    assert j.state == "done" and imatrix_log(env) == []
+
+
+async def test_needs_imatrix_with_off_is_422(env, calib):
+    with pytest.raises(ConvertError) as ei:
+        await env.mgr.submit(hf_req(quant="IQ1_S", advanced={"imatrix": "off"}))
+    assert ei.value.status == 422 and "importance matrix" in ei.value.message
+    assert env.mgr.list() == []
+
+
+async def test_missing_imatrix_tool(env, calib, tmp_path):
+    env.mgr.toolchain = make_toolkit(tmp_path / "lean", imatrix=False)
+    assert env.mgr.imatrix_available() is False
+    for quant, adv in (("IQ2_XS", {}), ("Q4_K_M", {"imatrix": "on"})):
+        with pytest.raises(ConvertError) as ei:
+            await env.mgr.submit(hf_req(quant=quant, advanced=adv))
+        assert ei.value.status == 503 and "llama-imatrix is not installed" in ei.value.message
+    # auto on a type that merely benefits from one goes without; types that never use one are fine
+    j = await run_job(env, hf_req(quant="Q2_K", name="noim.gguf"))
+    assert j.state == "done" and j.imatrix_used is False
+    j = await run_job(env, hf_req(quant="Q8_0", name="q8.gguf", advanced={"imatrix": "on"}))
+    assert j.state == "done"
+
+
+async def test_calibration_path_validation(env, calib):
+    big = env.tmp / "big.txt"
+    big.write_bytes(b"x" * (jobs_mod._CALIBRATION_MAX + 1))
+    wrong = env.tmp / "notes.md"
+    wrong.write_text("x")
+    empty = env.tmp / "empty.txt"
+    empty.write_text("")
+    for path, word in ((str(big), "limit"), (str(wrong), ".txt"), (str(empty), "empty"),
+                       (str(env.tmp / "nope.txt"), "no such file")):
+        with pytest.raises(ConvertError) as ei:
+            await env.mgr.submit(hf_req(quant="IQ2_M", advanced={"calibration_path": path}))
+        assert ei.value.status == 422 and word in ei.value.message, path
+    # irrelevant when no matrix is computed
+    job = await env.mgr.submit(hf_req(quant="Q8_0", advanced={"calibration_path": str(wrong)}))
+    await env.mgr.cancel(job.id)
+
+
+async def test_missing_builtin_calibration_is_503(env, monkeypatch):
+    monkeypatch.setattr(jobs_mod, "BUILTIN_CALIBRATION", env.tmp / "absent.txt")
+    with pytest.raises(ConvertError) as ei:
+        await env.mgr.submit(hf_req(quant="IQ2_M"))
+    assert ei.value.status == 503 and "calibration" in ei.value.message
+
+
+async def test_imatrix_failure_reports_stage(env, calib, monkeypatch):
+    monkeypatch.setenv("FAKE_IMATRIX_MODE", "fail")
+    j = await run_job(env, hf_req(quant="IQ2_M"))
+    assert j.state == "failed" and j.failed_stage == "calibrating"
+    assert "llama-imatrix failed" in j.error and "tokenizes to only" in j.error
+    assert work_dirs(env) == []
+    monkeypatch.setenv("FAKE_IMATRIX_MODE", "nofile")
+    r = await env.mgr.retry(j.id)
+    assert r.failed_stage is None and r.started_at is None and r.finished_at is None
+    j2 = await wait_for(env.mgr, j.id, ("failed",))
+    assert j2.failed_stage == "calibrating" and "wrote no importance matrix" in j2.error
+
+
+async def test_failed_stage_for_other_stages_and_cancel(env, calib, monkeypatch):
+    monkeypatch.setenv("FAKE_CONVERT_MODE", "fail")
+    j = await run_job(env, hf_req(quant="Q8_0"))
+    assert j.state == "failed" and j.failed_stage == "converting"
+    monkeypatch.setenv("FAKE_CONVERT_MODE", "ok")
+    monkeypatch.setenv("FAKE_QUANT_MODE", "fail")
+    j = await run_job(env, hf_req(quant="Q4_K_M", name="q.gguf"))
+    assert j.failed_stage == "quantizing"
+    created = j.created_at
+    monkeypatch.setenv("FAKE_QUANT_MODE", "ok")
+    r = await env.mgr.retry(j.id)
+    assert r.failed_stage is None and r.created_at == created
+    await wait_for(env.mgr, j.id, ("done",))
+    # cancel mid-calibration
+    monkeypatch.setenv("FAKE_IMATRIX_MODE", "slow")
+    job = await env.mgr.submit(hf_req(quant="IQ2_M", name="c.gguf"))
+    await wait_for(env.mgr, job.id, ("calibrating",))
+    c = await env.mgr.cancel(job.id)
+    assert c.state == "cancelled" and c.failed_stage == "calibrating"
+    assert work_dirs(env) == []
+
+
+async def test_failed_stage_and_imatrix_survive_a_restart(env, calib, monkeypatch):
+    monkeypatch.setenv("FAKE_IMATRIX_MODE", "fail")
+    j = await run_job(env, hf_req(quant="IQ2_M"))
+    await env.mgr.shutdown()
+    again = ConvertManager(env.db, env.models, env.tc, env.lib, env.hf)
+    got = again.get(j.id)
+    assert got.failed_stage == "calibrating" and got.imatrix_used is True
+    await again.shutdown()
+    env.mgr = ConvertManager(env.db, env.models, env.tc, env.lib, env.hf)  # teardown closes it

@@ -465,7 +465,7 @@ def test_mock_convert_options_and_availability(client, mock):
     ClusterVram.model_validate(o["cluster"])
     assert o["cluster"]["largest_gpu_mb"] > 0 and o["cluster"]["pool_mb"] >= o["cluster"]["largest_gpu_mb"]
     opts = [QuantOption.model_validate(x) for x in o["quant_options"]]
-    assert [x.type for x in opts][:3] == ["F16", "BF16", "Q8_0"] and len(opts) == 14
+    assert [x.type for x in opts][:3] == ["F16", "BF16", "Q8_0"] and len(opts) == 24
     assert all(x.est_bytes is None and x.fits_pool is None for x in opts)
     assert client.get("/api/convert/options").status_code == 401
     r = client.post("/api/_mock/convert_available", json={"available": False}).json()
@@ -486,7 +486,7 @@ def test_mock_convert_inspect_matches_the_real_model(client):
         return client.post("/api/convert/inspect", json=src, headers=HEAD)
 
     small = InspectResult.model_validate(inspect(hf_repo="HuggingFaceTB/SmolLM2-135M-Instruct").json())
-    assert small.supported and small.params == 134_515_008 and small.weight_format == "safetensors" and len(small.options) == 14
+    assert small.supported and small.params == 134_515_008 and small.weight_format == "safetensors" and len(small.options) == 24
     assert small.recommended in {o.type for o in small.options} and sum(o.recommended for o in small.options) == 1
     assert small.recommend_reasons and small.gguf_alternatives and small.source.revision == "main"
     big = InspectResult.model_validate(inspect(hf_repo="Qwen/Qwen2.5-72B-Instruct", revision="abc123").json())
@@ -667,14 +667,14 @@ def test_ui_has_conversion_flow():
     for needle in ("/api/convert/inspect", "/api/convert/options", '"/api/convert"', "keep_source", "allow_remote_code",
                    "validate_generation", "output_tensor_type", "token_embedding_type", "leave_output_tensor", "intermediate",
                    "prequant_supported", "stage_progress", "bytes_done",
-                   "log_tail", "tokenizer_cases", "fits_single_gpu", "fits_pool",
+                   "tokenizer_cases", "fits_single_gpu", "fits_pool",
                    "needs_review", "convPoll", "2000", "convAct", "convDeploy", "noGguf", "action"):
         assert needle in js, needle
     for needle in ("Convert a model", "Convert to GGUF", "Folder on the server", "Hugging Face repo", "Inspect", "Quantization",
                    "Recommended", "Output file name", "Keep downloaded source", "Advanced", "Allow remote code",
                    "runs them inside the coordinator", "Validate generation", "Threads", "Conversions", "Deploy this model",
                    "Accept anyway", "Retry", "Tokenizer check", "Generation sample", "download instead", "Conversion is not available",
-                   "Show log", "Already quantized", "Gated repository", "recommend_reasons", "conv.res.base_model", "gguf_alternatives", "est_vram_mb", "conv.res.options", "generation_sample", "tokenizer_cases", "log_tail", "Ships its own Python code", "Start conversion"):
+                   "Show log", "Already quantized", "Gated repository", "recommend_reasons", "conv.res.base_model", "gguf_alternatives", "est_vram_mb", "convVisibleOptions()", "generation_sample", "tokenizer_cases", "log_tail", "Ships its own Python code", "Start conversion"):
         assert needle in html, needle
     for text in ("Fits one GPU", "Needs several GPUs (slower, over network)", "Does not fit the cluster", "Lossless",
                  "Near-lossless", "Balanced", "Small", "Tiny", "Download", "Convert", "Quantize", "Validate", "Converted"):
@@ -689,3 +689,237 @@ def test_ui_conversion_styles_use_tokens():
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b", block), "use design tokens, not literal colours"
     for cls in (".stepper", ".cjob", ".qopt", ".logbox", ".vtbl tr.mism", ".bar.indet", ".adv", ".notice"):
         assert cls in block, cls
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Round 2: importance matrix, name_stem, failed_stage, early disk check
+# ---------------------------------------------------------------------------------------------------------------
+NEW_TYPES = ["IQ3_M", "IQ3_S", "IQ3_XS", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ1_M", "IQ1_S"]
+NEEDS = {"IQ3_XS", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ1_M", "IQ1_S"}
+SMOL = "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+
+def _job(client, job_id):
+    from gpupool.converter.models import ConvertJob
+
+    return ConvertJob.model_validate(client.get(f"/api/convert/{job_id}", headers=HEAD).json())
+
+
+def test_mock_options_carry_new_types_and_imatrix_flags(client, mock):
+    from gpupool.converter.models import QuantOption
+
+    o = client.get("/api/convert/options", headers=HEAD).json()
+    assert o["imatrix_available"] is True
+    opts = [QuantOption.model_validate(x) for x in o["quant_options"]]
+    assert set(NEW_TYPES) <= {x.type for x in opts}
+    assert {x.type for x in opts if x.needs_imatrix} == NEEDS
+    ins = client.post("/api/convert/inspect", json={"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}, headers=HEAD).json()
+    assert ins["name_stem"] == "Qwen2.5-7B-Instruct"
+    assert all(x["est_bytes"] and "needs_imatrix" in x for x in ins["options"])
+    assert ins["recommended"] not in NEEDS  # the recommendation never needs the optional tool
+    folder = client.post("/api/convert/inspect", json={"path": "/models/hf/smollm2-135m"}, headers=HEAD).json()
+    assert folder["name_stem"] == "smollm2-135m"
+    mock.reset()
+
+
+def test_mock_imatrix_toggle_and_validation(client, mock):
+    r = client.post("/api/_mock/convert_available", json={"imatrix_available": False}).json()
+    assert r["imatrix_available"] is False and r["available"] is True
+    assert client.get("/api/convert/options", headers=HEAD).json()["imatrix_available"] is False
+    assert _submit(client, SMOL, quant="IQ2_XS", name="a.gguf").status_code == 503  # needs llama-imatrix
+    assert _submit(client, SMOL, quant="Q4_K_M", name="b.gguf").status_code == 200  # does not
+    assert _submit(client, SMOL, quant="Q3_K_S", name="c.gguf", advanced={"imatrix": "off"}).status_code == 200
+    client.post("/api/_mock/convert_available", json={"imatrix_available": True})
+    off = _submit(client, SMOL, quant="IQ2_XS", name="d.gguf", advanced={"imatrix": "off"})
+    assert off.status_code == 422 and "importance matrix" in off.json()["detail"]
+    assert _submit(client, SMOL, quant="Q3_K_S", name="e.gguf", advanced={"imatrix": "maybe"}).status_code == 422
+    assert _submit(client, SMOL, quant="Q3_K_S", name="f.gguf", advanced={"imatrix_chunks": -1}).status_code == 422
+    assert _submit(client, SMOL, quant="Q3_K_S", name="g.gguf", advanced={"calibration_path": "rel.txt"}).status_code == 422
+    assert _submit(client, SMOL, quant="Q3_K_S", name="h.gguf", advanced={"calibration_path": "/data/x.md"}).status_code == 422
+    mock.reset()
+
+
+def test_mock_imatrix_used_and_calibrating_stage(client, mock):
+    assert _job(client, _submit(client, SMOL, quant="Q4_K_M", name="p1.gguf").json()["id"]).imatrix_used is False  # >= 4 bits, auto
+    assert _job(client, _submit(client, SMOL, quant="Q4_K_M", name="p2.gguf", advanced={"imatrix": "on"}).json()["id"]).imatrix_used is True
+    assert _job(client, _submit(client, SMOL, quant="Q3_K_S", name="p3.gguf").json()["id"]).imatrix_used is True  # < 4 bits, auto
+    assert _job(client, _submit(client, SMOL, quant="Q8_0", name="p4.gguf", advanced={"imatrix": "on"}).json()["id"]).imatrix_used is False  # direct
+    job = _job(client, _submit(client, SMOL, quant="IQ2_XS", name="p5.gguf").json()["id"])
+    assert job.imatrix_used is True
+    seen = set()
+    for t in (2.0, 5.0, 10.0, 14.0, 20.0, 25.0):
+        _at(mock, job.id, t)
+        cur = _job(client, job.id)
+        seen.add(cur.state)
+        if cur.state == "calibrating":
+            assert cur.log_tail and cur.stage_progress is not None and 0 <= cur.stage_progress <= 1
+    assert seen == {"downloading", "converting", "calibrating", "quantizing", "validating"}
+    _fast_forward(mock, job.id)
+    assert _job(client, job.id).state == "done"
+    mock.reset()
+
+
+def test_mock_failed_stage_on_failed_and_cancelled_jobs(client, mock):
+    seeded = next(j for j in client.get("/api/convert", headers=HEAD).json() if j["state"] == "failed")
+    assert seeded["failed_stage"] == "converting"
+    gated = _submit(client, "meta-llama/Llama-3.1-8B-Instruct", name="gated.gguf").json()
+    _fast_forward(mock, gated["id"])
+    assert _job(client, gated["id"]).failed_stage == "downloading"
+    bad = _submit(client, SMOL, quant="IQ3_S", name="corrupt.gguf", advanced={"calibration_path": "/data/corrupt.txt"}).json()
+    _fast_forward(mock, bad["id"])
+    b = _job(client, bad["id"])
+    assert b.state == "failed" and b.failed_stage == "calibrating" and "llama-imatrix" in b.error
+    run = _submit(client, SMOL, quant="Q4_K_M", name="cancelme.gguf").json()
+    _at(mock, run["id"], 5.0)
+    assert _job(client, run["id"]).state == "downloading"
+    c = client.post(f"/api/convert/{run['id']}/cancel", headers=HEAD).json()
+    assert c["state"] == "cancelled" and c["failed_stage"] == "downloading"
+    assert client.post(f"/api/convert/{run['id']}/retry", headers=HEAD).json()["failed_stage"] is None
+    done = next(j for j in client.get("/api/convert", headers=HEAD).json() if j["state"] == "done")
+    assert done["failed_stage"] is None
+    mock.reset()
+
+
+def test_mock_507_when_the_disk_cannot_hold_the_job(client, mock):
+    huge = _submit(client, "acme/Huge-400B", quant="Q4_K_M")
+    assert huge.status_code == 507 and "GB" in huge.json()["detail"] and "free" in huge.json()["detail"]
+    assert _submit(client, "Qwen/Qwen2.5-72B-Instruct", quant="Q4_K_M", name="big.gguf").status_code == 200  # fits the default disk
+    client.post("/api/_mock/convert_available", json={"disk_free_gb": 10})
+    assert _submit(client, "Qwen/Qwen2.5-7B-Instruct", quant="Q4_K_M", name="small-disk.gguf").status_code == 507
+    assert _submit(client, SMOL, quant="Q4_K_M", name="tiny.gguf").status_code == 200  # a small model still fits
+    mock.reset()
+
+
+def test_ui_has_importance_matrix_and_round2_controls():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for needle in ("needs_imatrix", "imatrix_available", "imatrix_used", "failed_stage", "name_stem", "calibration_path", "imatrix_chunks",
+                   "calibrating", "convVisibleOptions", "convOptDisabled", "convImatrixApplies", "started_at", "finished_at", "CONV_LOW_BPW"):
+        assert needle in js, needle
+    for needle in ("Needs calibration", "Show smaller, lower-quality types", "Importance matrix", "Calibration text", "Calibration chunks",
+                   "convOptDisabled(o)", "llama-imatrix is not installed", "usually the slowest step", "convTimes(j)"):
+        assert needle in html, needle
+    assert '"Calibrate"' in js and "j.imatrix_used" in js
+    assert "replace(/[^A-Za-z0-9._-]+/g" not in js  # the UI no longer has its own naming rule
+    assert ".stepper li.stopped" in (UI / "styles.css").read_text(encoding="utf-8")
+
+
+def test_ui_stepper_logic_runs_in_node(mock):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    harness = js + """
+var a = app();
+function keys(j) { return a.convStages(j).map(function (s) { return s.key + ":" + s.cls; }).join(" "); }
+var base = { request: { source: { hf_repo: "a/b" }, quant: "IQ2_XS" }, imatrix_used: true };
+var out = [
+  keys(Object.assign({}, base, { state: "calibrating" })),
+  keys(Object.assign({}, base, { state: "failed", failed_stage: "calibrating" })),
+  keys(Object.assign({}, base, { state: "cancelled", failed_stage: "downloading" })),
+  keys(Object.assign({}, base, { state: "failed", failed_stage: "queued" })),
+  keys({ request: { source: { path: "/x" }, quant: "Q8_0" }, imatrix_used: false, state: "done" }),
+  keys({ request: { source: { hf_repo: "a/b" }, quant: "Q4_K_M" }, imatrix_used: false, state: "validating" }),
+  a.dur(200) + "|" + a.dur(45) + "|" + a.dur(3900)
+];
+console.log(JSON.stringify(out));
+"""
+    prelude = "global.window = global; global.document = {documentElement: {removeAttribute() {}, setAttribute() {}}}; global.localStorage = {getItem() { return null; }, setItem() {}}; global.matchMedia = () => ({matches: false, addEventListener() {}});"
+    r = subprocess.run([node, "-"], input=prelude + chr(10) + harness, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        pytest.skip("app.js needs a browser environment: " + r.stderr[-200:])
+    import json
+
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out[0] == "download:done convert:done calibrate:active quantize:todo validate:todo"
+    assert out[1] == "download:done convert:done calibrate:failed quantize:todo validate:todo"
+    assert out[2] == "download:stopped convert:todo calibrate:todo quantize:todo validate:todo"
+    assert out[3] == "download:todo convert:todo calibrate:todo quantize:todo validate:todo"
+    assert out[4] == "download:skipped convert:done quantize:skipped validate:done"
+    assert out[5] == "download:done convert:done quantize:done validate:active"
+    assert out[6] == "3m 20s|45s|1h 5m"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Model card copy buttons and the allowed-servers selection ("<node>/*")
+# ---------------------------------------------------------------------------------------------------------------
+def _put_model(client, name, **extra):
+    body = {"file": "qwen2.5-3b-q4.gguf", **extra}
+    return client.put(f"/api/models/{name}", json=body, headers=HEAD)
+
+
+def test_mock_pin_devices_accepts_whole_server_wildcard(client, mock):
+    node = next(n for n, s in mock.SERVERS.items() if s["alive"] and len(s["gpus"]) > 1)
+    ok = _put_model(client, "pinned", pin_devices=[f"{node}/*"])
+    assert ok.status_code == 200
+    saved = next(m for m in client.get("/api/state", headers=HEAD).json()["models"] if m["spec"]["name"] == "pinned")
+    assert saved["spec"]["pin_devices"] == [f"{node}/*"]
+    rec = client.post("/api/recommend", json={"file": "qwen2.5-3b-q4.gguf", "pin_devices": [f"{node}/*"]}, headers=HEAD)
+    assert rec.status_code == 200
+    nodes = {a["node_id"] for o in rec.json()["options"] for a in o["assignments"]}
+    assert nodes <= {node}  # every option stays inside the selected server
+    assert client.post("/api/models/pinned/plan", headers=HEAD).status_code == 200
+    assert _put_model(client, "pinned", pin_devices=["nope/*"]).status_code == 422  # unknown server, like the real API
+    assert _put_model(client, "pinned", pin_devices="x").status_code == 422
+    assert _put_model(client, "pinned", pin_devices=["noslash"]).status_code == 422
+    assert client.post("/api/recommend", json={"file": "qwen2.5-3b-q4.gguf", "pin_devices": ["nope/*"]}, headers=HEAD).status_code == 422
+    mock.reset()
+
+
+def test_ui_has_copy_buttons_on_the_model_card():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    for needle in ('aria-label="Copy endpoint"', 'aria-label="Copy model name"', "Copy curl", "copy(m.spec.name)", "curlSnippet(m.spec.name)"):
+        assert needle in html, needle
+    assert "curlSnippet: function (modelName)" in js
+    assert ".ep-line" in (UI / "styles.css").read_text(encoding="utf-8")
+
+
+def test_ui_has_allowed_servers_selection():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    for needle in ("All servers and GPUs", "Only selected ones", "toggleServer(s", "toggleGpu(s, d", "pinNodeState(s)", "pinSummary()",
+                   "Nothing selected", "disabled in the pool", "server offline", "GPUs added later", "stay enabled for other models"):
+        assert needle in html, needle
+    for needle in ('"/*"', "pinWhole", "pinSummary", '"Limited to "', "Select at least one server or GPU"):
+        assert needle in js, needle
+    assert "Auto placement" not in html
+
+
+def test_ui_pin_logic_runs_in_node():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    harness = js + """
+var a = app();
+var gp = function (n) { return { node_id: n, alive: true, gpus: ["CUDA0", "CUDA1", "CUDA2"].map(function (x) { return { device_id: x }; }) }; };
+var s1 = gp("a"), s2 = gp("b");
+a.servers = function () { return [s1, s2]; };
+a.gpus = function (s) { return s.gpus; };
+a.form.pins = [];
+a.toggleServer(s1, true);
+var out = [a.form.pins.slice(), a.pinNodeState(s1)];
+a.toggleGpu(s1, s1.gpus[1], false);
+out.push(a.form.pins.slice(), a.pinNodeState(s1));
+a.toggleGpu(s2, s2.gpus[0], true);
+out.push(a.form.pins.slice(), a.pinNodeState(s2), a.pinSummary());
+a.toggleServer(s1, true);
+out.push(a.form.pins.slice());
+a.toggleServer(s1, false);
+out.push(a.form.pins.slice());
+out.push(a.specChips({ spec: { pin_devices: ["a/*", "b/CUDA1"] } }));
+console.log(JSON.stringify(out));
+"""
+    prelude = "global.window = global; global.document = {documentElement: {removeAttribute() {}, setAttribute() {}}}; global.localStorage = {getItem() { return null; }, setItem() {}}; global.matchMedia = () => ({matches: false, addEventListener() {}});"
+    r = subprocess.run([node, "-"], input=prelude + chr(10) + harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-300:]
+    import json
+
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out[0] == ["a/*"] and out[1] == "all"
+    assert out[2] == ["a/CUDA0", "a/CUDA2"] and out[3] == "some"  # one GPU off a whole-server pick -> the explicit rest
+    assert out[4] == ["a/CUDA0", "a/CUDA2", "b/CUDA0"] and out[5] == "some" and out[6] == "3 of 6 GPUs on 2 servers"
+    assert out[7] == ["b/CUDA0", "a/*"]  # a whole server replaces that node's single-GPU pins
+    assert out[8] == ["b/CUDA0"]
+    assert out[9] == ["Limited to a, b/CUDA1"]

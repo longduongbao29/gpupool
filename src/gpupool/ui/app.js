@@ -94,9 +94,14 @@ function emptyBrowse() {
 }
 
 // Conversion: stage order of a job and how each job state maps onto it.
-var CONV_STAGES = [["download", "Download"], ["convert", "Convert"], ["quantize", "Quantize"], ["validate", "Validate"]];
-var CONV_STATE_STAGE = { downloading: 0, converting: 1, quantizing: 2, validating: 3 };
-var CONV_ACTIVE = ["queued", "downloading", "converting", "quantizing", "validating"];
+// "calibrate" (the importance matrix) is only shown for jobs with imatrix_used.
+var CONV_STAGES = [["download", "Download"], ["convert", "Convert"], ["calibrate", "Calibrate"], ["quantize", "Quantize"], ["validate", "Validate"]];
+var CONV_STATE_KEY = { downloading: "download", converting: "convert", calibrating: "calibrate", quantizing: "quantize", validating: "validate" };
+var CONV_ACTIVE = ["queued", "downloading", "converting", "calibrating", "quantizing", "validating"];
+// Types the converter writes directly: no quantize step, no importance matrix.
+var CONV_DIRECT = ["F16", "BF16", "Q8_0"];
+// Types below this many bits per weight are tucked away behind "Show smaller, lower-quality types".
+var CONV_LOW_BPW = 3.0;
 var CONV_TIER = {
   lossless: ["Lossless", "accent"], near_lossless: ["Near-lossless", "green"], balanced: ["Balanced", "blue"],
   small: ["Small", "amber"], tiny: ["Tiny", ""]
@@ -106,8 +111,9 @@ var CONV_TIER = {
 function emptyConv() {
   return {
     open: false, tab: "hf", repo: "", revision: "", path: "", inspecting: false, err: "", res: null, quant: "Q4_K_M",
-    name: "", nameEdited: false, keepSource: false, advOpen: false, busy: false,
-    adv: { intermediate: "auto", output_tensor_type: "", token_embedding_type: "", leave_output_tensor: false, pure: false, allow_remote_code: false, validate_generation: true, threads: 0 }
+    name: "", nameEdited: false, keepSource: false, advOpen: false, busy: false, showLow: false,
+    adv: { intermediate: "auto", output_tensor_type: "", token_embedding_type: "", leave_output_tensor: false, pure: false, allow_remote_code: false, validate_generation: true, threads: 0,
+           imatrix: "auto", calibration_path: "", imatrix_chunks: 0 }
   };
 }
 
@@ -152,11 +158,11 @@ function app() {
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", noGguf: false, browse: emptyBrowse() },
     // conversion (Hugging Face -> GGUF)
     conv: emptyConv(),
-    convOpts: { loaded: false, available: true, problem: null, quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } },
+    convOpts: { loaded: false, available: true, problem: null, imatrix_available: true, quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } },
     convJobs: [],
     convErr: "",
     convSeen: null, // job id -> last seen state (null until the first poll: the backlog never toasts)
-    convStage: {}, // job id -> last active stage index seen, to show where a failed job stopped
+    convStage: {}, // job id -> last stage key seen while polling: fallback for a failed job that carries no failed_stage
     convUi: {}, // job id -> { log, val } expanded panels
     convBusy: {}, // job id -> an action is in flight
     convPollAt: 0,
@@ -655,7 +661,7 @@ function app() {
       var seen = this.convSeen, next = {}, self = this, libDirty = false;
       jobs.forEach(function (j) {
         next[j.id] = j.state;
-        if (CONV_STATE_STAGE[j.state] !== undefined) self.convStage[j.id] = CONV_STATE_STAGE[j.state];
+        if (CONV_STATE_KEY[j.state] !== undefined) self.convStage[j.id] = CONV_STATE_KEY[j.state];
         if (seen === null || seen[j.id] === undefined || seen[j.id] === j.state) return;
         if (j.state === "done") { self.toast("Converted " + j.output_name + ": it is in the library now", "ok"); libDirty = true; }
         else if (j.state === "needs_review") self.toast(j.output_name + " converted but needs your review", "warning", false, 9000);
@@ -668,10 +674,10 @@ function app() {
     convLoadOptions: async function () {
       try {
         var o = await this.api("GET", "/api/convert/options");
-        this.convOpts = { loaded: true, available: !!o.available, problem: o.problem || null,
+        this.convOpts = { loaded: true, available: !!o.available, problem: o.problem || null, imatrix_available: o.imatrix_available !== false,
           quant_options: o.quant_options || [], cluster: o.cluster || { largest_gpu_mb: 0, pool_mb: 0 } };
       } catch (e) {
-        if (e.status === 404) this.convOpts = { loaded: true, available: false, problem: "This coordinator does not support model conversion.", quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } };
+        if (e.status === 404) this.convOpts = { loaded: true, available: false, problem: "This coordinator does not support model conversion.", imatrix_available: true, quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } };
         else { this.convOpts.loaded = true; this.fail(e); }
       }
     },
@@ -721,6 +727,7 @@ function app() {
         var r = await this.api("POST", "/api/convert/inspect", spec);
         c.res = r;
         c.quant = r.recommended || "Q4_K_M";
+        c.showLow = false;
         c.nameEdited = false;
         c.name = this.convDefaultName();
         c.advOpen = false;
@@ -730,15 +737,49 @@ function app() {
       }
       c.inspecting = false;
     },
-    // Same rule as the backend default "<model>-<QUANT>.gguf".
+    // The backend default "<name_stem>-<QUANT>.gguf": the stem comes from inspect, so the UI never has its own naming rule.
     convDefaultName: function () {
-      var c = this.conv, src = c.tab === "path" ? c.path.trim().replace(/\/+$/, "") : c.repo.trim().replace(/\/+$/, "");
-      var base = src.split("/").pop().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "") || "model";
-      return base + "-" + c.quant + ".gguf";
+      var c = this.conv;
+      return ((c.res && c.res.name_stem) || "model") + "-" + c.quant + ".gguf";
     },
     convPick: function (t) {
+      var o = ((this.conv.res && this.conv.res.options) || []).find(function (x) { return x.type === t; });
+      if (o && this.convOptDisabled(o)) return;
       this.conv.quant = t;
+      if (o && o.needs_imatrix && this.conv.adv.imatrix === "off") this.conv.adv.imatrix = "auto"; // Off is refused for these types
       if (!this.conv.nameEdited) this.conv.name = this.convDefaultName();
+    },
+    // ----- quantization picker: very-low-bit types folded away, importance-matrix badge and gate -----
+    convIsLow: function (o) { return o.bpw < CONV_LOW_BPW; },
+    // The chosen type always stays visible, even when the low-bit group is folded.
+    convVisibleOptions: function () {
+      var self = this, c = this.conv;
+      return ((c.res && c.res.options) || []).filter(function (o) { return !self.convIsLow(o) || c.showLow || o.type === c.quant; });
+    },
+    convHiddenCount: function () {
+      return (((this.conv.res && this.conv.res.options) || []).length) - this.convVisibleOptions().length;
+    },
+    convLowCount: function () { var self = this; return ((this.conv.res && this.conv.res.options) || []).filter(function (o) { return self.convIsLow(o); }).length; },
+    convOptDisabled: function (o) { return !!o.needs_imatrix && !this.convOpts.imatrix_available; },
+    // Does the importance matrix apply to the selected type at all (F16/BF16/Q8_0 are written directly)?
+    convImatrixApplies: function () { var o = this.convOption(); return !!o && o.via !== "convert" && CONV_DIRECT.indexOf(o.type) < 0; },
+    // Mode sent to the server: without llama-imatrix on the coordinator the only workable choice is off.
+    convImatrixMode: function () {
+      if (!this.convImatrixApplies()) return "auto";
+      return this.convOpts.imatrix_available ? this.conv.adv.imatrix : "off";
+    },
+    // Will a calibration step run? Mirrors the server: auto = on for types that need it or are under 4 bits.
+    convImatrixWillRun: function () {
+      var o = this.convOption(), m = this.convImatrixMode();
+      if (!o || !this.convImatrixApplies()) return false;
+      return m === "on" || (m === "auto" && (!!o.needs_imatrix || o.bpw < 4.0));
+    },
+    convCalibPathErr: function () {
+      var p = this.conv.adv.calibration_path.trim();
+      if (!p) return "";
+      if (!/^(\/|[A-Za-z]:[\\/])/.test(p)) return "The calibration text must be an absolute path on the server";
+      if (!/\.txt$/i.test(p)) return "The calibration text must be a .txt file";
+      return "";
     },
     convNameInput: function () {
       this.conv.nameEdited = this.conv.name.trim() !== "" && this.conv.name !== this.convDefaultName();
@@ -770,12 +811,15 @@ function app() {
       if (!this.convOpts.available) return "Conversion is not available on this coordinator";
       if (!c.res || !this.convertible()) return "Inspect a convertible model first";
       if (!this.convNameOk()) return "The output name must end in .gguf and use only letters, digits, dot, dash and underscore";
+      if (this.convImatrixApplies() && this.convCalibPathErr()) return this.convCalibPathErr();
+      var o = this.convOption();
+      if (o && this.convOptDisabled(o)) return o.type + " needs llama-imatrix, which is not installed on this coordinator";
       if (c.busy) return "Starting...";
       return "";
     },
     convBody: function () {
       var c = this.conv, a = c.adv, quantFlags = !this.convViaConvert();
-      var th = parseInt(a.threads, 10);
+      var th = parseInt(a.threads, 10), ch = parseInt(a.imatrix_chunks, 10), im = this.convImatrixApplies();
       return {
         source: this.convSpec(), quant: c.quant, name: c.name.trim(), keep_source: !!c.keepSource && c.tab === "hf",
         advanced: {
@@ -784,6 +828,9 @@ function app() {
           token_embedding_type: quantFlags && a.token_embedding_type ? a.token_embedding_type : null,
           leave_output_tensor: quantFlags && !!a.leave_output_tensor, pure: quantFlags && !!a.pure,
           allow_remote_code: !!a.allow_remote_code, validate_generation: !!a.validate_generation,
+          imatrix: this.convImatrixMode(),
+          calibration_path: im && a.calibration_path.trim() ? a.calibration_path.trim() : null,
+          imatrix_chunks: im && !isNaN(ch) && ch > 0 ? ch : 0,
           threads: isNaN(th) || th < 0 ? 0 : th
         }
       };
@@ -829,36 +876,51 @@ function app() {
       return s.hf_repo ? s.hf_repo + (s.revision && s.revision !== "main" ? "@" + s.revision : "") : (s.path || "");
     },
     convStateClass: function (j) {
-      return { queued: "", downloading: "amber", converting: "amber", quantizing: "amber", validating: "amber", needs_review: "amber", done: "green", failed: "red", cancelled: "" }[j.state] || "";
+      return { queued: "", downloading: "amber", converting: "amber", calibrating: "amber", quantizing: "amber", validating: "amber", needs_review: "amber", done: "green", failed: "red", cancelled: "" }[j.state] || "";
     },
     convStateText: function (j) { return String(j.state).replace(/_/g, " "); },
     convIsActive: function (j) { return CONV_ACTIVE.indexOf(j.state) >= 0; },
-    convIsRunning: function (j) { return CONV_STATE_STAGE[j.state] !== undefined; },
-    // Index of the stage a failed / cancelled job stopped in: remembered from polling, else guessed from its data.
+    convIsRunning: function (j) { return CONV_STATE_KEY[j.state] !== undefined; },
+    // Key of the stage a failed / cancelled job stopped in: the server's failed_stage, else the last stage seen while polling.
     convStoppedAt: function (j) {
-      if (this.convStage[j.id] !== undefined) return this.convStage[j.id];
-      var hf = !!(j.request && j.request.source && j.request.source.hf_repo);
-      if (hf && (j.bytes_total == null || j.bytes_done < j.bytes_total)) return 0;
-      if (j.validation) return 3;
-      if ((j.log_tail || []).some(function (l) { return /^\[\s*\d+\/\s*\d+\]|llama-quantize|quantiz/i.test(l); })) return 2;
-      return 1; // downloaded (or a local folder) and not yet validated: most likely it stopped while converting
+      if (j.failed_stage) return CONV_STATE_KEY[j.failed_stage] || null; // "queued" -> before the first step
+      return this.convStage[j.id] || null;
     },
-    // Four steps with a status class each: done / active / failed / skipped / todo.
+    // Steps with a status class each: done / active / failed / stopped / skipped / todo.
+    // Calibrate appears only when an importance matrix is computed; Quantize is skipped for the direct types.
     convStages: function (j) {
-      var hf = !!(j.request && j.request.source && j.request.source.hf_repo), cur;
-      if (j.state === "done" || j.state === "needs_review") cur = 4;
-      else if (CONV_STATE_STAGE[j.state] !== undefined) cur = CONV_STATE_STAGE[j.state];
-      else if (j.state === "queued") cur = -1;
-      else cur = this.convStoppedAt(j);
-      var stopped = j.state === "failed" || j.state === "cancelled";
-      return CONV_STAGES.map(function (st, i) {
+      var req = j.request || {}, hf = !!(req.source && req.source.hf_repo), direct = CONV_DIRECT.indexOf(req.quant) >= 0;
+      var list = CONV_STAGES.filter(function (st) { return st[0] !== "calibrate" || j.imatrix_used; });
+      var keys = list.map(function (st) { return st[0]; });
+      var stopped = j.state === "failed" || j.state === "cancelled", over = j.state === "done" || j.state === "needs_review";
+      var cur = -1;
+      if (CONV_STATE_KEY[j.state] !== undefined) cur = keys.indexOf(CONV_STATE_KEY[j.state]);
+      else if (stopped) cur = keys.indexOf(this.convStoppedAt(j));
+      return list.map(function (st, i) {
         var cls = "todo";
-        if (i === 0 && !hf) cls = "skipped";
-        else if (stopped && i === cur) cls = j.state === "failed" ? "failed" : "todo";
-        else if (i < cur) cls = "done";
-        else if (i === cur && !stopped) cls = "active";
+        if (st[0] === "download" && !hf) cls = "skipped";
+        else if (st[0] === "quantize" && direct) cls = "skipped";
+        else if (over) cls = "done";
+        else if (stopped && i === cur) cls = j.state === "failed" ? "failed" : "stopped";
+        else if (cur >= 0 && i < cur) cls = "done";
+        else if (!stopped && i === cur) cls = "active";
         return { key: st[0], label: st[1], cls: cls };
       });
+    },
+    // "1h 5m" / "3m 20s" / "45s".
+    dur: function (sec) {
+      var d = Math.max(0, Math.round(sec));
+      if (d < 60) return d + "s";
+      if (d < 3600) return Math.floor(d / 60) + "m " + (d % 60) + "s";
+      return Math.floor(d / 3600) + "h " + Math.floor((d % 3600) / 60) + "m";
+    },
+    // Queued: waiting since; running: started (worker start) ago; ended: how long it ran and when it ended.
+    convTimes: function (j) {
+      if (j.state === "queued") return "queued " + this.ago(j.created_at);
+      if (this.convIsActive(j)) return "started " + this.ago(j.started_at || j.created_at);
+      var fin = j.finished_at;
+      if (j.started_at != null && fin != null) return "ran " + this.dur(fin - j.started_at) + ", finished " + this.ago(fin);
+      return fin != null ? "finished " + this.ago(fin) : "started " + this.ago(j.created_at);
     },
     // 0..100, or null when the stage has no measurable progress (shown as a moving bar).
     convPct: function (j) {
@@ -869,6 +931,7 @@ function app() {
     convProgressText: function (j) {
       var p = this.convPct(j);
       if (j.state === "downloading") return this.bytes(j.bytes_done) + (j.bytes_total ? " / " + this.bytes(j.bytes_total) : "") + (p == null ? "" : " (" + Math.round(p) + "%)");
+      if (j.state === "calibrating") return "Computing the importance matrix on the CPU" + (p == null ? "..." : ": " + Math.round(p) + "%");
       return p == null ? "Working..." : Math.round(p) + "%";
     },
     convUiOf: function (j) { return this.convUi[j.id] || { log: false, val: null }; },
@@ -1060,6 +1123,46 @@ function app() {
         this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null));
       }
     },
+    // ----- allowed servers / GPUs: "<node>/*" = the whole server (also GPUs added later), "<node>/<device>" = one GPU -----
+    pinWhole: function (s) { return this.form.pins.indexOf(s.node_id + "/*") >= 0; },
+    pinHas: function (s, d) { return this.pinWhole(s) || this.form.pins.indexOf(this.pinLabel(s, d)) >= 0; },
+    // "all" (checked) / "some" (indeterminate) / "none" for a server row.
+    pinNodeState: function (s) {
+      if (this.pinWhole(s)) return "all";
+      var self = this, g = this.gpus(s), n = g.filter(function (d) { return self.pinHas(s, d); }).length;
+      return n === 0 ? "none" : (n === g.length ? "all" : "some");
+    },
+    pinReset: function () { this.form.plan = null; this.form.rec = null; this.form.sim = null; },
+    // Checking a server stores "<node>/*" and drops that node's single-GPU pins; unchecking removes everything of the node.
+    toggleServer: function (s, on) {
+      var prefix = s.node_id + "/";
+      this.form.pins = this.form.pins.filter(function (p) { return p.indexOf(prefix) !== 0; });
+      if (on) this.form.pins.push(prefix + "*");
+      this.pinReset();
+    },
+    // Unchecking one GPU of a whole-server pick turns it into the explicit remaining "<node>/<device>" pins.
+    toggleGpu: function (s, d, on) {
+      var key = this.pinLabel(s, d);
+      if (this.pinWhole(s)) {
+        if (on) return;
+        var rest = this.gpus(s).filter(function (x) { return x.device_id !== d.device_id; }).map(function (x) { return s.node_id + "/" + x.device_id; });
+        this.form.pins = this.form.pins.filter(function (p) { return p !== s.node_id + "/*"; }).concat(rest);
+        this.pinReset();
+        return;
+      }
+      this.togglePin(key, on);
+    },
+    // "3 of 7 GPUs on 2 servers"
+    pinSummary: function () {
+      var self = this, gpus = 0, total = 0, nodes = 0;
+      this.servers().forEach(function (s) {
+        var all = self.gpus(s), n = all.filter(function (d) { return self.pinHas(s, d); }).length;
+        total += all.length;
+        gpus += n;
+        if (n > 0 || self.pinWhole(s)) nodes += 1;
+      });
+      return gpus + " of " + total + " GPUs on " + nodes + " server" + (nodes === 1 ? "" : "s");
+    },
     togglePin: function (key, on) {
       var i = this.form.pins.indexOf(key);
       if (on && i < 0) this.form.pins.push(key);
@@ -1112,6 +1215,7 @@ function app() {
     specChips: function (m) {
       var sp = m.spec || {}, out = [];
       if (sp.kv_cache_type && sp.kv_cache_type !== "f16") out.push("KV " + sp.kv_cache_type);
+      if ((sp.pin_devices || []).length) out.push("Limited to " + sp.pin_devices.map(function (p) { return p.replace(/\/\*$/, ""); }).join(", "));
       if (sp.speculative === "ngram") out.push("Spec: n-gram");
       else if (sp.speculative === "draft") out.push("Spec: draft " + (sp.draft ? String(sp.draft).replace(/^coordinator:\/\//, "") : "?"));
       return out;
@@ -1127,6 +1231,7 @@ function app() {
       if (sb.error) { this.toast(sb.error, "error"); return false; }
       var pb = this.perfBody(f);
       if (pb.error) { this.toast(pb.error, "error"); return false; }
+      if (!f.auto && !f.pins.length) { this.toast("Select at least one server or GPU, or use all servers and GPUs", "error"); return false; }
       f.busy = true;
       try {
         await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), Object.assign({
@@ -1254,8 +1359,8 @@ function app() {
     },
 
     // ================= snippets =================
-    curlSnippet: function () {
-      var name = this.models().length ? this.models()[0].spec.name : "<model>";
+    curlSnippet: function (modelName) {
+      var name = modelName || (this.models().length ? this.models()[0].spec.name : "<model>");
       var auth = this.settings().api_keys_set ? "  -H \"Authorization: Bearer <api key>\" \\\n" : "";
       return "curl " + this.endpoint() + "/chat/completions \\\n" + auth + "  -H \"Content-Type: application/json\" \\\n" +
         "  -d '{\"model\": \"" + name + "\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'";

@@ -16,7 +16,7 @@ import psutil
 import pytest
 
 from gpupool.converter.models import ConvertError
-from gpupool.converter.toolchain import Toolchain, run_tool
+from gpupool.converter.toolchain import ImatrixProgress, Toolchain, run_tool
 
 FAKE_CONVERT = r'''
 import json, os, sys, time
@@ -74,15 +74,49 @@ if os.environ.get("FAKE_ARGV_LOG"):
         fh.write(json.dumps(args) + "\n")
 pos = [a for a in args if not a.startswith("--")]
 # flags with a value: drop their values from the positional list
-for flag in ("--output-tensor-type", "--token-embedding-type"):
+for flag in ("--output-tensor-type", "--token-embedding-type", "--imatrix"):
     if flag in args:
         pos.remove(args[args.index(flag) + 1])
 src, dst = pos[0], pos[1]
+# Mirrors llama-quantize b11342: these types are refused without an importance matrix.
+NEEDS = {"IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS"}
+if pos[2] in NEEDS and "--imatrix" not in args:
+    sys.stderr.write("============================================================\n")
+    sys.stderr.write("Missing importance matrix for tensor blk.0.attn_k.weight in a very low-bit quantization\n")
+    sys.stderr.write("The result will be garbage, so bailing out\n")
+    sys.exit(1)
+if "--imatrix" in args and not os.path.isfile(args[args.index("--imatrix") + 1]):
+    sys.stderr.write("failed to load imatrix file\n"); sys.exit(1)
 if os.environ.get("FAKE_QUANT_MODE") == "fail":
     sys.stderr.write("llama_model_quantize: failed to quantize: boom\n"); sys.exit(1)
 for i in (1, 2):
     print("[%4d/%4d] blk.%d.weight - [8, 8], type = f32, size = 0.000 MB" % (i, 2, i), flush=True)
 shutil.copyfile(src, dst)
+'''
+
+FAKE_IMATRIX = r'''
+import json, os, sys, time
+args = sys.argv[1:]
+model = args[args.index("-m") + 1]
+calib = args[args.index("-f") + 1]
+out = args[args.index("-o") + 1]
+chunks = int(args[args.index("--chunks") + 1])
+if os.environ.get("FAKE_IMATRIX_LOG"):
+    with open(os.environ["FAKE_IMATRIX_LOG"], "a") as fh:
+        fh.write(json.dumps({"args": args, "calib": open(calib, encoding="utf-8").read(),
+                             "model_exists": os.path.isfile(model)}) + "\n")
+mode = os.environ.get("FAKE_IMATRIX_MODE", "ok")
+if mode == "fail":
+    sys.stderr.write("compute_imatrix: the data file you provided tokenizes to only 3 tokens\n")
+    sys.exit(1)
+sys.stderr.write("compute_imatrix: computing over %d chunks, n_ctx=512, batch_size=2048, n_seq=4\n" % chunks)
+sys.stderr.write("compute_imatrix: 0.05 seconds per pass - ETA 0.02 minutes\n")
+sys.stderr.flush()
+if mode == "slow":
+    time.sleep(120)
+if mode != "nofile":
+    with open(out, "wb") as fh:
+        fh.write(b"GGUF-imatrix")
 '''
 
 FAKE_TOKENIZE = r'''
@@ -120,14 +154,15 @@ print(json.dumps({"ids": [list(t.encode("utf-8")) for t in texts]}))
 '''
 
 
-def make_toolkit(root: Path) -> Toolchain:
+def make_toolkit(root: Path, imatrix: bool = True) -> Toolchain:
     cdir = root / "llama.cpp"
     (cdir / "conversion").mkdir(parents=True)
     (cdir / "convert_hf_to_gguf.py").write_text(FAKE_CONVERT, encoding="utf-8")
     tools = root / "bin"
     tools.mkdir()
     for name, src in (("llama-quantize", FAKE_QUANTIZE), ("llama-tokenize", FAKE_TOKENIZE),
-                      ("llama-simple", FAKE_SIMPLE)):
+                      ("llama-simple", FAKE_SIMPLE),
+                      *((("llama-imatrix", FAKE_IMATRIX),) if imatrix else ())):
         (tools / f"{name}.py").write_text(src, encoding="utf-8")
     hf = root / "hf_tokenize_fake.py"
     hf.write_text(FAKE_HF_TOKENIZE, encoding="utf-8")
@@ -323,3 +358,55 @@ async def test_run_tool_flushes_unterminated_last_line():
     res = await run_tool([sys.executable, "-c", "import sys; sys.stdout.write('no newline')"],
                          capture=True)
     assert res.output == "no newline"
+
+
+# ---- llama-imatrix --------------------------------------------------------------------------
+
+
+def test_imatrix_is_optional(tmp_path):
+    tc = make_toolkit(tmp_path)
+    assert tc.has_imatrix() and tc.problem() is None
+    lean = make_toolkit(tmp_path / "lean", imatrix=False)
+    assert not lean.has_imatrix()
+    assert lean.problem() is None  # missing llama-imatrix never disables conversion
+    with pytest.raises(ConvertError) as e:
+        lean.imatrix_cmd(Path("m.gguf"), Path("c.txt"), Path("o.gguf"))
+    assert e.value.status == 503 and "llama-imatrix is not installed" in e.value.message
+    assert not Toolchain(None).has_imatrix()
+
+
+def test_imatrix_cmd_flags(tmp_path):
+    tc = make_toolkit(tmp_path)
+    cmd = tc.imatrix_cmd(Path("m.gguf"), Path("c.txt"), Path("o.gguf"), chunks=7, threads=3)
+    flags = cmd[2:]  # after [python, script]
+    assert flags[:6] == ["-m", "m.gguf", "-f", "c.txt", "-o", "o.gguf"]
+    assert flags[flags.index("--chunks") + 1] == "7" and "--no-ppl" in flags
+    assert flags[flags.index("-ngl") + 1] == "0" and flags[flags.index("-c") + 1] == "512"
+    assert flags[flags.index("-t") + 1] == "3"
+    assert "-t" not in tc.imatrix_cmd(Path("m"), Path("c"), Path("o"))
+    assert tc.imatrix_cmd(Path("m"), Path("c"), Path("o"))[2:][flags.index("--chunks")] == "--chunks"
+
+
+def test_quantize_cmd_with_imatrix(tmp_path):
+    tc = make_toolkit(tmp_path)
+    cmd = tc.quantize_cmd(Path("i.gguf"), Path("o.gguf"), "IQ2_M", imatrix=Path("im.gguf"), threads=2)
+    args = cmd[2:]
+    assert args[:2] == ["--imatrix", "im.gguf"] and args[-4:] == ["i.gguf", "o.gguf", "IQ2_M", "2"]
+    assert "--imatrix" not in tc.quantize_cmd(Path("i"), Path("o"), "Q4_K_M")
+
+
+def test_imatrix_progress_parsing():
+    p = ImatrixProgress()
+    assert p.fraction(0) is None
+    p.feed("compute_imatrix: computing over 100 chunks, n_ctx=512, batch_size=2048, n_seq=4", 10.0)
+    assert p.chunks == 100 and p.fraction(10.0) is None
+    p.feed("compute_imatrix: 5.00 seconds per pass - ETA 2.00 minutes", 15.0)
+    assert p.fraction(15.0) == pytest.approx(5 / 120)
+    assert p.fraction(75.0) == pytest.approx(65 / 120)
+    assert p.fraction(10_000.0) == 0.99  # the clock alone never claims completion
+    h = ImatrixProgress()
+    h.feed("computing over 10 chunks, n_ctx=512", 0)
+    h.feed("compute_imatrix: 1.0 seconds per pass - ETA 1 hours 2.50 minutes", 0)
+    assert h.fraction(1.0 + 3750 / 2) == pytest.approx(0.5, abs=0.01)
+    h.feed("[3]5.1234,[4]5.0001,", 1.0)  # per-chunk entries (perplexity on) win when present
+    assert h.fraction(5.0) == pytest.approx(0.4)

@@ -22,7 +22,7 @@ from gpupool.converter.models import (
     ClusterVram, ConvertError, InspectResult, SourceFile, SourceSpec,
 )
 from gpupool.converter.quant import (
-    QUANT_OPTIONS, estimate_bytes, estimate_vram_mb, recommend,
+    QUANT_OPTIONS, estimate_bytes, estimate_vram_mb, name_stem, recommend,
 )
 
 HF_BASE = "https://huggingface.co"
@@ -393,4 +393,4 @@ async def inspect_source(spec: SourceSpec, *, hf: HfClient, locate_dir: Callable
         source_bytes=sum(f.bytes for f in files), files=files, skipped=skipped,
         remote_code=remote_code, gated=gated, base_model=base_model,
         gguf_alternatives=alternatives, options=options, recommended=rec,
-        recommend_reasons=reasons, warnings=warnings)
+        name_stem=name_stem(spec), recommend_reasons=reasons, warnings=warnings)

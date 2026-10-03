@@ -2,7 +2,8 @@
 
 Layout (see the Docker image): `convert_dir` holds convert_hf_to_gguf.py, conversion/ and
 gguf-py/; `python` is an interpreter with the converter's dependencies (torch, transformers);
-`tools_dir` holds the CPU build of llama-quantize, llama-tokenize and llama-simple.
+`tools_dir` holds the CPU build of llama-quantize, llama-tokenize and llama-simple, and
+optionally llama-imatrix (without it only importance-matrix work is refused, see has_imatrix).
 
 Test seam (explicit, off by default): `Toolchain(..., script_tools=True)` additionally accepts
 `<tool>.py` scripts in tools_dir, run with the converter's python. Real deployments never set it;
@@ -29,6 +30,8 @@ log = logging.getLogger(__name__)
 
 _EXE = ".exe" if os.name == "nt" else ""
 TOOL_NAMES = ("llama-quantize", "llama-tokenize", "llama-simple")
+IMATRIX_NOT_INSTALLED = ("llama-imatrix is not installed: rebuild the coordinator image "
+                         "(importance matrices need it)")
 
 # ggml type names llama-quantize accepts for --output-tensor-type / --token-embedding-type
 # (it matches case-insensitively). Whitelisted so a user-supplied value can never become an
@@ -42,6 +45,49 @@ CONVERT_OUTTYPES = frozenset({"f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "a
 
 _ARCH_LINE = re.compile(r"^(?:[A-Z]+:[\w.\-]+:)?\s*-\s+(\S+)\s*$")
 _MAX_CAPTURE = 1 << 20
+
+
+# llama-imatrix (tools/imatrix/imatrix.cpp, b11342) logs, per run:
+#   "compute_imatrix: computing over 100 chunks, n_ctx=2048, batch_size=2048, n_seq=4"
+#   "compute_imatrix: 12.34 seconds per pass - ETA 5.08 minutes"   (also "1 hours 5.08 minutes")
+# and, only when perplexity is on (we pass --no-ppl), one "[<chunk>]<ppl>," entry per chunk.
+# Nothing else marks progress, so the percentage is the ETA clock against elapsed time.
+_IM_CHUNKS = re.compile(r"computing over (\d+) chunks")
+_IM_ETA = re.compile(r"([\d.]+) seconds per pass - ETA (?:(\d+) hours )?([\d.]+) minutes")
+_IM_PPL = re.compile(r"\[(\d+)\][\d.]+,")
+
+
+class ImatrixProgress:
+    """Turns llama-imatrix's output into a 0..1 fraction; call feed() per line, fraction() any time."""
+
+    def __init__(self) -> None:
+        self.chunks: int | None = None
+        self._done: int | None = None
+        self._total_s: float | None = None
+        self._t0: float | None = None
+
+    def feed(self, line: str, now: float) -> None:
+        m = _IM_CHUNKS.search(line)
+        if m:
+            self.chunks = int(m.group(1))
+            return
+        m = _IM_ETA.search(line)
+        if m:
+            per_pass = float(m.group(1))
+            self._total_s = int(m.group(2) or 0) * 3600 + float(m.group(3)) * 60
+            self._t0 = now - per_pass  # the first pass is already behind us
+            return
+        if self.chunks:
+            for m in _IM_PPL.finditer(line):
+                self._done = max(self._done or 0, int(m.group(1)))
+
+    def fraction(self, now: float) -> float | None:
+        if self._done is not None and self.chunks:
+            return min(1.0, self._done / self.chunks)
+        if self._total_s and self._t0 is not None:
+            # Never reach 1.0 from the clock alone: the matrix is written after the last chunk.
+            return max(0.0, min(0.99, (now - self._t0) / self._total_s))
+        return None
 
 
 def check_ggml_type(value: str, what: str) -> str:
@@ -234,6 +280,10 @@ class Toolchain:
             return f"{', '.join(missing)} not found in {self.tools_dir}"
         return None
 
+    def has_imatrix(self) -> bool:
+        """llama-imatrix is installed (optional: only importance-matrix jobs need it)."""
+        return self._tool_cmd("llama-imatrix") is not None
+
     async def supported_architectures(self) -> set[str] | None:
         """Architectures the pinned converter knows (TEXT models), cached. None = unavailable."""
         if self._archs is not None:
@@ -295,10 +345,13 @@ class Toolchain:
     def quantize_cmd(self, src: Path, dst: Path, qtype: str, *, threads: int = 0,
                      leave_output_tensor: bool = False, pure: bool = False,
                      output_tensor_type: str | None = None,
-                     token_embedding_type: str | None = None) -> list[str]:
+                     token_embedding_type: str | None = None,
+                     imatrix: Path | None = None) -> list[str]:
         base = self._tool_cmd("llama-quantize")
         assert base is not None
         cmd = list(base)
+        if imatrix is not None:
+            cmd += ["--imatrix", str(imatrix)]
         if leave_output_tensor:
             cmd.append("--leave-output-tensor")
         if pure:
@@ -311,6 +364,23 @@ class Toolchain:
         cmd += [str(src), str(dst), qtype]
         if threads > 0:
             cmd.append(str(threads))
+        return cmd
+
+    def imatrix_cmd(self, model: Path, calibration: Path, out: Path, chunks: int = 100,
+                    threads: int = 0) -> list[str]:
+        """llama-imatrix at b11342 (flags from common/arg.cpp, defaults from imatrix.cpp):
+        -m model, -f calibration text, -o output (GGUF by default, which llama-quantize
+        --imatrix reads), --chunks N (max chunks to process), -c 512 (the usual imatrix context:
+        short sequences keep the CPU run fast), --no-ppl (skip the perplexity pass, it only
+        costs time), -ngl 0 (CPU only, like the rest of the toolchain), -t threads when given."""
+        base = self._tool_cmd("llama-imatrix")
+        if base is None:
+            from gpupool.converter.models import ConvertError
+            raise ConvertError(IMATRIX_NOT_INSTALLED, 503)
+        cmd = [*base, "-m", str(model), "-f", str(calibration), "-o", str(out),
+               "--chunks", str(max(1, int(chunks))), "-c", "512", "--no-ppl", "-ngl", "0"]
+        if threads > 0:
+            cmd += ["-t", str(threads)]
         return cmd
 
     def tokenize_cmd(self, model: Path, prompt_file: Path) -> list[str]:

@@ -1,7 +1,8 @@
 """Conversion job manager: Hugging Face / local weights -> GGUF in the model library.
 
-One worker runs one job at a time (FIFO): download/stage -> convert -> quantize -> validate ->
-library. Job rows live in sqlite (own connection, like Library); the heavy work is subprocesses
+One worker runs one job at a time (FIFO): download/stage -> convert -> [calibrate] -> quantize ->
+validate -> library. "calibrate" (llama-imatrix on the 16-bit intermediate) only runs for jobs whose
+quant type needs an importance matrix or benefits from one (see quant.imatrix_wanted). Job rows live in sqlite (own connection, like Library); the heavy work is subprocesses
 (output streamed line by line) and threads, so the event loop that also serves inference is
 never blocked.
 
@@ -41,9 +42,16 @@ from gpupool.converter.models import (
     SourceFile,
     Validation,
 )
-from gpupool.converter.quant import check_output_name, default_output_name, estimate_bytes, plan_steps
+from gpupool.converter.quant import (
+    check_output_name,
+    default_output_name,
+    estimate_bytes,
+    imatrix_wanted,
+    option,
+    plan_steps,
+)
 from gpupool.converter.source import HfClient, inspect_source, local_files, select_files
-from gpupool.converter.toolchain import Toolchain, run_tool
+from gpupool.converter.toolchain import IMATRIX_NOT_INSTALLED, ImatrixProgress, Toolchain, run_tool
 from gpupool.converter.validate import validate
 
 log = logging.getLogger(__name__)
@@ -52,6 +60,10 @@ _PROGRESS_INTERVAL_S = 1.0
 _LOG_MEM = 200
 _LOG_DB = 50
 _DISK_MARGIN = 512 * 1024 * 1024
+_CALIBRATION_MAX = 20 * 1024 * 1024  # largest calibration text accepted
+_DEFAULT_CHUNKS = 100  # llama-imatrix chunks when the request says 0
+# The multilingual text shipped with gpupool (tests point this at their own file).
+BUILTIN_CALIBRATION = Path(__file__).parent / "data" / "calibration.txt"
 _REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _TQDM_RE = re.compile(r"(\d{1,3})%\|")
 _QUANT_RE = re.compile(r"^\[\s*(\d+)/\s*(\d+)\]")
@@ -63,6 +75,7 @@ class LibraryPort(Protocol):
     def name_taken(self, name: str) -> bool: ...
     def add_converted(self, name: str, path: Path, hf_repo: str | None) -> LibraryItem: ...
     def locate_dir(self, path: str) -> Path: ...
+    def locate_file(self, path: str) -> Path: ...
 
 
 @dataclass
@@ -151,6 +164,12 @@ class ConvertManager:
                 " stage_progress REAL, bytes_done INTEGER NOT NULL DEFAULT 0, bytes_total INTEGER,"
                 " output_bytes INTEGER, est_output_bytes INTEGER, log_tail TEXT, plan TEXT,"
                 " created_at REAL NOT NULL, started_at REAL, finished_at REAL)")
+            cols = {r[1] for r in self._db.execute("PRAGMA table_info(convert_jobs)")}
+            if "failed_stage" not in cols:  # databases of the first release
+                self._db.execute("ALTER TABLE convert_jobs ADD COLUMN failed_stage TEXT")
+            if "imatrix_used" not in cols:
+                self._db.execute(
+                    "ALTER TABLE convert_jobs ADD COLUMN imatrix_used INTEGER NOT NULL DEFAULT 0")
             rows = self._db.execute("SELECT * FROM convert_jobs ORDER BY seq").fetchall()
         for r in rows:
             job = ConvertJob(
@@ -158,6 +177,7 @@ class ConvertManager:
                 state=r["state"], stage_progress=r["stage_progress"], bytes_done=r["bytes_done"],
                 bytes_total=r["bytes_total"], output_name=r["output_name"],
                 output_bytes=r["output_bytes"], est_output_bytes=r["est_output_bytes"],
+                failed_stage=r["failed_stage"], imatrix_used=bool(r["imatrix_used"]),
                 validation=(Validation.model_validate_json(r["validation"])
                             if r["validation"] else None),
                 error=r["error"], log_tail=json.loads(r["log_tail"] or "[]"),
@@ -175,19 +195,22 @@ class ConvertManager:
                 job.validation.model_dump_json() if job.validation else None, job.error,
                 job.stage_progress, job.bytes_done, job.bytes_total, job.output_bytes,
                 job.est_output_bytes, json.dumps(tail), json.dumps(self._plans.get(job.id, {})),
-                job.created_at, job.started_at, job.finished_at)
+                job.created_at, job.started_at, job.finished_at, job.failed_stage,
+                int(job.imatrix_used))
         with self._lock:
             cur = self._db.execute(
                 "UPDATE convert_jobs SET state=?, output_name=?, request=?, validation=?, error=?,"
                 " stage_progress=?, bytes_done=?, bytes_total=?, output_bytes=?, est_output_bytes=?,"
-                " log_tail=?, plan=?, created_at=?, started_at=?, finished_at=? WHERE id=?",
+                " log_tail=?, plan=?, created_at=?, started_at=?, finished_at=?, failed_stage=?,"
+                " imatrix_used=? WHERE id=?",
                 (*vals, job.id))
             if cur.rowcount == 0:
                 self._db.execute(
                     "INSERT INTO convert_jobs(state, output_name, request, validation, error,"
                     " stage_progress, bytes_done, bytes_total, output_bytes, est_output_bytes,"
-                    " log_tail, plan, created_at, started_at, finished_at, id, seq)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " log_tail, plan, created_at, started_at, finished_at, failed_stage,"
+                    " imatrix_used, id, seq)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (*vals, job.id, seq if seq is not None else self._seq))
         self._last_flush[job.id] = time.monotonic()
 
@@ -228,6 +251,9 @@ class ConvertManager:
 
     def available(self) -> str | None:
         return self.toolchain.problem()
+
+    def imatrix_available(self) -> bool:
+        return self.toolchain.has_imatrix()
 
     def list(self) -> list[ConvertJob]:
         return [self._view(j) for j in reversed(self._jobs.values())]
@@ -283,6 +309,7 @@ class ConvertManager:
         problem = self.toolchain.problem()
         if problem:
             raise ConvertError(problem, 503)
+        use_imatrix = self._decide_imatrix(req)
         insp = await inspect_source(
             req.source, hf=self.hf, locate_dir=self.library.locate_dir, cluster=ClusterVram(),
             supported_architectures=await self.toolchain.supported_architectures())
@@ -302,19 +329,82 @@ class ConvertManager:
         est = next((o.est_bytes for o in insp.options if o.type == req.quant), None)
         if est is None and insp.params:
             est = estimate_bytes(insp.params, req.quant)
+        await self._early_disk_check(req, insp, name, est)
         # No await between the name check and the insert: two submits cannot both pass.
         conflict = self._name_conflict(name)
         if conflict:
             raise ConvertError(conflict, 409)
         self._seq += 1
         job = ConvertJob(id=uuid.uuid4().hex[:12], request=req, state="queued", output_name=name,
-                         est_output_bytes=est, created_at=self._clock())
+                         est_output_bytes=est, imatrix_used=use_imatrix, created_at=self._clock())
         self._jobs[job.id] = job
         self._plans[job.id] = {"params": insp.params, "source_bytes": insp.source_bytes,
                                "architecture": insp.architecture}
         self._persist(job, seq=self._seq)
         self._enqueue(job.id)
         return self._view(job)
+
+    def _decide_imatrix(self, req: ConvertRequest) -> bool:
+        """Does this job compute an importance matrix? Raises ConvertError when the request
+        cannot be honoured (type needs one but it is off / llama-imatrix missing / bad text)."""
+        adv = req.advanced
+        opt = option(req.quant)
+        if opt.needs_imatrix and adv.imatrix == "off":
+            raise ConvertError(
+                f"{req.quant} needs an importance matrix (llama-quantize refuses it without one): "
+                "set the importance matrix option to auto or on, or choose a larger type", 422)
+        use = imatrix_wanted(req.quant, adv.imatrix)
+        if use and not self.toolchain.has_imatrix():
+            if opt.needs_imatrix or adv.imatrix == "on":
+                raise ConvertError(IMATRIX_NOT_INSTALLED, 503)
+            use = False  # auto on a type that only benefits from one: go without
+        if use:
+            self._check_calibration(adv.calibration_path)
+        return use
+
+    def _check_calibration(self, path: str | None) -> None:
+        if not path:
+            if not BUILTIN_CALIBRATION.is_file():
+                raise ConvertError("the built-in calibration text is missing from this install; "
+                                   "give a calibration_path or reinstall gpupool", 503)
+            return
+        try:
+            p = Path(self.library.locate_file(path))
+        except ConvertError:
+            raise
+        except Exception as e:
+            raise ConvertError(f"calibration text: {getattr(e, 'message', str(e))}", 422) from e
+        if p.suffix.lower() != ".txt":
+            raise ConvertError(f"calibration text must be a .txt file, got {p.name}", 422)
+        try:
+            size = p.stat().st_size
+        except OSError as e:
+            raise ConvertError(f"calibration text cannot be read: {e}", 422) from e
+        if size == 0:
+            raise ConvertError(f"calibration text {p.name} is empty", 422)
+        if size > _CALIBRATION_MAX:
+            raise ConvertError(f"calibration text {p.name} is {_gb(size)}; the limit is "
+                               f"{_CALIBRATION_MAX // 2**20} MB", 422)
+
+    async def _early_disk_check(self, req: ConvertRequest, insp, name: str, est: int | None) -> None:
+        """Refuse a job the disk obviously cannot hold: what is still to download (files already
+        in the HF cache do not count) + the 16-bit intermediate + the output + a margin. The
+        worker checks again per stage, since space can shrink while a job waits in the queue."""
+        spec = req.source
+        remaining = 0
+        if spec.hf_repo:
+            cache = self._cache_dir(spec.hf_repo, spec.revision)
+            remaining = await asyncio.to_thread(self._remaining_bytes, cache, insp.files)
+        outtype, qtype = plan_steps(req.quant, req.advanced.intermediate, None)
+        if qtype is None:
+            inter = 0
+        elif insp.params:
+            inter = insp.params * (4 if outtype == "f32" else 2)
+        else:
+            inter = insp.source_bytes
+        what = (f"downloading {spec.hf_repo} ({_gb(remaining)}) and converting it to {name}"
+                if spec.hf_repo else f"converting {spec.path} to {name}")
+        await asyncio.to_thread(self._check_disk, remaining + inter + (est or 0) + _DISK_MARGIN, what)
 
     def _enqueue(self, job_id: str) -> None:
         self._queue.append(job_id)
@@ -351,6 +441,7 @@ class ConvertManager:
         job.bytes_done = 0
         job.bytes_total = None
         job.output_bytes = None
+        job.failed_stage = None
         job.started_at = None
         job.finished_at = None
         self._set_state(job, "queued")
@@ -519,15 +610,18 @@ class ConvertManager:
 
     async def _fail(self, job: ConvertJob, message: str,
                     validation: Validation | None = None) -> None:
+        stage = job.state if job.state in ACTIVE_STATES else None
         await asyncio.to_thread(self._rmtree, self._work_dir(job.id))
         self._set_state(job, "failed", error=message, finished_at=self._clock(),
-                        validation=validation or job.validation)
+                        failed_stage=stage, validation=validation or job.validation)
 
     async def _finalize_cancel(self, job: ConvertJob) -> None:
         if job.state == "cancelled":
             return
+        stage = job.state if job.state in ACTIVE_STATES else None
         await asyncio.to_thread(self._rmtree, self._work_dir(job.id))
-        self._set_state(job, "cancelled", error=None, finished_at=self._clock())
+        self._set_state(job, "cancelled", error=None, finished_at=self._clock(),
+                        failed_stage=stage)
 
     # ---- pipeline --------------------------------------------------------------------------
 
@@ -591,6 +685,9 @@ class ConvertManager:
                 done += got if isinstance(got, int) and got > 0 else f.bytes
                 self._progress(job, bytes_done=done)
         self._persist(job)
+        if adv.imatrix == "on" and not job.imatrix_used and qtype_guess is None:
+            self._log(job, f"importance matrix ignored: {req.quant} is written directly by the "
+                           "converter, there is no quantize step to apply it to")
 
         # --- staging: the converter only ever sees links to the selected files ---
         await self._thread(ctx, self._stage, origin, selected, src_dir, ctx.stop)
@@ -612,6 +709,11 @@ class ConvertManager:
             raise ConvertError("convert_hf_to_gguf.py finished but wrote no output file")
         final = converted
 
+        # --- calibrate: importance matrix of the 16-bit model on the calibration text ---
+        imatrix_file: Path | None = None
+        if qtype is not None and job.imatrix_used:
+            imatrix_file = await self._calibrate(job, ctx, converted, work)
+
         # --- quantize ---
         if qtype is not None:
             self._check_disk(out_est + _DISK_MARGIN, f"quantizing to {qtype}")
@@ -621,7 +723,7 @@ class ConvertManager:
                 converted, final, qtype, threads=adv.threads or self.threads,
                 leave_output_tensor=adv.leave_output_tensor, pure=adv.pure,
                 output_tensor_type=adv.output_tensor_type,
-                token_embedding_type=adv.token_embedding_type)
+                token_embedding_type=adv.token_embedding_type, imatrix=imatrix_file)
             await self._tool(job, ctx, cmd, "llama-quantize")
             if not final.is_file():
                 raise ConvertError("llama-quantize finished but wrote no output file")
@@ -652,6 +754,39 @@ class ConvertManager:
         self._set_state(job, "done", error=None, finished_at=self._clock())
 
     # ---- pipeline pieces -------------------------------------------------------------------
+
+    async def _calibrate(self, job: ConvertJob, ctx: _Ctx, model: Path, work: Path) -> Path:
+        """Run llama-imatrix over `model` (the converted 16-bit file); returns the matrix file."""
+        adv = job.request.advanced
+        self._check_disk(_DISK_MARGIN, "computing the importance matrix")
+        self._set_state(job, "calibrating")
+        text = work / "calibration.txt"
+        await self._thread(ctx, self._stage_calibration, adv.calibration_path, text)
+        out = work / "imatrix.gguf"
+        cmd = self.toolchain.imatrix_cmd(model, text, out, chunks=adv.imatrix_chunks or _DEFAULT_CHUNKS,
+                                         threads=adv.threads or self.threads)
+        await self._tool(job, ctx, cmd, "llama-imatrix", imatrix=ImatrixProgress())
+        if not out.is_file() or out.stat().st_size == 0:
+            raise ConvertError("llama-imatrix finished but wrote no importance matrix")
+        return out
+
+    def _stage_calibration(self, user_path: str | None, dest: Path) -> None:
+        """Snapshot the calibration text into the work dir: the file the user pointed at may
+        change or vanish while the job runs, and llama-imatrix must see one stable text."""
+        if user_path:
+            try:
+                src = Path(self.library.locate_file(user_path))
+            except ConvertError:
+                raise
+            except Exception as e:
+                raise ConvertError(f"calibration text: {getattr(e, 'message', str(e))}", 422) from e
+            if src.stat().st_size > _CALIBRATION_MAX:
+                raise ConvertError("calibration text is larger than 20 MB", 422)
+        else:
+            src = BUILTIN_CALIBRATION
+            if not src.is_file():
+                raise ConvertError("the built-in calibration text is missing from this install")
+        shutil.copyfile(src, dest)
 
     @staticmethod
     def _check_rel(name: str) -> None:
@@ -752,7 +887,8 @@ class ConvertManager:
         job.output_bytes = target.stat().st_size
 
     async def _tool(self, job: ConvertJob, ctx: _Ctx, cmd: list[str], label: str, *,
-                    env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
+                    env: dict[str, str] | None = None, cwd: Path | None = None,
+                    imatrix: ImatrixProgress | None = None) -> None:
         """Run one tool with progress and log tracking; non-zero exit -> ConvertError carrying
         the tool's last meaningful output lines."""
         ctx.tail.clear()
@@ -760,6 +896,12 @@ class ConvertManager:
 
         def on_line(line: str) -> None:
             self._log(job, line, ctx)
+            if imatrix is not None:
+                imatrix.feed(line, time.monotonic())
+                f = imatrix.fraction(time.monotonic())
+                if f is not None:
+                    self._progress(job, stage_progress=f)
+                return
             m = _TQDM_RE.search(line)
             if m:
                 self._progress(job, stage_progress=int(m.group(1)) / 100)
@@ -768,7 +910,21 @@ class ConvertManager:
             if m and int(m.group(2)) > 0:
                 self._progress(job, stage_progress=int(m.group(1)) / int(m.group(2)))
 
-        res = await run_tool(cmd, env=env, cwd=cwd, on_line=on_line)
+        async def tick() -> None:
+            # llama-imatrix is silent between its start-up lines and the end: advance the
+            # percentage from its own ETA estimate once a second.
+            while True:
+                await asyncio.sleep(_PROGRESS_INTERVAL_S)
+                f = imatrix.fraction(time.monotonic()) if imatrix is not None else None
+                if f is not None:
+                    self._progress(job, stage_progress=f)
+
+        ticker = asyncio.ensure_future(tick()) if imatrix is not None else None
+        try:
+            res = await run_tool(cmd, env=env, cwd=cwd, on_line=on_line)
+        finally:
+            if ticker is not None:
+                ticker.cancel()
         self._persist(job)
         if res.code != 0:
             raise ConvertError(self._tool_error(label, res.code, list(ctx.tail)))

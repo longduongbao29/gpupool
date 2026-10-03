@@ -258,6 +258,15 @@ class Library:
             raise LibraryError(f"not a directory: {p}")
         return p
 
+    def locate_file(self, path: str) -> Path:
+        """Translate an absolute host path to an existing regular file visible to this process."""
+        if not path or not _is_abs(path):
+            raise LibraryError("path must be absolute")
+        p = self._locate(path)
+        if not p.is_file():
+            raise LibraryError(f"not a regular file: {p}")
+        return p
+
     def name_taken(self, name: str) -> bool:
         return self.get(name) is not None
 

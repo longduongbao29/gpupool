@@ -9,20 +9,25 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-# Curated llama-quantize types. IQ1/IQ2 are left out: llama-quantize refuses them without an
-# importance matrix, which gpupool does not compute (yet).
+# Curated llama-quantize types. The IQ1/IQ2/IQ3_XXS/IQ3_XS ones need an importance matrix
+# (llama-quantize refuses them without one); gpupool computes it with llama-imatrix.
 QuantType = Literal[
     "F16", "BF16", "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "IQ4_XS", "Q4_0",
-    "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K",
+    "Q3_K_L", "Q3_K_M", "IQ3_M", "IQ3_S", "Q3_K_S", "IQ3_XS", "IQ3_XXS", "Q2_K",
+    "IQ2_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ1_M", "IQ1_S",
 ]
+# auto = compute an importance matrix when the type needs one or is below ~4 bits, where it
+# helps most; on = always (slower, better at every size); off = never (refused for types that need it).
+ImatrixMode = Literal["auto", "on", "off"]
 # What convert_hf_to_gguf.py writes before llama-quantize runs. "auto" = the highest-fidelity
 # 16-bit type for the source (bf16 for bf16 weights, else f16).
 Intermediate = Literal["auto", "f16", "bf16", "f32"]
 JobState = Literal[
-    "queued", "downloading", "converting", "quantizing", "validating",
+    "queued", "downloading", "converting", "calibrating", "quantizing", "validating",
     "needs_review", "done", "failed", "cancelled",
 ]
-ACTIVE_STATES: frozenset[str] = frozenset({"queued", "downloading", "converting", "quantizing", "validating"})
+ACTIVE_STATES: frozenset[str] = frozenset(
+    {"queued", "downloading", "converting", "calibrating", "quantizing", "validating"})
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 
@@ -48,6 +53,7 @@ class QuantOption(BaseModel):
     tier: Literal["lossless", "near_lossless", "balanced", "small", "tiny"]
     note: str  # quality note, e.g. llama-quantize's "+0.1754 ppl @ Llama-3-8B"
     via: Literal["convert", "quantize"]  # F16/BF16/Q8_0 are written by the converter directly
+    needs_imatrix: bool = False  # llama-quantize refuses this type without an importance matrix
     # Filled by inspect for a concrete model; None in the static option list.
     est_bytes: int | None = None
     est_vram_mb: int | None = None  # file + KV cache at ctx 4096 + runtime overhead
@@ -97,6 +103,7 @@ class InspectResult(BaseModel):
     gguf_alternatives: list[str] = Field(default_factory=list)  # HF repos with ready GGUF builds
     options: list[QuantOption] = Field(default_factory=list)  # every QuantType, with estimates
     recommended: QuantType = "Q4_K_M"
+    name_stem: str = "model"  # default output name is f"{name_stem}-{quant}.gguf"
     recommend_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -111,6 +118,11 @@ class ConvertAdvanced(BaseModel):
     # that code runs inside the coordinator.
     allow_remote_code: bool = False
     validate_generation: bool = True  # generate a few tokens on CPU after converting
+    imatrix: ImatrixMode = "auto"
+    # Calibration text for the importance matrix: an absolute .txt path on the server (host paths
+    # translated like library paths). None = the multilingual text shipped with gpupool.
+    calibration_path: str | None = None
+    imatrix_chunks: int = Field(default=0, ge=0)  # 512-token chunks to process; 0 = default (100)
     threads: int = Field(default=0, ge=0)  # 0 = coordinator default (GPUPOOL_CONVERT_THREADS)
 
 
@@ -151,6 +163,8 @@ class ConvertJob(BaseModel):
     bytes_done: int = 0  # download stage
     bytes_total: int | None = None
     output_name: str
+    failed_stage: JobState | None = None  # the stage that was running when it failed / was cancelled
+    imatrix_used: bool = False  # an importance matrix was (or will be) computed for this job
     output_bytes: int | None = None
     est_output_bytes: int | None = None
     validation: Validation | None = None

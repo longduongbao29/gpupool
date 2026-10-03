@@ -2,15 +2,17 @@
 
 > English version. Vietnamese version: [PLATFORM_DESIGN.vi.md](PLATFORM_DESIGN.vi.md). Keep both in sync.
 
-**Status: implemented.** All four rollout phases (section 8) are in the code, plus two later additions that
-the design called for in its open questions: per-model VRAM self-calibration and persisted control state.
+**Status: implemented.** All four rollout phases (section 9) are in the code, plus three later additions: per-model VRAM
+self-calibration and persisted control state (which the design called for in its open questions), and
+conversion of Hugging Face models to GGUF (section 6).
 This is a design-rationale document: why the system behaves as it does. For the exact HTTP interface see
 [API.en.md](API.en.md).
 
 Goal: gpupool manages **many models on many servers and GPUs** at once, shares resources deliberately
 (priority, spreading, load-based scaling) and **recommends GPUs/servers** for each model with reasons
 and estimates. This document covers the behaviour that motivated the design, the resource model, the
-allocation algorithm, a summary of the API, the data changes and the rollout.
+allocation algorithm, how models get into the library (conversion, which also chooses a quantization type that
+fits the cluster), a summary of the API, the data changes and the rollout.
 
 ## 1. Baseline: behaviour with several models before this design
 
@@ -60,6 +62,10 @@ a constant **η = 0.5** and `t_hop` = 2 ms per RPC hop (`scheduler/scoring.py`).
 bandwidth gets a default. Prefill depends on compute more than on bandwidth; the estimate ranks by decode
 only. Measured decode speed is read from `/metrics` and shown next to the estimate in
 `GET /api/models/{name}/scaling`, but it does **not** feed back into η (see open questions).
+
+**Before the file exists.** For a model that has not been converted yet there is no GGUF header to read, so the
+VRAM need is estimated from `config.json` and the quantization type (section 6.2). That estimate only guides
+the choice of a type; once the GGUF exists the scheduler uses its real header and the calibration factor.
 
 **Sharing a GPU.** Two busy models on one GPU split its bandwidth, each getting about half its speed. A
 model that is mostly idle can share fine. The co-location penalty is therefore based on **measured
@@ -208,7 +214,145 @@ what is recommended is what the scheduler would do.
 - When nothing fits, says why: the memory needed, the largest free single GPU and node, and the largest
   `ctx_size` that would fit (`not_possible`).
 
-## 6. API summary
+The same question is asked one step earlier for a model that must first be converted: which quantization type
+will fit this cluster. That recommendation (section 6.2) uses the cluster's largest GPU and total VRAM instead
+of the scheduler's scoring, because at that point there is no file to place yet.
+
+## 6. Getting models in: conversion
+
+The scheduler places GGUF files, but a lot of models are published only as safetensors or PyTorch weights.
+Without a way to turn those into GGUF the platform would be limited to what someone else already converted,
+and to the quantization they happened to pick. This section is the rationale; the pipeline itself (stages,
+caching, disk checks, persistence) is in [DESIGN.en.md](DESIGN.en.md#17-hugging-face-to-gguf-conversion-converter),
+usage in [QUICKSTART.en.md](QUICKSTART.en.md#serving-a-model-that-has-no-gguf-convert) and the routes in
+[API.en.md](API.en.md#12-conversion-apiconvert).
+
+### 6.1 Where conversion fits
+
+```mermaid
+flowchart LR
+  A[GGUF from Hugging Face] --> L[Model library]
+  B[GGUF at a server path] --> L
+  C[Source weights: HF repo or folder] --> V[Convert, quantize, validate]
+  V -->|passes the gate| L
+  L --> S[Scheduler: estimate, place, calibrate]
+```
+
+There are three ways into the library. A ready GGUF is downloaded or registered as before. Source weights go
+through a conversion job whose only product is a GGUF file that the library registers like any other
+(`LibraryItem.source` is `"convert"`). From there the scheduler does not care how the file got there: it reads
+the real GGUF header and self-calibrates VRAM (4.7) exactly as for a downloaded model. That is the point of
+making conversion produce an ordinary library item rather than a special kind of model.
+
+**Why in the coordinator.** The coordinator owns the library (`models_dir`), so the output lands where it will
+be used and no file has to be shipped between machines. Conversion and quantization are CPU, RAM and disk work
+and need no GPU, so the CPU toolchain (llama.cpp's converter, `llama-quantize`, `llama-imatrix`) is enough, and
+the GPUs stay free for inference. The cost is that the coordinator also serves the router, so the work is
+shaped to stay out of its way: **one job at a time**, in submission order, with every tool at low priority.
+Two jobs at once would only slow each other down and could exhaust the disk; one job at low priority slows the
+coordinator a little but does not starve routing. The toolchain is optional, so a coordinator without it keeps
+working and only refuses conversion requests with an explanation.
+
+### 6.2 Choosing the quant type against cluster capacity
+
+The quantization type decides the file size, so it decides whether the model fits one GPU, needs several
+(split over RPC, which is slower), or does not fit at all. Making the user pick a type blind would mean
+converting, finding out it does not fit and converting again, which costs minutes to hours of CPU. So
+`inspect` looks at the source **before** any work and tells the user, per type, the estimated size and whether
+it fits the cluster as it is now.
+
+- **Size estimate.** Each type has a whole-model bits-per-weight taken from `llama-quantize`'s published
+  Llama-3-8B sizes. Applied directly it was 24 % low on Qwen2.5-0.5B, because two effects depend on the
+  model. The token embedding and output matrices stay near 8 bits in low-bit types; they are about 13 % of
+  Llama-3-8B but 28 % of a small model with a large vocabulary, so they are costed separately (about 8.5 bpw)
+  and the bpw of the remaining weights is derived from the reference. And K-quants need rows that are a
+  multiple of 256 values; when the hidden size is not (Qwen2.5-0.5B: 896), `llama-quantize` falls back per
+  tensor to a legacy type, which is larger, so the estimate uses the bpw of the fallback. Measured: Qwen2.5-0.5B
+  `Q4_K_M` 390.7 MB estimated against 397.8 MB real, SmolLM2-135M 103.1 against 105.5 MB. The same estimate
+  guards the disk (DESIGN section 17.3), including a check at submit that refuses a job the disk obviously
+  cannot hold.
+- **IQ types.** Their nominal bits per weight understate real files, because `llama-quantize` keeps the
+  output matrix and the most sensitive tensors at higher types, so their rows use whole-file sizes published for
+  Llama-3-8B rather than the nominal figure (the nominal one is quoted in the note). They fall back to a 4.5 bpw
+  type for rows not divisible by 256, like the K-quants.
+- **VRAM.** File size + f16 KV cache at context 4096 + 300 MB of runtime overhead. It is a fixed,
+  deliberately plain assumption for the decision, not a promise about the final `ctx_size`.
+- **Fit.** Each type is marked as fitting the **largest GPU** and as fitting the **pool** (the sum of all
+  GPUs). The difference matters: a model that fits only the pool must be split over RPC, which is slower, so
+  fitting one GPU is preferred and the reason says so when the pool is used.
+- **Recommendation ladder.** The first type that fits one GPU from `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M`
+  (best quality first); if none, the first that fits the pool. Models under 3 B parameters only use the first
+  three, because small models lose quality fastest; if even those do not fit, the full ladder is tried and the
+  reason says quality will suffer. Lower types (Q3, Q2, IQ) are listed as options but are not on the ladder:
+  choosing one is a conscious trade of quality for memory. With no GPU servers there is no fit information,
+  and a size rule applies instead (`Q8_0` below 3 B, `Q5_K_M` below 15 B, else `Q4_K_M`).
+
+**Relation to the scheduler.** The conversion estimate only guides the choice of a type. Once the job is done
+the file is an ordinary library item, and placement uses its real header (`ModelMeta`) and the per-model
+calibration factor (4.7). The two estimates do not need to agree exactly, and the real one always wins.
+
+### 6.3 Importance matrices
+
+Quantization rounds weights, and rounding every weight equally wastes bits on weights that hardly matter. An
+**importance matrix** (imatrix) records, for each weight, how strongly it is exercised when the model processes
+real text, so `llama-quantize` can spend its error budget where it hurts least. The gain grows as the type gets
+smaller; at about 4 bits and above the loss is already small and the extra work is not worth doing by default.
+
+`imatrix` is `auto`, `on` or `off`:
+
+- `auto` turns it on when the type needs one, or its bits per weight is below 4 (`Q3_K_S`, `IQ3_*`, `Q2_K`,
+  `IQ2_*`, `IQ1_*`).
+- Some types **require** one: `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ2_M`, `IQ3_XXS`, `IQ3_XS`
+  (`llama-quantize` refuses tensors of these types without a matrix; `IQ2_M` and `IQ3_XS` files contain such
+  tensors). Setting `off` for them is refused at submit with 422 instead of failing after hours of conversion.
+- `on` computes one for any quantized type (slower, better at every size). `F16`, `BF16` and `Q8_0` are written
+  by the converter directly, with no `llama-quantize` step to feed a matrix into, so they never compute one.
+- The decision is made at submit and stored as `imatrix_used`, so it is visible before the job runs.
+
+**Cost.** One extra pass: `llama-imatrix` runs the 16-bit model on the CPU over N chunks of 512 tokens (default
+100, `imatrix_chunks`) and writes the matrix; it is a job state of its own, `calibrating`, between `converting`
+and `quantizing`. That is a forward pass of the unquantized model, so it is the slowest part for large models
+and is the reason `auto` is not simply "always". `llama-imatrix` is optional like the rest of the toolchain
+(`imatrix_available` in `GET /api/convert/options`); without it, work that needs a matrix is refused with a
+clear 503, and other conversions still work.
+
+**Calibration text.** The matrix reflects the text it was computed on, so the text is a design decision. gpupool
+ships its **own, original** multilingual text (prose, Vietnamese, CJK, code, math, JSON, chat-formatted
+dialogue). Original, because the usual public calibration sets carry licenses that gpupool cannot simply
+redistribute; multilingual and with code, because a matrix computed on English prose protects English at the
+expense of other languages and code (the bias of the matrix is the bias of its text), and this platform is not
+English-only. A user who knows the model's domain can pass `calibration_path` (an absolute `.txt` on the server,
+host paths translated like library paths, at most 20 MB).
+
+### 6.4 Validation as a gate into the library
+
+A converted model is not trusted blindly: the converter has per-architecture code, tokenizers are converted
+separately from weights, and a wrong tokenizer degrades answers silently, with nothing crashing to warn
+anyone. So a result is published to the library only after `validating`:
+
+- the GGUF header must be readable, with an architecture and a tokenizer (else the job **fails**; the file
+  could not be served);
+- the tokenizer is compared with the Hugging Face one on fixed probe texts, including Vietnamese, CJK and an
+  emoji sequence, the places where converted tokenizers usually differ;
+- a short generation is run on the CPU as a smoke test.
+
+A failed comparison or smoke test makes the job `needs_review`: the file is kept but **not** in the library,
+and a person decides to accept or delete it, because it may be a converter bug or an acceptable quirk and only
+a person can tell. A check that could not run (no RAM, timeout) is only a warning, since blocking on it would
+make small coordinators unusable. The details are in DESIGN section 17.4.
+
+### 6.5 Safety boundaries
+
+- **No repository code by default.** The converter loads tokenizers with `trust_remote_code=True`, which would
+  run a repository's `*.py` inside the coordinator. Those files are not downloaded or staged unless the request
+  sets `allow_remote_code`, which the UI marks as dangerous.
+- **Offline converter.** It runs with the Hugging Face hub in offline mode and sees only a **staging folder of
+  links** to the selected files, so a source folder is never modified and never read beyond what was chosen.
+- **Narrow deletion.** Only paths inside `models_dir/.convert` and `models_dir/.hf` are ever removed.
+- **Checked inputs.** Output names and user-supplied quantization flags are validated (names, a whitelist of
+  ggml type names), so a value can never become an extra command-line argument.
+
+## 7. API summary
 
 The full reference, with request and response shapes, is [API.en.md](API.en.md). All design endpoints live
 under `/api` and take the admin key; new request fields are optional, so older clients keep working.
@@ -221,6 +365,7 @@ under `/api` and take the admin key; new request fields are optional, so older c
 | Rebalancing (section 4.6) | `POST /api/rebalance` (`dry_run` defaults to true) |
 | State and events | `GET /api/state` (includes `calibration`, `rebalance`), `GET /api/events`, `POST /api/events/read` |
 | Router | `/v1/*` cold start returns 503 + `Retry-After` past `cold_start_timeout_s` |
+| Conversion (section 6) | `GET /api/convert/options`, `POST /api/convert/inspect`, `POST /api/convert`, `GET /api/convert[/{job_id}]`, `POST .../cancel`, `.../retry`, `.../accept`, `DELETE /api/convert/{job_id}` |
 
 Events added by the design: `preempted` (warning), `scaled_up`, `scaled_down`, `unloaded_idle`,
 `cold_start`, `rebalance_started`, `rebalanced`, `calibrated` (info), `rebalance_failed` (warning).
@@ -230,7 +375,7 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 `unplaced` but no `move` (rebalance moves are previewed with `POST /api/rebalance`); `not_possible` carries
 `need_mb`, `largest_single_gpu_mb`, `largest_single_node_mb` and `max_ctx_that_fits`.
 
-## 7. Data changes
+## 8. Data changes
 
 - `ModelSpec`: the policy fields (JSON in the `models` table, no migration), later also `kv_cache_type`,
   `speculative`, `draft`, `draft_n_max`.
@@ -241,10 +386,12 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
   `labels`/`reserve_mb` column (see section 3).
 - Table `control_state(key, value, updated_at)`: autoscaler state per model, `preempted`, `backoff`, `move`.
 - Table `model_calibration(model, factor, samples, updated_at)`.
+- Table `convert_jobs`: conversion jobs and their state; a finished job's file is an ordinary library item
+  with `source` `"convert"` (section 6).
 - The last request time per model lives in the autoscaler (persisted at a slow cadence); the router only
   reports requests to it.
 
-## 8. Rollout
+## 9. Rollout
 
 | Phase | Content | Risk | Status |
 | --- | --- | --- | --- |
@@ -253,6 +400,7 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 | 3. Preemption | preemption + cooldown + claim; `POST /api/simulate` | medium: removes serving replicas, draining must be right | done |
 | 4. Rebalancing | make-before-break rebalance; `POST /api/rebalance` | highest: reloading large models takes time | done |
 | After 4 | VRAM self-calibration (4.7); persisted control state (4.8) | low | done |
+| Conversion | Hugging Face / folder to GGUF in the coordinator; quantization type chosen against cluster capacity; importance matrices; validation gate (section 6) | medium: CPU, RAM and disk heavy, runs beside the router | done |
 
 **Phase 1 status:** done. Real run on a GTX 1650: a `priority` 80 model wins over one whose name sorts first; replicas and new models spread to other GPUs (simulated with the real scheduler); estimated vs measured decode 41.6 vs 51.8 tok/s (3B) and 204 vs 182 (0.5B). `budget_mb` now also subtracts the VRAM gpupool's own replicas hold. Spreading has not been checked on real multi-GPU hardware.
 
@@ -262,9 +410,11 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 
 **Phase 4 status:** done. Real run with two agents on one machine (a: GPU capped at 1000 MB, b: CPU only): replica `y` running on b/CPU (~30 tok/s estimated) was moved to a/CUDA0 (~204 tok/s) once the GPU freed up, score +100, in about 9.5 s. During the move a client sent 23 requests back to back and none failed. Afterwards a new check proposed nothing. The periodic run follows `rebalance_s` (default 600 s, 0 = off).
 
+**Conversion status:** done. The size estimate was checked against real files on two models (6.2: within about 2 %). The tokenizer comparison and the generation smoke test run against the real toolchain. Importance matrices and the IQ types were added after that first run; their size estimates and the quality gain they give have not been measured here. The pipeline has not been run on a model large enough to stress the coordinator's RAM and disk.
+
 Each phase is checked on a real cluster, with at least 2 servers and 2 models, before the next one starts.
 
-## 9. Open questions and decisions
+## 10. Open questions and decisions
 
 Decided:
 
@@ -285,5 +435,18 @@ Still open:
   need a separate performance score.
 - **Scoring weights** in 4.3 are a starting point, constants in code, to be tuned against real
   measurements.
+- **Importance matrices on GPU servers.** The matrix is computed on the coordinator's CPU, which is slow for
+  large models while GPUs elsewhere in the cluster sit idle. Running `llama-imatrix` on an agent that has a
+  GPU would be much faster, at the cost of shipping the 16-bit model to it and a second kind of job to track.
+- **Distributing conversion.** One job at a time on one machine is simple and safe, but a queue of large
+  models waits. Spreading jobs over several machines needs shared storage or file transfer, and a way to keep
+  the disk checks honest.
+- **LoRA adapters.** Merging an adapter into a base model before quantizing, or serving it separately, is not
+  supported; only full weights convert.
+- **Vision projectors (`mmproj`).** Multimodal models need a second GGUF for the vision part. Only the text
+  model is converted, so such a model serves text only.
+- **Calibration per model family.** One built-in multilingual text serves every model. Choosing or generating
+  text per family, or per intended use (code, chat, a language), could give a better matrix, and nothing
+  measures yet whether it would be worth the complexity.
 - **Spreading and rebalancing on real multi-GPU, multi-server hardware** are verified only with simulated
   agents and a single-GPU machine.

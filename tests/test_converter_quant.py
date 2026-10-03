@@ -1,9 +1,11 @@
+from typing import get_args
+
 import pytest
 
-from gpupool.converter.models import ConvertError, SourceSpec
+from gpupool.converter.models import ConvertError, QuantType, SourceSpec
 from gpupool.converter.quant import (
     QUANT_OPTIONS, check_output_name, default_output_name, estimate_bytes, estimate_vram_mb,
-    option, plan_steps, recommend,
+    imatrix_wanted, name_stem, option, plan_steps, recommend,
 )
 
 
@@ -21,8 +23,8 @@ def _opts(single: set[str] | None, pool: set[str] | None, params: int):
 
 def test_static_options_cover_every_type_best_first():
     types = [o.type for o in QUANT_OPTIONS]
-    assert types[:4] == ["BF16", "F16", "Q8_0", "Q6_K"] and types[-1] == "Q2_K"
-    assert len(set(types)) == 14
+    assert types[:4] == ["BF16", "F16", "Q8_0", "Q6_K"] and types[-1] == "IQ1_S"
+    assert types[2:] == list(get_args(QuantType))[2:] and set(types) == set(get_args(QuantType))
     assert option("Q4_K_M").bpw == pytest.approx(4.90, abs=0.02)
     assert option("Q8_0").via == "convert" and option("Q6_K").via == "quantize"
     assert option("F16").tier == "lossless" and option("Q2_K").tier == "tiny"
@@ -121,3 +123,64 @@ def test_estimate_bytes_matches_real_llama_quantize_outputs():
                - estimate_bytes(8_030_000_000, "Q4_K_M")) < 2e6
     assert embedding_params({"vocab_size": 10}) == 0
     assert estimate_bytes(1000, "F16", qwen) == 2000  # >= 8.5 bpw types: no split
+
+
+NEEDS = {"IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS"}
+
+
+def test_imatrix_flags_and_iq_tiers():
+    assert {o.type for o in QUANT_OPTIONS if o.needs_imatrix} == NEEDS
+    for t in ("IQ2_M", "IQ2_S", "IQ2_XS", "IQ2_XXS", "IQ1_M", "IQ1_S"):
+        assert option(t).tier == "tiny" and option(t).via == "quantize"
+    # sizes shrink down the list below Q4: the whole list is best-first
+    iq = [option(t).bpw for t in ("IQ3_M", "IQ3_S", "IQ3_XS", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XS",
+                                  "IQ2_XXS", "IQ1_M", "IQ1_S")]
+    assert iq == sorted(iq, reverse=True)
+    for o in QUANT_OPTIONS:
+        if o.type.startswith("IQ1") or o.type.startswith("IQ2"):
+            assert "importance matrix" in o.note
+
+
+def test_imatrix_wanted_modes():
+    # types the converter writes itself never use one, whatever the mode
+    for t in ("F16", "BF16", "Q8_0"):
+        assert [imatrix_wanted(t, m) for m in ("auto", "on", "off")] == [False, False, False]
+    # auto: needs one, or below 4 bits per weight
+    for t in NEEDS | {"Q2_K", "Q3_K_S", "IQ3_S", "IQ3_M"}:
+        assert imatrix_wanted(t, "auto") is True, t
+    for t in ("Q6_K", "Q5_K_M", "Q4_K_M", "Q4_K_S", "IQ4_XS", "Q4_0", "Q3_K_L", "Q3_K_M"):
+        assert imatrix_wanted(t, "auto") is False, t
+        assert imatrix_wanted(t, "on") is True and imatrix_wanted(t, "off") is False
+    assert imatrix_wanted("IQ1_S", "off") is False  # refusing that is the job manager's call
+
+
+def test_iq_types_use_the_iq4_nl_fallback_for_odd_hidden_sizes():
+    cfg = {"hidden_size": 896, "vocab_size": 1000, "num_hidden_layers": 4, "tie_word_embeddings": True}
+    # 896 % 256 != 0: every IQ type is stored as IQ4_NL (4.5 bpw) in the core weights
+    for t in ("IQ2_XXS", "IQ1_S", "IQ3_M"):
+        plain = estimate_bytes(500_000_000, t)
+        assert estimate_bytes(500_000_000, t, cfg) > plain
+
+
+def test_name_stem_and_inspect_default_name():
+    spec = SourceSpec(hf_repo="Qwen/Qwen2.5-7B-Instruct")
+    assert name_stem(spec) == "Qwen2.5-7B-Instruct"
+    assert default_output_name(spec, "IQ2_M") == f"{name_stem(spec)}-IQ2_M.gguf"
+    assert name_stem(SourceSpec(path="/")) == "model"
+
+
+def test_recommend_mentions_iq_when_nothing_on_the_ladder_fits():
+    p = 70_000_000_000
+    t, why = recommend(p, _opts(set(), set(), p))
+    assert t == "Q4_K_M" and any("IQ3" in r and "importance matrix" in r for r in why)
+
+
+def test_iq_estimates_match_real_imatrix_quantized_files():
+    # Real files written by llama.cpp b11342 (coordinator image, CI and a measured run).
+    smol = {"vocab_size": 49152, "hidden_size": 576, "tie_word_embeddings": True}
+    qwen15 = {"vocab_size": 151936, "hidden_size": 1536, "tie_word_embeddings": True}
+    for params, cfg, t, real in ((134_515_008, smol, "IQ2_XS", 84_573_088),
+                                 (1_543_714_304, qwen15, "IQ3_M", 776_663_904),
+                                 (134_515_008, smol, "Q8_0", 144_810_912)):
+        est = estimate_bytes(params, t, cfg)
+        assert abs(est - real) / real < 0.08, (t, est, real)

@@ -93,3 +93,52 @@ def test_workflow_builds_and_smoke_tests_the_toolchain_image() -> None:
     assert "WITH_CONVERT=1" in build_args("coordinator", "docker/coordinator.Dockerfile")
     assert "WITH_CONVERT=1" in build_args("e2e", "docker/coordinator.Dockerfile")
     assert "--print-supported-models" in text and "llama-quantize" in text
+
+
+def test_ci_e2e_covers_folder_source_and_imatrix() -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import ci_e2e
+
+    src = (ROOT / "scripts" / "ci_e2e.py").read_text(encoding="utf-8")
+    # The folder is downloaded with the converter's own file selection (no *.py, no pickles).
+    assert set(ci_e2e.FOLDER_FILES) == {
+        "config.json", "generation_config.json", "merges.txt", "model.safetensors",
+        "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.json"}
+    assert not any(n.endswith(".py") for n in ci_e2e.FOLDER_FILES)
+    # Direct converter type: no llama-quantize step, so no imatrix either.
+    assert ci_e2e.FOLDER_QUANT == "Q8_0"
+    assert ci_e2e.IMATRIX_QUANT == "IQ2_XS" and 0 < ci_e2e.IMATRIX_CHUNKS <= 8
+    # Distinct output names, so no job collides with another or with the first conversion.
+    names = {ci_e2e.FOLDER_OUT_NAME, ci_e2e.IMATRIX_OUT_NAME}
+    assert len(names) == 2 and all(n.endswith(".gguf") for n in names)
+    assert "imatrix_chunks" in src and "imatrix_used" in src and "imatrix_available" in src
+    # The folder is created under the models dir the compose file mounts at /models, which the
+    # coordinator image lists in GPUPOOL_MODEL_ROOTS.
+    compose = yaml.safe_load((ROOT / "docker-compose.ci.yml").read_text())
+    assert any(v.endswith(":/models:ro") for v in compose["services"]["coordinator"]["volumes"])
+    assert "/models/{FOLDER_SUBDIR}" in src
+    assert "GPUPOOL_MODEL_ROOTS=/models" in (ROOT / "docker" / "coordinator.Dockerfile").read_text(encoding="utf-8")
+
+
+def test_skip_convert_skips_every_conversion_stage() -> None:
+    import ast
+
+    tree = ast.parse((ROOT / "scripts" / "ci_e2e.py").read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    guarded = [n for n in ast.walk(main) if isinstance(n, ast.If) and "skip_convert" in ast.unparse(n.test)]
+    assert guarded, "main() must branch on --skip-convert"
+    body = "\n".join(ast.unparse(s) for g in guarded for s in g.body)
+    # Folder and imatrix stages run inside run_convert_checks, behind the same switch.
+    assert "run_convert_checks" in body
+    assert "ensure_folder_source" not in ast.unparse(main)
+
+
+def test_coordinator_image_builds_and_smoke_tests_llama_imatrix() -> None:
+    text = (ROOT / "docker" / "coordinator.Dockerfile").read_text(encoding="utf-8")
+    build = text.split("--target", 1)[1].split("&&", 1)[0]
+    assert "llama-imatrix" in build
+    assert "build/bin/llama-imatrix" in text
+    wf = (ROOT / ".github" / "workflows" / "docker.yml").read_text(encoding="utf-8")
+    assert "llama-imatrix" in wf and "--help" in wf.split("llama-imatrix", 1)[1].split("\n", 1)[0]

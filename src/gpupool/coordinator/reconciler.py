@@ -292,11 +292,15 @@ class Reconciler:
 
     @staticmethod
     def _apply_pins(spec: ModelSpec, reports: list[NodeReport]) -> None:
+        """Hide every device outside the model's allowed set from the planner; the scheduler still
+        picks the best placement among the rest. "<node>/*" allows all of that server's devices,
+        including GPUs added to it later."""
         if spec.pin_devices:
             pins = set(spec.pin_devices)
             for rep in reports:
+                whole = f"{rep.node_id}/*" in pins
                 for d in rep.devices:
-                    if f"{rep.node_id}/{d.device_id}" not in pins:
+                    if not whole and f"{rep.node_id}/{d.device_id}" not in pins:
                         d.usable_mb = 0
 
     async def draft_meta_for(self, spec: ModelSpec) -> ModelMeta | None:

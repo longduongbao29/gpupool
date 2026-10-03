@@ -123,6 +123,8 @@ class ModelSpec(BaseModel):
     parallel: int = 1
     replicas: int = 1  # desired count; 0 = stopped
     # "node_id/device_id" entries the replicas may use; empty = the scheduler chooses freely.
+    # Allowed devices, "<node>/<device>" or "<node>/*" (every device of that server). Empty = all.
+    # A limit, not a placement: the scheduler still chooses among the allowed devices.
     pin_devices: list[str] = Field(default_factory=list)
     # Higher places first each tick, so it gets scarce VRAM before lower priorities.
     priority: int = Field(default=50, ge=0, le=100)

@@ -190,7 +190,7 @@ async def test_inspect_path_reads_safetensors_headers(tmp_path, hf):
     assert (r.architecture, r.model_type, r.n_layers, r.context_length) == ("LlamaForCausalLM", "llama", 4, 2048)
     assert r.supported is True and r.weight_format == "safetensors" and r.remote_code is True
     assert "tok.py" in r.skipped and r.gated is False
-    assert len(r.options) == 14 and sum(o.recommended for o in r.options) == 1
+    assert len(r.options) == 24 and sum(o.recommended for o in r.options) == 1
     assert r.recommended == [o.type for o in r.options if o.recommended][0]
     assert r.options[0].est_bytes is not None and r.options[0].fits_single_gpu is True
 

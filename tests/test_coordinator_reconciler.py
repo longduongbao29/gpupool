@@ -319,6 +319,22 @@ async def test_pin_devices_zero_everything_else():
     assert all(v == 7000 for v in seen[-1].values())
 
 
+async def test_whole_server_pin_allows_all_its_gpus_including_new_ones():
+    seen = []
+    rec, store, clock = make_reconciler(planner=spy_planner(seen))
+    beat(store, clock, node("a", devices=[dev("CUDA0")]), node("b", devices=[dev("CUDA0"), dev("CUDA1")]))
+    spec = SPEC.model_copy(update={"pin_devices": ["b/*"]})
+    await rec.plan_for(spec)
+    assert seen[-1] == {("a", "CUDA0"): 0, ("b", "CUDA0"): 7000, ("b", "CUDA1"): 7000}
+    # a GPU added to server b later is allowed without editing the model
+    beat(store, clock, node("b", devices=[dev("CUDA0"), dev("CUDA1"), dev("CUDA2")]))
+    await rec.plan_for(spec)
+    assert seen[-1][("b", "CUDA2")] == 7000 and seen[-1][("a", "CUDA0")] == 0
+    # mixed: all of b plus one GPU of a
+    await rec.plan_for(SPEC.model_copy(update={"pin_devices": ["b/*", "a/CUDA0"]}))
+    assert all(v == 7000 for v in seen[-1].values())
+
+
 async def test_pin_on_disabled_gpu_does_not_fit():
     rec, store, clock = make_reconciler()
     beat(store, clock, node("a"))

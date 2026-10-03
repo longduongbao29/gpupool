@@ -346,6 +346,10 @@ async def test_pin_affects_plan_via_api(env):
     await c.put("/api/models/m", json={"file": "x.gguf", "pin_devices": ["b/CUDA0"]})
     r = await c.post("/api/models/m/plan")
     assert r.json()["head_node"] == "b"
+    # a whole server is accepted the same way; an unknown server is still refused
+    assert (await c.put("/api/models/m", json={"file": "x.gguf", "pin_devices": ["a/*"]})).status_code == 200
+    assert (await c.post("/api/models/m/plan")).json()["head_node"] == "a"
+    assert (await c.put("/api/models/m", json={"file": "x.gguf", "pin_devices": ["zz/*"]})).status_code == 422
 
 
 # ---------------------------------------------------------------- events

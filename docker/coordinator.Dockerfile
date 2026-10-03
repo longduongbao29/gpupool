@@ -27,7 +27,7 @@
 # Hugging Face -> GGUF conversion toolchain (--build-arg WITH_CONVERT=1, the default). It lets the
 # UI/API convert safetensors models to GGUF and quantize them. It adds, on top of the lean image:
 #   /opt/llama.cpp       convert_hf_to_gguf.py + conversion/ + gguf-py/ from llama.cpp LLAMA_CPP_REF
-#   /opt/llama/bin       llama-quantize, llama-tokenize, llama-simple (static CPU build, no GPU needed)
+#   /opt/llama/bin       llama-quantize, llama-tokenize, llama-simple, llama-imatrix (static CPU build, no GPU needed)
 #   /opt/convert-venv    Python 3.12 venv with CPU-only PyTorch and transformers (the bulk of the size)
 # and sets GPUPOOL_CONVERT_DIR / GPUPOOL_CONVERT_PYTHON / GPUPOOL_LLAMA_TOOLS_DIR. Size impact
 # (measured): 560 MB -> 1.77 GB on disk, of which 900 MB is the venv (torch) and 21 MB the llama.cpp
@@ -116,7 +116,7 @@ WORKDIR /src
 # Portable CPU build: GGML_NATIVE=OFF (no -march=native, runs on any x86-64 / arm64 host), static
 # libraries (BUILD_SHARED_LIBS=OFF: the tools are self-contained apart from libgomp), no libcurl /
 # OpenSSL (models come from gpupool, not llama.cpp's downloader), no server, no tests. Tools and
-# examples are switched on only because the three targets live there; only those are built.
+# examples are switched on only because the four targets live there; only those are built.
 # The build number comes from the tag because a tarball has no .git (see docker/agent.Dockerfile).
 RUN num="${LLAMA_CPP_REF#b}"; \
     case "$num" in ''|*[!0-9]*) num=0 ;; esac; \
@@ -126,9 +126,9 @@ RUN num="${LLAMA_CPP_REF#b}"; \
         -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_EXAMPLES=ON \
         -DLLAMA_BUILD_NUMBER="$num" -DLLAMA_BUILD_COMMIT="${commit:-unknown}" \
     && cmake --build build --config Release -j"${LLAMA_BUILD_JOBS}" \
-        --target llama-quantize llama-tokenize llama-simple \
+        --target llama-quantize llama-tokenize llama-simple llama-imatrix \
     && mkdir -p /out/llama/bin /out/llama.cpp \
-    && cp build/bin/llama-quantize build/bin/llama-tokenize build/bin/llama-simple /out/llama/bin/ \
+    && cp build/bin/llama-quantize build/bin/llama-tokenize build/bin/llama-simple build/bin/llama-imatrix /out/llama/bin/ \
     && strip /out/llama/bin/* \
     && cp -r convert_hf_to_gguf.py conversion gguf-py /out/llama.cpp/ \
     && cp LICENSE /out/llama.cpp/LICENSE \
