@@ -16,7 +16,7 @@ from gpupool.common.models import (
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
-from gpupool.coordinator.store import ServerRecord, gpu_key
+from gpupool.coordinator.store import ServerRecord, gpu_key, planning_factor
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
 
@@ -213,10 +213,14 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         file = spec.source[len(COORD_PREFIX):] if spec.source.startswith(COORD_PREFIX) else None
         lo, hi = bounds(spec)
         avg_busy = autoscaler.view(spec.name).get("avg_busy") if autoscaler is not None else None
+        cal = store.get_calibration(spec.name)
         return {
             "spec": spec.model_dump(mode="json"), "file": file, "state": state, "error": error,
             "scaling": {"min": lo, "max": hi, "desired": desired, "avg_busy": avg_busy,
                         "unloaded": spec.replicas > 0 and desired == 0},
+            # the memory factor planning uses (measured / estimated VRAM), null until measured
+            "calibration": ({"factor": round(planning_factor(cal["factor"]), 3), "samples": cal["samples"]}
+                            if cal else None),
             "replicas": [{**r.model_dump(mode="json"), "outstanding": balancer.outstanding(r.replica_id)}
                          for r in listed],
         }

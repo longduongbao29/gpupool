@@ -1,4 +1,5 @@
 import itertools
+import math
 
 import pytest
 
@@ -373,3 +374,57 @@ def test_draft_many_gpus_stays_bounded():
     assert pl.draft_est_mb == dn
     a0 = pl.assignments[0]
     assert a0.node_id == pl.head_node and a0.llama_device == a0.device_id
+
+
+# ---- mem_factor (VRAM self-calibration)
+
+def test_mem_factor_default_is_identical():
+    m = make_meta(8)
+    nodes = [node("a", dev("CUDA0", total_need_mb(m, 512) + 50))]
+    a = plan(m, SPEC, nodes, "r", Ports())
+    b = plan(m, SPEC, nodes, "r", Ports(), mem_factor=1.0)
+    assert a == b
+    assert rank(m, SPEC, nodes) == rank(m, SPEC, nodes, mem_factor=1.0)
+
+
+def test_mem_factor_makes_borderline_model_not_fit_or_spread():
+    m = make_meta(8)
+    need = total_need_mb(m, 512)
+    one = [node("a", dev("CUDA0", need + 20))]
+    assert plan(m, SPEC, one, "r", Ports()).tier == "single_gpu"
+    with pytest.raises(NoFit) as e:
+        plan(m, SPEC, one, "r", Ports(), mem_factor=1.2)
+    assert str(math.ceil(need * 1.2)) in str(e.value)  # the message reports the scaled need
+    assert rank(m, SPEC, one, mem_factor=1.2) == []
+    # two GPUs that each fit it at 1.0: at 1.2 it no longer fits on one, so it is spread
+    two = [node("a", dev("CUDA0", int(need * 1.1)), dev("CUDA1", int(need * 1.1)))]
+    assert plan(m, SPEC, two, "r", Ports()).tier == "single_gpu"
+    pl = plan(m, SPEC, two, "r", Ports(), mem_factor=1.2)
+    assert pl.tier == "single_node" and len(pl.assignments) == 2
+    with pytest.raises(NoFit):
+        plan(m, SPEC, two, "r", Ports(), mem_factor=2.5)
+
+
+def test_mem_factor_scales_estimates_and_stays_within_usable():
+    m = make_meta(8)
+    nodes = [node("a", dev("CUDA0", 5000))]
+    base = plan(m, SPEC, nodes, "r", Ports())
+    sc = plan(m, SPEC, nodes, "r", Ports(), mem_factor=1.2)
+    assert sc.assignments[0].est_mb == -(-base.assignments[0].est_mb * 12 // 10) or \
+        abs(sc.assignments[0].est_mb - base.assignments[0].est_mb * 1.2) <= 1
+    assert sc.est_total_mb == sum(a.est_mb for a in sc.assignments)
+    assert rank(m, SPEC, nodes, mem_factor=1.2)[0].est_total_mb == sc.est_total_mb
+
+
+def test_mem_factor_scales_draft_reservation():
+    m = make_meta(8)
+    dn = draft_need_mb(DRAFT, 512)
+    nodes = [node("a", dev("CUDA0", 5000))]
+    base = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
+    sc = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT, mem_factor=1.5)
+    assert base.draft_est_mb == dn
+    assert abs(sc.draft_est_mb - dn * 1.5) <= 1
+    assert sc.est_total_mb > base.est_total_mb * 1.4
+    assert rank(m, DSPEC, nodes, draft_meta=DRAFT, mem_factor=1.5)[0].draft_est_mb == sc.draft_est_mb
+    # the factor does not leak into later calls
+    assert plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT) == base

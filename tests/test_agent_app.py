@@ -271,3 +271,32 @@ async def test_heartbeat_starts_when_push_enabled(cfg):
                     break
                 await asyncio.sleep(0.05)
         assert route.call_count >= 1
+
+
+async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
+    port = free_port()
+    monkeypatch.setattr(procs, "build_command",
+                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+    monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
+    pm = ProcessManager(tmp_path, cfg.log_dir, "127.0.0.1")
+    app = create_app(cfg, pm=pm, start_heartbeat=False)
+    spec = {"engine_id": "m1", "kind": "rpc", "port": port, "devices": ["CPU"]}
+    try:
+        async with client(app) as c:
+            assert (await c.get("/engines/m1/memory")).status_code == 401
+            assert (await c.get("/engines/zzz/memory", headers=H)).status_code == 404
+            assert (await c.post("/engines", json=spec, headers=H)).status_code == 200
+            log = cfg.log_dir / "m1.log"
+            # the child owns the log; append the lines llama-server would print at load
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("0.00.847.109 I load_tensors:        CUDA0 model buffer size =   373.73 MiB\n"
+                        "0.01.024.240 I llama_kv_cache:      CUDA0 KV buffer size =    24.00 MiB\n"
+                        "0.00.847.107 I load_tensors:   CPU_Mapped model buffer size =    89.26 MiB\n")
+            r = (await c.get("/engines/m1/memory", headers=H)).json()
+            assert r["engine_id"] == "m1"
+            assert r["devices"] == {"CUDA0": {"model_mb": 373.73, "kv_mb": 24.0,
+                                              "compute_mb": 0.0, "total_mb": 397.73}}
+            log.write_text("nothing useful\n")
+            assert (await c.get("/engines/m1/memory", headers=H)).json()["devices"] == {}
+    finally:
+        pm.stop_all()

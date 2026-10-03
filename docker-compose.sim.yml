@@ -20,6 +20,7 @@ x-agent: &agent
   image: ${GPUPOOL_AGENT_IMAGE:-gpupool-agent:latest}
   restart: unless-stopped
   depends_on: [coordinator]
+  cap_add: [NET_ADMIN]   # the RPC firewall (iptables) is on in this cluster
   deploy:
     resources:
       reservations:
@@ -51,6 +52,7 @@ services:
     environment:
       GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
       GPUPOOL_NODE_ID: server-a
+      GPUPOOL_RPC_FIREWALL: "1"
       GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_A:-1300}}'
     volumes:
       - sim-server-a:/data
@@ -63,6 +65,7 @@ services:
     environment:
       GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
       GPUPOOL_NODE_ID: server-b
+      GPUPOOL_RPC_FIREWALL: "1"
       GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_B:-1100}}'
       GPUPOOL_FAKE_DEVICES: '[{"device_id": "CUDA0", "kind": "cuda", "name": "NVIDIA Tesla T4 (simulated)", "total_mb": 16384, "free_mb": 15800, "bandwidth_gbps": 320, "uuid": "GPU-sim-t4-0001", "driver": "sim", "cuda": "12.4"}]'
     volumes:
@@ -76,6 +79,7 @@ services:
     environment:
       GPUPOOL_JOIN: http://172.30.0.10:8080#${SIM_CLUSTER_TOKEN:-sim-cluster-token}
       GPUPOOL_NODE_ID: server-c
+      GPUPOOL_RPC_FIREWALL: "1"
       GPUPOOL_BUDGET_MB: '{"CUDA0": ${SIM_BUDGET_C:-1100}}'
       GPUPOOL_FAKE_DEVICES: '[{"device_id": "CUDA0", "kind": "cuda", "name": "NVIDIA A100-SXM4-40GB (simulated)", "total_mb": 40960, "free_mb": 40200, "bandwidth_gbps": 1555, "uuid": "GPU-sim-a100-0001", "driver": "sim", "cuda": "12.4"}]'
     volumes:

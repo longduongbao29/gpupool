@@ -48,6 +48,17 @@ class AgentClient:
         self._check(r)
         return EngineStatus.model_validate(r.json())
 
+    async def engine_memory(self, agent_url: str, engine_id: str) -> dict | None:
+        """Per-device buffers the engine reported at load ({"engine_id", "devices": {name: {...}}}).
+        None when the agent does not know the engine or is too old to have the endpoint."""
+        r = await self._call("GET", f"{agent_url.rstrip('/')}/engines/{engine_id}/memory",
+                             timeout=httpx.Timeout(5.0))
+        if r.status_code == 404:
+            return None
+        self._check(r)
+        data = r.json()
+        return data if isinstance(data, dict) else None
+
     async def ensure_model(self, agent_url: str, name: str, source: str) -> str:
         # downloads can take many minutes: no read timeout
         r = await self._call(

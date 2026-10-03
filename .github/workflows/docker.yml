@@ -102,3 +102,48 @@ jobs:
           docker run --rm --entrypoint /opt/llama/llama-server "$img" --version
           docker run --rm --entrypoint /opt/llama/ggml-rpc-server "$img" --help | head -5
           docker run --rm --entrypoint gpupool "$img" --help
+
+  # Real end-to-end run: coordinator + 3 agents (CPU only) from the images built above, a tiny
+  # model split across the servers over llama.cpp RPC. See scripts/ci_e2e.py.
+  # The images are not passed between jobs as artifacts (the agent image is ~1.7 GB compressed, so
+  # upload + download would cost about what it saves). Instead this job rebuilds them with
+  # cache-from: type=gha on the scopes the build jobs just wrote, which makes it a layer pull and
+  # an export, not a CUDA compile. Same build-args as `agent`, or the cache would miss.
+  # Tags publish images, so this job does not run for them.
+  e2e:
+    needs: [coordinator, agent]
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Free disk space (agent image + CUDA layers)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/coordinator.Dockerfile
+          load: true
+          tags: gpupool-coordinator:ci
+          cache-from: type=gha,scope=coordinator
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/agent.Dockerfile
+          build-args: |
+            CUDA_ARCHS=75
+          load: true
+          tags: gpupool-agent:ci
+          cache-from: type=gha,scope=agent
+      - name: Cache the test model
+        uses: actions/cache@v4
+        with:
+          path: .cache/ci-models
+          # Bump the key with the model in scripts/ci_e2e.py (the script verifies its SHA256 anyway).
+          key: ci-model-smollm2-135m-instruct-q8_0-v1
+      - name: End-to-end (3 agents, model split over RPC)
+        env:
+          GPUPOOL_AGENT_IMAGE: gpupool-agent:ci
+          GPUPOOL_COORDINATOR_IMAGE: gpupool-coordinator:ci
+        run: python3 scripts/ci_e2e.py

@@ -102,7 +102,7 @@ RUN mkdir -p /out \
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libgomp1 libssl3 \
+        ca-certificates curl libgomp1 libssl3 iptables \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=llama /out /opt/llama

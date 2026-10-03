@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from gpupool.agent.gpu import probe_devices
+from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
 from gpupool.agent.procs import EngineExists, PortInUse, ProcessManager, llama_version
 from gpupool.common.auth import bearer_headers, require_bearer
@@ -80,7 +81,7 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
-    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host)
+    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall)
     version_cache: dict[str, str] = {}
     # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
     ensured: set[str] = set()
@@ -210,6 +211,22 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         if st is None:
             raise HTTPException(404, "unknown engine")
         return st
+
+    @app.get("/engines/{engine_id}/memory", dependencies=[auth])
+    async def engine_memory(engine_id: str):
+        if pm.get(engine_id) is None:
+            raise HTTPException(404, "unknown engine")
+
+        def read() -> str:
+            # buffer sizes are printed at load, so the head of the log is enough (logs can be huge)
+            try:
+                with open(cfg.log_dir / f"{engine_id}.log", "rb") as f:
+                    return f.read(2 * 1024 * 1024).decode("utf-8", "replace")
+            except OSError:
+                return ""
+
+        text = await asyncio.to_thread(read)
+        return {"engine_id": engine_id, "devices": parse_buffers(text)}
 
     @app.delete("/engines/{engine_id}", response_model=EngineStatus, dependencies=[auth])
     def delete_engine(engine_id: str):

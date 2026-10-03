@@ -788,3 +788,33 @@ async def test_recommend_passes_kv_and_draft_and_adds_draft_need(env):
     assert (await c.post("/api/recommend", json={"file": "x.gguf", "speculative": "draft",
                                                  "draft_file": "x.gguf"})).status_code == 422
     assert (await c.post("/api/recommend", json={"file": "x.gguf", "kv_cache_type": "bad"})).status_code == 422
+
+
+async def test_state_model_entries_show_calibration_when_measured(env):
+    c, store, rec, _, clock, _ = env
+    from gpupool.common.models import ModelSpec
+    store.put_model(ModelSpec(name="m", source="x"))
+    entry = lambda st: next(m for m in st["models"] if m["spec"]["name"] == "m")  # noqa: E731
+    assert entry((await c.get("/api/state")).json())["calibration"] is None
+    store.put_calibration("m", 1.1234, 3)
+    assert entry((await c.get("/api/state")).json())["calibration"] == {"factor": 1.123, "samples": 3}
+    store.put_calibration("m", 5.0, 4)  # shown as planning uses it: clamped
+    assert entry((await c.get("/api/state")).json())["calibration"] == {"factor": 2.0, "samples": 4}
+
+
+async def test_agent_client_engine_memory_returns_json_and_none_on_404():
+    import respx
+    from gpupool.coordinator.agent_client import AgentClient, AgentError
+
+    with respx.mock() as m:
+        body = {"engine_id": "e", "devices": {"CUDA0": {"total_mb": 5}}}
+        route = m.get("http://h:7070/engines/e/memory").mock(return_value=httpx.Response(200, json=body))
+        c = AgentClient("tok")
+        assert await c.engine_memory("http://h:7070/", "e") == body
+        assert route.calls[0].request.headers["authorization"] == "Bearer tok"
+        m.get("http://h:7070/engines/e/memory").mock(return_value=httpx.Response(404))
+        assert await c.engine_memory("http://h:7070", "e") is None  # old agent or unknown engine
+        m.get("http://h:7070/engines/e/memory").mock(return_value=httpx.Response(500, text="x"))
+        with pytest.raises(AgentError):
+            await c.engine_memory("http://h:7070", "e")
+        await c.aclose()

@@ -29,6 +29,7 @@ services:
     restart: unless-stopped
     network_mode: host   # engines listen on ports the coordinator picks, on this server's IP
     pid: host            # NVML reports host PIDs; needed for correct GPU process names
+    cap_add: [NET_ADMIN] # only used with GPUPOOL_RPC_FIREWALL=1 (iptables rules for RPC ports)
     environment:
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
@@ -40,6 +41,8 @@ services:
       GPUPOOL_NODE_ID: ${GPUPOOL_NODE_ID:-}
       GPUPOOL_HOST: ${GPUPOOL_HOST:-}
       GPUPOOL_MARGIN_PCT: ${GPUPOOL_MARGIN_PCT:-0.10}
+      # ggml-rpc-server has no authentication: 1 = each RPC port accepts only its head node
+      GPUPOOL_RPC_FIREWALL: ${GPUPOOL_RPC_FIREWALL:-0}
     volumes:
       - gpupool-agent:/data
     deploy:

@@ -1,6 +1,7 @@
 """SQLite state: node heartbeats, model registry, replica records."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -30,9 +31,20 @@ CREATE TABLE IF NOT EXISTS gpu_flags (
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, level TEXT NOT NULL, kind TEXT NOT NULL,
     message TEXT NOT NULL, node_id TEXT, model TEXT, read INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS control_state (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL);
+CREATE TABLE IF NOT EXISTS model_calibration (
+    model TEXT PRIMARY KEY, factor REAL NOT NULL, samples INTEGER NOT NULL, updated_at REAL);
 """
 
 EVENTS_KEEP = 1000
+# The measured/estimated memory ratio is clamped before planning uses it: a lucky measurement must
+# never shrink the safety margin below 0.9, and a wild one must not make a model unplaceable.
+CAL_MIN, CAL_MAX = 0.9, 2.0
+
+
+def planning_factor(raw: float | None) -> float:
+    return 1.0 if raw is None else min(CAL_MAX, max(CAL_MIN, raw))
 
 
 def gpu_key(device: Device) -> str:
@@ -217,7 +229,51 @@ class Store:
         return [ModelSpec.model_validate_json(r[0]) for r in self._read("SELECT spec FROM models ORDER BY name")]
 
     def delete_model(self, name: str) -> None:
-        self._write("DELETE FROM models WHERE name=?", (name,))
+        """Also forgets the model's autoscaler state and calibration: a model registered again under
+        the same name may be another file, and must start from scratch."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM models WHERE name=?", (name,))
+            self._conn.execute("DELETE FROM control_state WHERE key=?", (f"autoscaler:{name}",))
+            self._conn.execute("DELETE FROM model_calibration WHERE model=?", (name,))
+            self._version += 1
+
+    # control state: coordinator in-memory state that must survive a restart. Routing does not
+    # depend on it, so writes do not bump the version.
+    def get_state(self, key: str) -> dict | None:
+        rows = self._read("SELECT value FROM control_state WHERE key=?", (key,))
+        if not rows:
+            return None
+        try:
+            val = json.loads(rows[0][0])
+        except ValueError:
+            return None  # unreadable row: behave as if absent (state restarts from defaults)
+        return val if isinstance(val, dict) else None
+
+    def put_state(self, key: str, value: dict, now: float | None = None) -> None:
+        self._write(
+            "INSERT INTO control_state(key, value, updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, json.dumps(value), time.time() if now is None else now), bump=False)
+
+    def delete_state(self, key: str) -> None:
+        self._write("DELETE FROM control_state WHERE key=?", (key,), bump=False)
+
+    # VRAM calibration: EMA of measured/estimated memory per model (raw; clamp with planning_factor)
+    def get_calibration(self, model: str) -> dict | None:
+        rows = self._read("SELECT factor, samples, updated_at FROM model_calibration WHERE model=?", (model,))
+        return {"factor": rows[0][0], "samples": rows[0][1], "updated_at": rows[0][2]} if rows else None
+
+    def put_calibration(self, model: str, factor: float, samples: int, now: float | None = None) -> None:
+        self._write(
+            "INSERT INTO model_calibration(model, factor, samples, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(model) DO UPDATE SET factor=excluded.factor, samples=excluded.samples, "
+            "updated_at=excluded.updated_at",
+            (model, factor, samples, time.time() if now is None else now), bump=False)
+
+    def mem_factor(self, model: str) -> float:
+        """The factor planning multiplies this model's device needs by (1.0 when never measured)."""
+        cal = self.get_calibration(model)
+        return planning_factor(cal["factor"] if cal else None)
 
     # replicas
     def put_replica(self, rec: ReplicaRecord) -> None:

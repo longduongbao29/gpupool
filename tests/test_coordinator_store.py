@@ -180,3 +180,53 @@ def test_version_bumps_on_routing_writes_only(store):
     store.set_replica_state("missing", "stopped")
     assert store.prune_replicas(5) == 0
     assert store.version == v
+
+
+# ---------------------------------------------------------------- control state / calibration
+def test_control_state_roundtrip_overwrite_delete_and_no_version_bump():
+    from gpupool.coordinator.store import Store
+    s = Store(":memory:")
+    v = s.version
+    assert s.get_state("k") is None
+    s.put_state("k", {"a": 1, "b": [1, 2]})
+    assert s.get_state("k") == {"a": 1, "b": [1, 2]}
+    s.put_state("k", {"a": 2})
+    assert s.get_state("k") == {"a": 2}
+    s.delete_state("k")
+    s.delete_state("k")  # idempotent
+    assert s.get_state("k") is None
+    assert s.version == v  # routing does not depend on it
+
+
+def test_control_state_survives_reopen_and_ignores_garbage(tmp_path):
+    from gpupool.coordinator.store import Store
+    path = tmp_path / "s.db"
+    s = Store(path)
+    s.put_state("k", {"x": 1})
+    s._conn.execute("INSERT INTO control_state(key, value, updated_at) VALUES('bad', '{nope', 0)")
+    s._conn.commit()
+    s.close()
+    s2 = Store(path)
+    assert s2.get_state("k") == {"x": 1}
+    assert s2.get_state("bad") is None
+    s2.close()
+
+
+def test_calibration_roundtrip_planning_clamp_and_delete_model():
+    from gpupool.common.models import ModelSpec
+    from gpupool.coordinator.store import Store, planning_factor
+    s = Store(":memory:")
+    assert s.get_calibration("m") is None and s.mem_factor("m") == 1.0
+    s.put_model(ModelSpec(name="m", source="x"))
+    s.put_calibration("m", 1.12, 1, now=5.0)
+    s.put_calibration("m", 1.2, 2, now=6.0)
+    assert s.get_calibration("m") == {"factor": 1.2, "samples": 2, "updated_at": 6.0}
+    assert s.mem_factor("m") == 1.2
+    s.put_calibration("m", 0.5, 3)
+    assert s.get_calibration("m")["factor"] == 0.5 and s.mem_factor("m") == 0.9  # never below 0.9
+    s.put_calibration("m", 5.0, 4)
+    assert s.mem_factor("m") == 2.0
+    assert planning_factor(None) == 1.0
+    s.put_state("autoscaler:m", {"desired": 0})
+    s.delete_model("m")
+    assert s.get_calibration("m") is None and s.get_state("autoscaler:m") is None

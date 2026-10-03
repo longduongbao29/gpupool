@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import pytest
 import respx
@@ -1200,8 +1201,12 @@ async def test_periodic_run_respects_interval_and_quiet(mock_health):
     _rb_beat(store, clock)
     store.put_model(SPEC.model_copy(update={"name": "o"}))
     put_replica(store, "o-1", model="o", state="launching", now=clock(), head_port=9300)
+    # a launch really in flight (a launching record without its task is an orphan and is failed)
+    inflight = rec._launches["o-1"] = asyncio.ensure_future(asyncio.sleep(3600))
     await rec.tick()
     assert rec._move is None and not _events(store, "rebalance_started")  # busy: stays due
+    rec._launches.pop("o-1").cancel()
+    await asyncio.gather(inflight, return_exceptions=True)
     store.set_replica_state("o-1", "ready", None, now=clock())
     await rec.tick()
     assert rec._move is not None and rec._move["old"] in ("m-1", "o-1")
@@ -1407,4 +1412,330 @@ async def test_draft_on_a_non_cuda_first_device_fails_the_launch_cleanly(mock_he
     r = store.list_replicas()[0]
     assert r.state == "failed" and "LaunchError" in r.error and "local CUDA device" in r.error
     assert "start" not in client.kinds()  # nothing was started, so nothing pins VRAM
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- persistence across a restart
+def _again(rec, store, clock):
+    """A new reconciler on the same store: what a coordinator restart builds."""
+    from gpupool.coordinator.reconciler import Reconciler
+    new = Reconciler(store, rec.cfg, rec.client, rec.meta_for, rec.outstanding, clock)
+    new.planner, new.ranker, new.poll_s = rec.planner, rec.ranker, rec.poll_s
+    return new
+
+
+async def test_preemption_cooldown_survives_restart(tmp_path, mock_health):
+    from gpupool.coordinator.store import Store
+    rec, store, clock = make_reconciler(store=Store(tmp_path / "s.db"))
+    rec.ranker = make_ranker()
+    beat(store, clock, node("a", devices=[dev(usable=500)]))
+    store.put_model(SPEC.model_copy(update={"name": "lo", "priority": 10}))
+    put_replica(store, "lo-1", model="lo", now=clock())
+    store.put_model(_hi())
+    await rec.tick()
+    assert store.get_replica("lo-1").state == "draining"
+    when = rec._preempted["hi"][0]
+    rec2 = _again(rec, store, clock)
+    assert rec2._preempted == {"hi": (when, {"lo-1"})}
+    # the cooldown is still active: a second victim is not evicted right after the restart
+    put_replica(store, "lo-2", model="lo", now=clock(), head_port=9100)
+    store.set_replica_state("lo-1", "stopped", None, now=clock())
+    rec2.cfg.heartbeat_timeout_s = 10_000
+    await rec2.tick()
+    assert store.get_replica("lo-2").state == "ready"
+    clock.t += rec2.PREEMPT_COOLDOWN_S + 1
+    await rec2.tick()
+    assert store.get_replica("lo-2").state == "draining"
+    await rec.shutdown()
+    await rec2.shutdown()
+
+
+async def test_backoff_survives_restart_and_clears_when_stable(tmp_path, mock_health):
+    from gpupool.coordinator.store import Store
+    rec, store, clock = make_reconciler(store=Store(tmp_path / "s.db"))
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await _ready_then_crash(rec, store, clock)
+    saved = rec._backoff["m"]
+    rec2 = _again(rec, store, clock)
+    assert rec2._backoff == {"m": saved}
+    n = len(store.list_replicas())
+    await rec2.tick()
+    await settle(rec2)
+    assert len(store.list_replicas()) == n  # still backing off after the restart
+    clock.t = saved[1] + 1
+    beat(store, clock, node("a"))
+    await rec2.tick()
+    await settle(rec2)
+    clock.t += rec2.STABLE_S
+    rec2._clear_stable_backoff(clock())
+    assert rec2._backoff == {} and _again(rec2, store, clock)._backoff == {}
+    await rec.shutdown()
+    await rec2.shutdown()
+
+
+async def test_move_in_flight_resumes_after_restart_and_completes(tmp_path, mock_health):
+    from gpupool.coordinator.store import Store
+    rec, store, clock = _rb_rig(store=Store(tmp_path / "s.db"))
+    assert await rec.start_move(await _mv(rec)) is True
+    await settle(rec)  # the new replica becomes ready; the move is still open
+    new_id = rec._move["new"]
+    assert rec._move is not None and store.get_replica(new_id).state == "ready"
+    rec2 = _again(rec, store, clock)
+    assert rec2._move == rec._move and rec2._move_text == rec._move_text
+    await rec2.tick()
+    # without the saved move the new replica would be drained as surplus; instead the old one goes
+    assert store.get_replica("m-1").state in ("draining", "stopped")
+    assert store.get_replica(new_id).state == "ready"
+    assert rec2._move is None and [e.message for e in _events(store, "rebalanced")] == [
+        "Moved replica m-1 of m to b/CUDA0 (score +40)"]
+    assert _again(rec2, store, clock)._move is None  # cleared in the store too
+    await rec.shutdown()
+    await rec2.shutdown()
+
+
+async def test_saved_move_with_missing_replicas_is_cleared_quietly(tmp_path):
+    from gpupool.coordinator.store import Store
+    rec, store, clock = _rb_rig(store=Store(tmp_path / "s.db"))
+    store.put_state("move", {"move": {"model": "m", "old": "m-1", "new": "gone", "since": clock()},
+                             "text": ["a/CUDA0", "b/CUDA0", 40.0]})
+    rec2 = _again(rec, store, clock)
+    assert rec2._move is None and store.get_state("move") is None
+    await rec2.tick()
+    assert not _events(store, "rebalance_failed")
+
+
+async def test_unreadable_saved_state_starts_clean(tmp_path):
+    from gpupool.coordinator.store import Store
+    rec, store, clock = make_reconciler(store=Store(tmp_path / "s.db"))
+    store.put_state("preempted", {"hi": "garbage"})
+    store.put_state("move", {"nope": 1})
+    rec2 = _again(rec, store, clock)
+    assert rec2._preempted == {} and rec2._backoff == {} and rec2._move is None
+
+
+async def test_store_write_failure_does_not_break_reconciliation(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    store.put_state = boom
+    await _ready_then_crash(rec, store, clock)
+    assert "m" in rec._backoff  # kept in memory
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- VRAM calibration
+def _mem(**devs):
+    return {"engine_id": "x", "devices": {k: {"model_mb": v, "kv_mb": 0, "compute_mb": 0, "total_mb": v}
+                                          for k, v in devs.items()}}
+
+
+def _cal_events(store):
+    return [e for e in store.list_events() if e.kind == "calibrated"]
+
+
+def test_calibration_sample_single_rpc_and_draft_and_missing():
+    from gpupool.coordinator.reconciler import Reconciler
+    store = make_reconciler()[1]
+    one = put_replica(store, "m-1").placement  # CUDA0 est 1000
+    two = put_replica(store, "m-2", rpc_node="b").placement  # CUDA0 + RPC0, est 1000 each
+    # the per-device runtime context (128 MB) is not a llama.cpp buffer: left out of the estimate
+    assert Reconciler.calibration_sample(one, _mem(CUDA0=900)) == (900, 872)
+    assert Reconciler.calibration_sample(two, _mem(CUDA0=900, RPC0=700)) == (1600, 1744)
+    # a draft brings its own context; its buffers are inside the head device's
+    draft = one.model_copy(update={"draft_est_mb": 300})
+    assert Reconciler.calibration_sample(draft, _mem(CUDA0=900)) == (900, 744)
+    # data that does not cover the placement is ignored, never a skewed ratio
+    assert Reconciler.calibration_sample(two, _mem(CUDA0=900)) is None
+    assert Reconciler.calibration_sample(one, _mem(CUDA1=900)) is None
+    assert Reconciler.calibration_sample(one, _mem(CUDA0=0)) is None
+    assert Reconciler.calibration_sample(one, {"devices": {}}) is None
+    assert Reconciler.calibration_sample(one, {}) is None
+    tiny = one.model_copy(update={"assignments": [one.assignments[0].model_copy(update={"est_mb": 100})]})
+    assert Reconciler.calibration_sample(tiny, _mem(CUDA0=50)) is None  # estimate <= 0
+
+
+async def test_launch_calibrates_from_head_memory_and_emits_event(mock_health):
+    client = FakeClient()
+    client.memory = _mem(CUDA0=976)  # 976 / (1000 - 128) = 1.119
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "ready" and client.memory_calls == [("http://10.0.0.1:7070", f"{r.replica_id}-head")]
+    cal = store.get_calibration("m")
+    assert cal["samples"] == 1 and cal["factor"] == pytest.approx(976 / 872)
+    [ev] = _cal_events(store)
+    assert ev.level == "info" and ev.model == "m"
+    assert ev.message == "m: measured 976 MB vs estimated 872 MB, planning factor 1.12"
+    await rec.shutdown()
+
+
+async def test_calibration_ema_clamp_and_event_threshold():
+    rec, store, clock = make_reconciler()
+    r = put_replica(store, "m-1")
+
+    async def feed(total):
+        rec.client.memory = _mem(CUDA0=total)
+        await rec._calibrate(r, SPEC, "http://a")
+
+    await feed(872 * 1.2)
+    assert store.get_calibration("m")["factor"] == pytest.approx(1.2)  # first sample sets it
+    assert len(_cal_events(store)) == 1
+    await feed(872 * 1.4)  # EMA alpha 0.5
+    cal = store.get_calibration("m")
+    assert cal["factor"] == pytest.approx(1.3) and cal["samples"] == 2
+    assert len(_cal_events(store)) == 2  # 1.2 -> 1.3 is more than 5 %
+    await feed(872 * 1.31)  # 1.3 -> 1.305: below the threshold, still stored
+    assert len(_cal_events(store)) == 2 and store.get_calibration("m")["samples"] == 3
+    # wild samples: the planning factor is clamped to [0.9, 2.0] (the raw EMA is kept)
+    for _ in range(8):
+        await feed(872 * 10)
+    assert store.mem_factor("m") == 2.0 and store.get_calibration("m")["factor"] > 2.0
+    for _ in range(16):
+        await feed(872 * 0.1)
+    assert store.mem_factor("m") == 0.9
+    assert _cal_events(store)[0].message.endswith("planning factor 0.90")  # newest first
+
+
+async def test_first_sample_below_one_is_clamped_at_point_nine():
+    rec, store, clock = make_reconciler()
+    rec.client.memory = _mem(CUDA0=400)
+    await rec._calibrate(put_replica(store, "m-1"), SPEC, "http://a")
+    assert store.mem_factor("m") == 0.9
+    assert _cal_events(store)[0].message.endswith("planning factor 0.90")  # 1.0 -> 0.9 is a > 5 % change
+
+
+@pytest.mark.parametrize("memory", [None, {}, {"devices": {}}, _mem(CUDA1=900), RuntimeError("agent down"),
+                                    {"devices": "junk"}])
+async def test_missing_or_broken_memory_data_is_ignored_and_never_fails_the_launch(memory, mock_health):
+    client = FakeClient()
+    client.memory = memory
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    assert store.get_calibration("m") is None and not _cal_events(store)
+    await rec.shutdown()
+
+
+async def test_calibration_store_failure_does_not_fail_the_launch(mock_health):
+    client = FakeClient()
+    client.memory = _mem(CUDA0=976)
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    store.put_calibration = boom
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready" and rec._launches == {}
+    await rec.shutdown()
+
+
+async def test_calibration_runs_only_for_replicas_that_became_ready(mock_health):
+    client = FakeClient()
+    client.memory = _mem(CUDA0=976)
+    client.fail_start_on = "-head"
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "failed" and client.memory_calls == []
+
+
+async def test_calibrated_factor_is_passed_to_planner_and_rankers_only_when_not_one(mock_health):
+    seen = {"plan": [], "rank": []}
+    real_plan, real_rank = make_planner(), make_ranker()
+
+    def planner(meta, spec, nodes, rid, port_alloc, exclude_nodes=frozenset(), **kw):
+        seen["plan"].append({k: v for k, v in kw.items() if k != "occupants"})
+        return real_plan(meta, spec, nodes, rid, port_alloc)
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, extra=(), **kw):
+        seen["rank"].append(kw)
+        return real_rank(meta, spec, nodes, occupants, limit)
+
+    rec, store, clock = make_reconciler(planner=planner)
+    rec.ranker = ranker
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.plan_for(SPEC)
+    await rec.rank_for(SPEC, 3)
+    assert seen == {"plan": [{}], "rank": [{}]}  # unmeasured: the call is exactly as before
+    store.put_calibration("m", 1.25, 2)
+    seen["plan"].clear(), seen["rank"].clear()
+    await rec.plan_for(SPEC)
+    await rec.rank_for(SPEC, 3)
+    await rec.simulate([SPEC])  # simulation ranks through _ranker_for
+    assert seen["plan"] == [{"mem_factor": 1.25}]
+    assert len(seen["rank"]) >= 2 and all(kw == {"mem_factor": 1.25} for kw in seen["rank"])
+    other = SPEC.model_copy(update={"name": "other"})  # another model is unaffected
+    seen["rank"].clear()
+    await rec.rank_for(other, 1)
+    assert seen["rank"] == [{}]
+    store.put_calibration("m", 0.3, 3)  # raw 0.3 plans as 0.9
+    seen["plan"].clear()
+    await rec.plan_for(SPEC)
+    assert seen["plan"] == [{"mem_factor": 0.9}]
+
+
+async def test_calibrated_factor_reaches_rebalance_and_preemption_rankers():
+    rec, store, clock = _rb_rig()
+    calls = []
+    base = rec.ranker
+
+    def ranker(meta, spec, nodes, occupants=(), limit=5, extra=(), **kw):
+        calls.append(kw)
+        return base(meta, spec, nodes, occupants=occupants, limit=limit, extra=extra)
+
+    rec.ranker = ranker
+    store.put_calibration("m", 1.5, 1)
+    await rec.rebalance_candidates()
+    assert calls and all(kw == {"mem_factor": 1.5} for kw in calls)
+    calls.clear()
+    store.put_model(_hi())
+    store.put_calibration("hi", 1.1, 1)
+    await rec.rank_with_preemption(_hi(), 1)
+    assert all(kw == {"mem_factor": 1.1} for kw in calls)
+
+
+async def test_orphaned_launch_after_a_hard_restart_is_failed_and_relaunched(mock_health):
+    # Real-cluster regression: after `docker kill` of the coordinator mid-launch the replica stayed
+    # "launching" forever and, counted as active, blocked the model from being launched again.
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    put_replica(store, "m-old", state="launching", now=clock())  # left by the killed coordinator
+    await rec.tick()
+    await settle(rec)
+    old = store.get_replica("m-old")
+    assert old.state == "failed" and "restarted during launch" in old.error
+    assert ("stop", "http://10.0.0.1:7070", "m-old-head") in rec.client.calls  # half-started engines
+    assert [r.state for r in store.list_replicas() if r.replica_id != "m-old"] == ["ready"]
+    await rec.shutdown()
+
+
+async def test_launch_in_flight_is_not_an_orphan(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()  # spawns a launch task; the record is "launching" with its task
+    rid = store.list_replicas()[0].replica_id
+    await rec._fail_orphaned_launches(rec._node_map(), clock())
+    assert store.get_replica(rid).state in ("launching", "ready")
+    await settle(rec)
+    assert store.get_replica(rid).state == "ready"
     await rec.shutdown()

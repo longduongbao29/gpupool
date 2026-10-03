@@ -1,0 +1,68 @@
+# CI end-to-end cluster: a coordinator and three CPU-only "servers" (no GPU needed), each joining
+# like a real install. Used by scripts/ci_e2e.py; it also runs on a laptop:
+#
+#   GPUPOOL_HOST_MODELS_DIR=$PWD/.cache/ci-models docker compose -f docker-compose.ci.yml -p gpupool-ci up -d
+#
+# Each server offers ONE CPU device with a budget (CI_BUDGET_MB, default 120 MB) smaller than the
+# test model needs (~140 MB weights + KV cache), so the model cannot fit one server and gpupool must
+# split it over >= 2 servers through llama.cpp RPC - the path real multi-server installs depend on.
+# NVML is absent without a GPU: the agent must still start and report just the CPU device.
+
+x-agent: &agent
+  image: ${GPUPOOL_AGENT_IMAGE:-gpupool-agent:latest}
+  depends_on: [coordinator]
+  cap_add: [NET_ADMIN]   # the RPC firewall is exercised in CI too
+
+x-agent-env: &agent-env
+  GPUPOOL_JOIN: http://172.31.77.10:8080#${CI_CLUSTER_TOKEN:-ci-cluster-token}
+  GPUPOOL_INCLUDE_CPU: "true"
+  GPUPOOL_RPC_FIREWALL: "1"
+  GPUPOOL_BUDGET_MB: '{"CPU": ${CI_BUDGET_MB:-120}}'
+
+services:
+  coordinator:
+    image: ${GPUPOOL_COORDINATOR_IMAGE:-gpupool-coordinator:latest}
+    ports:
+      - "${CI_COORDINATOR_PORT:-8080}:8080"
+    environment:
+      GPUPOOL_ADMIN_KEY: ${CI_ADMIN_KEY:-ci-admin}
+      GPUPOOL_CLUSTER_TOKEN: ${CI_CLUSTER_TOKEN:-ci-cluster-token}
+      GPUPOOL_PUBLIC_URL: http://172.31.77.10:8080
+    volumes:
+      - ${GPUPOOL_HOST_MODELS_DIR:-./models}:/models:ro
+    networks:
+      ci:
+        ipv4_address: 172.31.77.10
+
+  server-a:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      GPUPOOL_NODE_ID: server-a
+    networks:
+      ci:
+        ipv4_address: 172.31.77.11
+
+  server-b:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      GPUPOOL_NODE_ID: server-b
+    networks:
+      ci:
+        ipv4_address: 172.31.77.12
+
+  server-c:
+    <<: *agent
+    environment:
+      <<: *agent-env
+      GPUPOOL_NODE_ID: server-c
+    networks:
+      ci:
+        ipv4_address: 172.31.77.13
+
+networks:
+  ci:
+    ipam:
+      config:
+        - subnet: 172.31.77.0/24

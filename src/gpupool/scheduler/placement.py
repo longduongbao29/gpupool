@@ -6,7 +6,10 @@ Ports are allocated only for the final plan.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+import math
+from collections.abc import Callable, Iterator, Sequence
+from contextvars import ContextVar
 from itertools import combinations
 from typing import NamedTuple
 
@@ -19,7 +22,8 @@ from gpupool.common.models import (
     Occupant,
     Placement,
 )
-from gpupool.scheduler.estimate import device_need_mb, draft_need_mb, overhead_mb, total_need_mb
+from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
+from gpupool.scheduler.estimate import draft_need_mb, overhead_mb, total_need_mb
 from gpupool.scheduler.scoring import default_cuda_bw, est_decode_tps
 
 
@@ -31,6 +35,29 @@ class _Dev(NamedTuple):
     node: NodeReport
     dev: Device
     pin: bool = False  # draft planning: this device must be the head's first device (and the head)
+
+
+# Per-model correction from measured buffers (self-calibration). A context variable, not a
+# parameter: every need computation below, nested helpers included, must see the same factor.
+_MEM_FACTOR: ContextVar[float] = ContextVar("gpupool_mem_factor", default=1.0)
+
+
+@contextlib.contextmanager
+def _with_factor(f: float) -> Iterator[None]:
+    tok = _MEM_FACTOR.set(f)
+    try:
+        yield
+    finally:
+        _MEM_FACTOR.reset(tok)
+
+
+def _scale(mb: int) -> int:
+    f = _MEM_FACTOR.get()
+    return mb if f == 1.0 else math.ceil(mb * f)
+
+
+def device_need_mb(*a, **kw) -> int:
+    return _scale(_raw_need_mb(*a, **kw))
 
 
 def _need(meta, ctx, ct, d: _Dev, start: int, count: int, is_last: bool) -> int:
@@ -355,17 +382,24 @@ def plan(
     occupants: Sequence[Occupant] = (),
     *,
     draft_meta: ModelMeta | None = None,
+    mem_factor: float = 1.0,
 ) -> Placement:
     """The best-scored feasible placement; ports are allocated only for the winner.
+`mem_factor` scales every estimated need (measured / estimated for this model).
     With spec.speculative == "draft" and `draft_meta`, the draft model is reserved on the
     head's first local CUDA device."""
+    with _with_factor(mem_factor):
+        return _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, draft_meta)
+
+
+def _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, draft_meta) -> Placement:
     draft_mb = _draft_mb(spec, draft_meta)
     ranked = _ranked(meta, spec, nodes, occupants, exclude_nodes, draft_mb=draft_mb)
     if not ranked:
         ctx = spec.ctx_size
         pool = [d for n in nodes if n.node_id not in exclude_nodes for d in n.devices
                 if d.usable_mb > 0]
-        need = total_need_mb(meta, ctx, spec.kv_cache_type)
+        need = _scale(total_need_mb(meta, ctx, spec.kv_cache_type))
         draft = ""
         if draft_mb is not None:
             need += draft_mb
@@ -381,7 +415,7 @@ def plan(
 
 def _draft_mb(spec: ModelSpec, draft_meta: ModelMeta | None) -> int | None:
     if spec.speculative == "draft" and draft_meta is not None:
-        return draft_need_mb(draft_meta, spec.ctx_size, spec.kv_cache_type)
+        return _scale(draft_need_mb(draft_meta, spec.ctx_size, spec.kv_cache_type))
     return None
 
 
@@ -394,6 +428,7 @@ def rank(
     extra: Sequence[Placement] = (),
     *,
     draft_meta: ModelMeta | None = None,
+    mem_factor: float = 1.0,
 ) -> list[Placement]:
     """Feasible candidates, best first. Ports are dummies: these are for display/simulation.
 
@@ -403,6 +438,11 @@ def rank(
     counts candidates only. A candidate equal to an extra is dropped. The caller must leave
     the extra's own replica out of `occupants`, or it would be penalised for sharing with itself.
     """
+    with _with_factor(mem_factor):
+        return _rank(meta, spec, nodes, occupants, limit, extra, draft_meta)
+
+
+def _rank(meta, spec, nodes, occupants, limit, extra, draft_meta) -> list[Placement]:
     dummy = lambda _nid: 0  # noqa: E731
     draft_mb = _draft_mb(spec, draft_meta)
     if not extra:

@@ -65,6 +65,8 @@ class FakeClient:
         self.engines: dict[tuple[str, str], EngineStatus] = {}
         self.fail_start_on: str | None = None  # engine_id suffix that makes start_engine raise
         self.head_state = "running"
+        self.memory: dict | None = None  # what engine_memory returns; an Exception instance is raised
+        self.memory_calls: list[tuple] = []
 
     async def start_engine(self, url, spec: EngineSpec):
         self.calls.append(("start", url, spec.engine_id, spec))
@@ -89,6 +91,12 @@ class FakeClient:
         self.calls.append(("ensure", url, name, source))
         return "/cache/" + name
 
+    async def engine_memory(self, url, engine_id):
+        self.memory_calls.append((url, engine_id))
+        if isinstance(self.memory, Exception):
+            raise self.memory
+        return self.memory
+
     async def aclose(self):
         pass
 
@@ -112,8 +120,8 @@ class Clock:
         return self.t
 
 
-def make_reconciler(cfg=None, planner=None, client=None, outstanding=None, clock=None):
-    store = Store(":memory:")
+def make_reconciler(cfg=None, planner=None, client=None, outstanding=None, clock=None, store=None):
+    store = store or Store(":memory:")
     clock = clock or Clock()
     cfg = cfg or make_cfg()
 

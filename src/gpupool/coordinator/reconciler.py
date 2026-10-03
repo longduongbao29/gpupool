@@ -33,7 +33,8 @@ from gpupool.coordinator import preemption
 from gpupool.coordinator.agent_client import AgentClient
 from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.events import Notifier
-from gpupool.coordinator.store import NodeRecord, Store, gpu_key
+from gpupool.coordinator.store import NodeRecord, Store, gpu_key, planning_factor
+from gpupool.scheduler.estimate import CONTEXT_MB
 from gpupool.scheduler.placement import NoFit, plan, rank
 
 log = logging.getLogger("gpupool.reconciler")
@@ -91,6 +92,8 @@ class Reconciler:
     # A move reloads a whole model, so it must be clearly better, not just better (score points).
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
+    CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
+    CAL_EVENT_DELTA = 0.05  # emit `calibrated` when the planning factor moves by more than this
 
     def __init__(
         self,
@@ -129,6 +132,53 @@ class Reconciler:
         self._move_text: tuple[str, str, float] = ("", "", 0.0)  # (from, to, gain) for the events
         # Starts at boot, not 0: right after a restart the reports are stale and a move would be a guess.
         self._last_rebalance = clock()
+        self._load_state()
+
+    # ------------------------------------------------------------------ persistence
+    # Control state is written through to the store on every change (rare events) and loaded here, so a
+    # coordinator restart keeps preemption cooldowns, the move in flight and crash-loop backoffs.
+    # Times are wall-clock (clock()), so they mean the same after a restart. _last_rebalance is NOT
+    # persisted: it deliberately restarts at boot, because right after a restart the reports are stale.
+    def _load_state(self) -> None:
+        try:
+            pre = self.store.get_state("preempted") or {}
+            self._preempted = {m: (float(v[0]), set(v[1])) for m, v in pre.items()}
+            bo = self.store.get_state("backoff") or {}
+            self._backoff = {m: (int(v[0]), float(v[1])) for m, v in bo.items()}
+            saved = self.store.get_state("move")
+            if saved:
+                mv = saved["move"]
+                # A move whose replicas are gone has nothing to resume: clear it quietly.
+                if self.store.get_replica(mv["old"]) is None or self.store.get_replica(mv["new"]) is None:
+                    self.store.delete_state("move")
+                else:
+                    self._move = dict(mv)
+                    self._move_text = (str(saved["text"][0]), str(saved["text"][1]), float(saved["text"][2]))
+        except Exception:
+            log.exception("loading saved coordinator state failed; starting clean")
+            self._preempted, self._backoff, self._move = {}, {}, None
+
+    def _save(self, key: str, value: dict | None) -> None:
+        """Write-through; a store problem must not break reconciliation (state stays in memory)."""
+        try:
+            if value:
+                self.store.put_state(key, value, now=self.clock())
+            else:
+                self.store.delete_state(key)
+        except Exception:
+            log.exception("saving coordinator state %r failed", key)
+
+    def _save_preempted(self) -> None:
+        self._save("preempted", {m: [w, sorted(ids)] for m, (w, ids) in self._preempted.items()})
+
+    def _save_backoff(self) -> None:
+        self._save("backoff", {m: [n, t] for m, (n, t) in self._backoff.items()})
+
+    def _set_move(self, move: dict | None, text: tuple[str, str, float] | None = None) -> None:
+        self._move = move
+        if text is not None:
+            self._move_text = text
+        self._save("move", {"move": move, "text": list(self._move_text)} if move else None)
 
     # ------------------------------------------------------------------ helpers
     def _http_client(self) -> httpx.AsyncClient:
@@ -260,13 +310,27 @@ class Reconciler:
         # Only passed when there is a draft, so planners/rankers without the parameter keep working.
         return {} if draft_meta is None else {"draft_meta": draft_meta}
 
+    def _pkw(self, model: str, draft_meta: ModelMeta | None = None) -> dict:
+        """Extra planner/ranker keywords for `model`: the draft and the calibrated memory factor.
+        Each only when it applies (factor != 1.0), so fakes without the parameters keep working."""
+        kw = self._dkw(draft_meta)
+        try:
+            f = self.store.mem_factor(model)
+        except Exception:
+            log.exception("reading the memory factor of %s failed", model)
+            f = 1.0
+        if f != 1.0:
+            kw["mem_factor"] = f
+        return kw
+
     async def rank_for(self, spec: ModelSpec, limit: int) -> list[Placement]:
         """Best placements for `spec` right now, without ports or a replica id. No side effects."""
         meta = await self.meta_for(spec)
         draft = await self.draft_meta_for(spec)
         reports = self.available_reports()
         self._apply_pins(spec, reports)
-        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit, **self._dkw(draft))
+        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit,
+                              **self._pkw(spec.name, draft))
 
     async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
         """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
@@ -293,7 +357,7 @@ class Reconciler:
         meta = await self.meta_for(spec)
         draft = await self.draft_meta_for(spec)
         return self._planner()(meta, spec, reports, rid, port_alloc, occupants=self.occupants(),
-                               **self._dkw(draft))
+                               **self._pkw(spec.name, draft))
 
     @staticmethod
     def _new_replica_id(model: str) -> str:
@@ -332,7 +396,7 @@ class Reconciler:
         """The ranker, with `spec`'s constraints re-applied to whatever reports it is handed and
         the draft model (if any) accounted for, so preemption and simulation size it like a launch."""
         base = self._ranker()
-        extra = self._dkw(draft_meta)
+        extra = self._pkw(spec.name, draft_meta)
 
         def ranked(meta, spec_, nodes, occupants=(), limit=5):
             return base(meta, spec_, self._constrain(spec, nodes), occupants=occupants, limit=limit, **extra)
@@ -432,6 +496,7 @@ class Reconciler:
                        f"to make room for {spec.name} (priority {spec.priority})",
                        node_id=v.placement.head_node, model=v.model)
         self._preempted[spec.name] = (now, {v.replica_id for v in victims})
+        self._save_preempted()
 
     # ------------------------------------------------------------------ simulation
     async def simulate(self, specs: list[ModelSpec]) -> dict:
@@ -516,7 +581,7 @@ class Reconciler:
         """The planner's own NoFit message for the simulated cluster state."""
         try:
             self._planner()(meta, spec, self._constrain(spec, reports), "sim", lambda _n: 0, occupants=occ,
-                           **self._dkw(draft))
+                           **self._pkw(spec.name, draft))
         except Exception as e:
             return f"{type(e).__name__}: {e}"
         return "no placement found"
@@ -551,7 +616,7 @@ class Reconciler:
                 self._apply_pins(spec, reports)  # a move stays within the model's pins
                 ranked = self._ranker()(meta, spec, reports, limit=5, extra=[r.placement],
                                         occupants=[o for o in occ_all if o.replica_id != r.replica_id],
-                                        **self._dkw(draft))
+                                        **self._pkw(spec.name, draft))
             except Exception:
                 log.exception("scoring a rebalance for %s failed", r.replica_id)
                 continue
@@ -604,8 +669,8 @@ class Reconciler:
             log.warning("rebalance of %s: cannot plan the new replica: %s", old.replica_id, e)
             return False
         rec = self._spawn_launch(spec, placement, now)  # real spec: the pins were for planning only
-        self._move = {"model": spec.name, "old": old.replica_id, "new": rec.replica_id, "since": now}
-        self._move_text = (self._where_text(move["from"]), self._where_text(move["to"]), float(move["gain"]))
+        self._set_move({"model": spec.name, "old": old.replica_id, "new": rec.replica_id, "since": now},
+                       (self._where_text(move["from"]), self._where_text(move["to"]), float(move["gain"])))
         self._emit("info", "rebalance_started",
                    f"Moving replica {old.replica_id} of {spec.name} from {self._move_text[0]} to "
                    f"{self._move_text[1]} (score {move['gain']:+.0f})",
@@ -621,7 +686,7 @@ class Reconciler:
         frm, to, gain = self._move_text
         if new is not None and new.state == "ready" and old is not None and old.state == "ready":
             await self.drain(old.replica_id)
-            self._move = None
+            self._set_move(None)
             self._emit("info", "rebalanced",
                        f"Moved replica {old.replica_id} of {mv['model']} to {to} (score {gain:+.0f})",
                        node_id=new.placement.head_node, model=mv["model"])
@@ -638,7 +703,7 @@ class Reconciler:
         if reason is None:
             return
         # The old replica keeps serving; a new one still alive is surplus and drains normally.
-        self._move = None
+        self._set_move(None)
         self._emit("warning", "rebalance_failed",
                    f"Move of replica {mv['old']} of {mv['model']} from {frm} to {to} abandoned: {reason}",
                    model=mv["model"])
@@ -689,6 +754,7 @@ class Reconciler:
             now = self.clock()
             nodes = self._node_map()
             self._track_nodes(nodes, now)
+            await self._fail_orphaned_launches(nodes, now)
             await self._detect_failures(nodes, now)
             await self._check_suspects(nodes)
             await self._process_drains(nodes, now)
@@ -764,14 +830,19 @@ class Reconciler:
         n += 1
         delay = min(300.0, 5.0 * 2 ** (n - 1))
         self._backoff[model] = (n, now + delay)
+        self._save_backoff()
         return n, delay
 
     def _clear_stable_backoff(self, now: float) -> None:
         """A model whose replica has stayed ready for STABLE_S is healthy again: forget its backoff."""
+        cleared = False
         for model in list(self._backoff):
             if any(now - r.updated_at >= self.STABLE_S
                    for r in self.store.list_replicas(model=model, states={"ready"})):
                 self._backoff.pop(model, None)
+                cleared = True
+        if cleared:
+            self._save_backoff()
 
     async def _fail(self, rec: ReplicaRecord, reason: str, nodes: dict[str, NodeRecord], now: float,
                     model_fault: bool = False) -> None:
@@ -806,6 +877,19 @@ class Reconciler:
                 log.warning("stop %s on %s failed: %s", engine_id, node_id, e)
 
         await asyncio.gather(*(one(n, e) for n, e in engine_ids(rec)))
+
+    async def _fail_orphaned_launches(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """Fail pending/launching replicas that no launch task of this process owns.
+
+        A replica record and its launch task are created together (_spawn_launch), so a
+        launching record without a task means the coordinator died mid-launch (kill -9, OOM,
+        power loss; a clean shutdown cancels the task and marks it failed itself). Seen on a real
+        cluster: after `docker kill` the replica stayed "launching" forever and, being counted as
+        active, kept its model from ever being launched again. Its engines may be half-started on
+        the agents, so _fail stops them; the next tick re-plans the model."""
+        for rec in self.store.list_replicas(states={"pending", "launching"}):
+            if rec.replica_id not in self._launches:
+                await self._fail(rec, "coordinator restarted during launch", nodes, now)
 
     async def _detect_failures(self, nodes: dict[str, NodeRecord], now: float) -> None:
         for rec in self.store.list_replicas(states={"launching", "ready"}):
@@ -997,6 +1081,7 @@ class Reconciler:
         rid, p = rec.replica_id, rec.placement
         created: list[tuple[str, str]] = []  # (agent_url, engine_id)
         head_url = ""
+        became_ready = False
         try:
             nodes = self._node_map()
 
@@ -1019,7 +1104,8 @@ class Reconciler:
                 url = agent(a.node_id)
                 created.append((url, eid))
                 await self.client.start_engine(url, EngineSpec(
-                    engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id]))
+                    engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id],
+                    allowed_peers=[head_host]))  # only the head connects to an RPC engine
                 rpc_ids.append((url, eid))
             for url, eid in rpc_ids:
                 await self._wait_running(url, eid)
@@ -1054,6 +1140,7 @@ class Reconciler:
             if cur is None or cur.state != "launching":
                 raise _Superseded
             self.store.set_replica_state(rid, "ready", None, now=self.clock())
+            became_ready = True
             log.info("replica %s ready", rid)
             entry = self._realloc.pop(spec.name, None)
             if entry is not None:
@@ -1086,7 +1173,59 @@ class Reconciler:
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
             self._bump_backoff(spec.name, self.clock())
         finally:
-            self._launches.pop(rid, None)
+            try:
+                if became_ready:
+                    # Outside the try above on purpose: a cancel (drain) here must not roll back a
+                    # replica that is already serving.
+                    await self._calibrate(rec, spec, head_url)
+            finally:
+                self._launches.pop(rid, None)
+
+    # ------------------------------------------------------------------ calibration
+    @staticmethod
+    def calibration_sample(placement: Placement, memory: dict) -> tuple[float, float] | None:
+        """(measured MB, estimated MB) of a ready replica, or None when the data does not cover it.
+
+        Measured: the head's per-device buffers summed over the placement's devices (the draft model
+        sits in the head device's buffers). Estimated: est_mb minus the per-device runtime context,
+        which llama.cpp does not report as buffers (a draft brings its own context: one more)."""
+        devices = memory.get("devices") if isinstance(memory, dict) else None
+        if not isinstance(devices, dict) or not devices:
+            return None
+        measured = estimated = 0.0
+        for a in placement.assignments:
+            d = devices.get(a.llama_device)
+            if not isinstance(d, dict) or not d.get("total_mb"):
+                return None  # partial data would bias the ratio low: skip the sample
+            measured += float(d["total_mb"])
+            estimated += a.est_mb - CONTEXT_MB["cuda"]
+        if placement.draft_est_mb:
+            estimated -= CONTEXT_MB["cuda"]
+        if measured <= 0 or estimated <= 0:
+            return None
+        return measured, estimated
+
+    async def _calibrate(self, rec: ReplicaRecord, spec: ModelSpec, head_url: str) -> None:
+        """Compare what the head engine really loaded with the estimate and fold it into the model's
+        memory factor. Never fails the launch: this is bookkeeping about a replica already serving."""
+        try:
+            memory = await self.client.engine_memory(head_url, f"{rec.replica_id}-head")
+            sample = self.calibration_sample(rec.placement, memory) if memory else None
+            if sample is None:
+                return  # old agent, logs without -lv 4, or devices missing: leave the factor alone
+            measured, estimated = sample
+            ratio = measured / estimated
+            old = self.store.get_calibration(spec.name)
+            raw = ratio if old is None else self.CAL_ALPHA * ratio + (1 - self.CAL_ALPHA) * old["factor"]
+            self.store.put_calibration(spec.name, raw, (old["samples"] if old else 0) + 1, now=self.clock())
+            before, after = planning_factor(old["factor"] if old else None), planning_factor(raw)
+            if abs(after - before) / before > self.CAL_EVENT_DELTA:
+                msg = (f"{spec.name}: measured {measured:.0f} MB vs estimated {estimated:.0f} MB, "
+                       f"planning factor {after:.2f}")
+                log.info(msg)
+                self._emit("info", "calibrated", msg, node_id=rec.placement.head_node, model=spec.name)
+        except Exception:
+            log.exception("memory calibration of %s failed", rec.replica_id)
 
     async def _rollback(self, created: list[tuple[str, str]]) -> None:
         """Stop every engine created so far: a half-launched replica would pin VRAM on shared GPUs."""

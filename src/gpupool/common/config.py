@@ -41,6 +41,9 @@ class AgentConfig(BaseModel):
     # The coordinator pulls /report from registered agents; pushing heartbeats is optional
     # (kept for coordinators that predate pull mode).
     push_heartbeat: bool = False
+    # ggml-rpc-server has no authentication: anyone who reaches its port can use the GPU. When
+    # on, each RPC engine's port only accepts its head node (iptables; needs root/NET_ADMIN).
+    rpc_firewall: bool = False
 
 
 class CoordinatorConfig(BaseModel):

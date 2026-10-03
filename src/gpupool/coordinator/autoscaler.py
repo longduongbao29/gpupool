@@ -3,10 +3,13 @@
 The reconciler asks `desired()` instead of reading `spec.replicas`, the router calls
 `note_request()` / `can_cold_start()`, and the API shows `view()`.
 
-State (desired count, idle timer, "since when" trackers) lives in memory only. After a
-coordinator restart every model starts again at its floor (max(min_replicas, 1)) with a fresh
-idle timer; a model that had been unloaded to 0 is loaded again until it idles out once more.
-That is deliberate: it is the safe direction (never serve less than configured after a restart).
+State lives in memory and is written through to the store (control_state, key "autoscaler:<model>")
+whenever the desired count changes, so a restart keeps an unloaded model unloaded and a scaled-up
+model scaled up. Persisted: desired count, last request time, last decision. Dropped on purpose: the
+up/down "since when" timers (a restart only delays a scaling step by up_after_s/down_after_s).
+last_request is also refreshed on a slow cadence (not per request) so the idle timer stays roughly
+right. Times are wall-clock (clock()), so they remain meaningful across a restart. A model with no
+saved state starts at its floor (max(min_replicas, 1)).
 """
 from __future__ import annotations
 
@@ -75,6 +78,7 @@ class _State:
     up_since: float | None = None
     down_since: float | None = None
     last_decision: dict | None = None
+    saved_at: float = float("-inf")  # last time last_request was written to the store (not persisted)
 
 
 class Autoscaler:
@@ -83,6 +87,7 @@ class Autoscaler:
     SCRAPE_TIMEOUT_S = 2.0
     # scale down only when busy is below target * this factor (hysteresis against flapping)
     DOWN_FACTOR = 0.5
+    SAVE_IDLE_S = 60.0  # how often a request refreshes the saved last_request
 
     def __init__(self, store: Store, cfg: CoordinatorConfig, outstanding: Callable[[str], int],
                  notifier: Notifier, clock: Callable[[], float] = time.time,
@@ -97,6 +102,7 @@ class Autoscaler:
         self.wake = wake
         self._state: dict[str, _State] = {}
         self._scrapes: dict[str, _Scrape] = {}
+        self._clean: set[str] = set()  # stopped models whose saved state is known to be deleted
         # Liveness rule, set by the app to Reconciler.node_alive; None = pure last_seen rule.
         self.node_alive: Callable[[object, float], bool] | None = None
 
@@ -119,9 +125,43 @@ class Autoscaler:
     def _state_for(self, spec: ModelSpec, now: float) -> _State:
         st = self._state.get(spec.name)
         if st is None:
-            # the idle timer starts when the model starts, not at coordinator boot
-            st = self._state[spec.name] = _State(desired=self._floor(spec), last_request=now)
+            st = self._state[spec.name] = self._load(spec, now)
+            self._clean.discard(spec.name)
         return st
+
+    def _key(self, model: str) -> str:
+        return f"autoscaler:{model}"
+
+    def _load(self, spec: ModelSpec, now: float) -> _State:
+        try:
+            saved = self.store.get_state(self._key(spec.name))
+            if saved is not None:
+                dec = saved.get("last_decision")
+                return _State(desired=int(saved["desired"]), last_request=float(saved["last_request"]),
+                              last_decision=dec if isinstance(dec, dict) else None, saved_at=now)
+        except Exception:
+            log.exception("loading autoscaler state of %s failed", spec.name)
+        # the idle timer starts when the model starts, not at coordinator boot
+        return _State(desired=self._floor(spec), last_request=now)
+
+    def _save(self, model: str, st: _State, now: float) -> None:
+        """Write-through; a store problem must not break scaling (the state just stays in memory)."""
+        try:
+            self.store.put_state(self._key(model), {
+                "desired": st.desired, "last_request": st.last_request, "last_decision": st.last_decision})
+            st.saved_at = now
+        except Exception:
+            log.exception("saving autoscaler state of %s failed", model)
+
+    def _forget(self, model: str) -> None:
+        """The model is stopped or deleted: drop its state, in memory and in the store."""
+        had = self._state.pop(model, None) is not None
+        if had or model not in self._clean:
+            try:
+                self.store.delete_state(self._key(model))
+                self._clean.add(model)
+            except Exception:
+                log.exception("deleting autoscaler state of %s failed", model)
 
     def _clamped(self, spec: ModelSpec, desired: int) -> int:
         lo, hi = bounds(spec)
@@ -158,7 +198,7 @@ class Autoscaler:
     def desired(self, spec: ModelSpec) -> int:
         """Replicas the reconciler should keep now: 0 when stopped (replicas == 0) or unloaded."""
         if spec.replicas == 0:
-            self._state.pop(spec.name, None)
+            self._forget(spec.name)
             return 0
         st = self._state_for(spec, self.clock())
         self._clamp(spec, st)
@@ -189,6 +229,7 @@ class Autoscaler:
             if bounds(spec)[0] == 0 and st.desired == 0:
                 st.desired = 1
                 self._decide(st, now, "cold_start", f"request for unloaded model {model}")
+                self._save(model, st, now)
                 self._emit("cold_start", f"loading {model} for an incoming request", model)
                 if self.wake is not None:
                     try:
@@ -196,6 +237,8 @@ class Autoscaler:
                     except Exception:
                         log.exception("wake failed")
                 return True
+            if now - st.saved_at >= self.SAVE_IDLE_S:
+                self._save(model, st, now)  # slow cadence: requests are frequent, restarts are not
         except Exception:
             log.exception("note_request(%s) failed", model)
         return False
@@ -205,7 +248,7 @@ class Autoscaler:
         now = self.clock()
         specs = {s.name: s for s in self.store.list_models()}
         for name in [n for n in self._state if n not in specs]:
-            del self._state[name]  # model deleted
+            self._forget(name)  # model deleted
         for spec in specs.values():
             try:
                 self._evaluate_model(spec, now)
@@ -214,7 +257,7 @@ class Autoscaler:
 
     def _evaluate_model(self, spec: ModelSpec, now: float) -> None:
         if spec.replicas == 0:
-            self._state.pop(spec.name, None)
+            self._forget(spec.name)
             return
         lo, hi = bounds(spec)
         if hi == lo and spec.idle_unload_s is None:
@@ -236,6 +279,7 @@ class Autoscaler:
             st.desired = 0
             reason = f"no requests for {spec.idle_unload_s:g} s"
             self._decide(st, now, "unloaded_idle", reason)
+            self._save(spec.name, st, now)
             self._emit("unloaded_idle", f"{spec.name} unloaded: {reason}", spec.name)
             return
 
@@ -257,6 +301,7 @@ class Autoscaler:
                 reason = f"busy {(avg or 0) * 100:.0f}% > {pol.target_busy * 100:.0f}% for {held:.0f} s"
             st.desired += 1
             self._decide(st, now, "scaled_up", reason)
+            self._save(spec.name, st, now)
             self._emit("scaled_up", f"{spec.name} scaled up to {st.desired}: {reason}", spec.name)
         elif (st.down_since is not None and now - st.down_since >= pol.down_after_s
                 and st.desired > self._floor(spec)):
@@ -265,6 +310,7 @@ class Autoscaler:
                       f"for {held:.0f} s")
             st.desired -= 1
             self._decide(st, now, "scaled_down", reason)
+            self._save(spec.name, st, now)
             self._emit("scaled_down", f"{spec.name} scaled down to {st.desired}: {reason}", spec.name)
 
     # -- metrics ---------------------------------------------------------------------------

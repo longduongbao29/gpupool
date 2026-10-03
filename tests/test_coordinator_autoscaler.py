@@ -14,9 +14,9 @@ from tests.test_coordinator_helpers import Clock, node
 
 
 class Rig:
-    def __init__(self, **cfg_kw):
-        self.store = Store(":memory:")
-        self.clock = Clock(1000.0)
+    def __init__(self, store=None, clock=None, **cfg_kw):
+        self.store = store or Store(":memory:")
+        self.clock = clock or Clock(1000.0)
         self.out: dict[str, int] = {}
         self.woken = 0
         cfg = CoordinatorConfig(poll_s=2.0, **cfg_kw)
@@ -456,3 +456,90 @@ async def test_scrape_uses_injected_liveness_rule():
         await r.a.scrape_once()
     assert route.called and r.a._scrapes["r1"].ok
     await r.a.aclose()
+
+
+# ---------------------------------------------------------------- persistence across a restart
+def _restart(r: Rig) -> Rig:
+    return Rig(store=r.store, clock=r.clock)
+
+
+def test_unloaded_model_stays_unloaded_after_restart(tmp_path):
+    r = Rig(store=Store(tmp_path / "s.db"))
+    spec = r.model(replicas=1, min_replicas=0, max_replicas=1, idle_unload_s=600)
+    r.replica("r1")
+    assert r.a.desired(spec) == 1
+    r.tick(600)
+    assert r.a.desired(spec) == 0
+    r2 = _restart(r)
+    assert r2.a.desired(spec) == 0  # not loaded again just because the coordinator restarted
+    assert r2.a.view("m")["state"] == "unloaded"
+    assert r2.a.note_request("m") is True  # a request still wakes it
+    assert r2.a.desired(spec) == 1
+    r3 = _restart(r2)
+    assert r3.a.desired(spec) == 1  # and the cold start is saved too
+    assert r3.a._state["m"].last_decision["action"] == "cold_start"
+
+
+def test_scaled_up_count_and_last_request_survive_restart(tmp_path):
+    r = Rig(store=Store(tmp_path / "s.db"))
+    spec = autoscaled(r)
+    r.replica("r1")
+    r.feed("r1", 4)
+    r.tick()
+    r.tick(30)
+    assert r.a.desired(spec) == 2
+    r.clock.t += 5
+    r.a.note_request("m")
+    r2 = _restart(r)
+    assert r2.a.desired(spec) == 2
+    st = r2.a._state["m"]
+    assert st.last_decision["action"] == "scaled_up"
+    assert st.up_since is None and st.down_since is None  # timers are dropped on purpose
+
+
+def test_idle_timer_survives_restart_and_requests_refresh_it_slowly(tmp_path):
+    r = Rig(store=Store(tmp_path / "s.db"))
+    spec = r.model(replicas=1, min_replicas=0, max_replicas=1, idle_unload_s=600)
+    r.replica("r1")
+    r.a.desired(spec)
+    r.clock.t += 100
+    r.a.note_request("m")  # first request: saved
+    saved = r.store.get_state("autoscaler:m")["last_request"]
+    r.clock.t += 10
+    r.a.note_request("m")  # within SAVE_IDLE_S: not written again
+    assert r.store.get_state("autoscaler:m")["last_request"] == saved
+    r.clock.t += 100
+    r.a.note_request("m")
+    assert r.store.get_state("autoscaler:m")["last_request"] == r.clock()
+    r2 = _restart(r)
+    r2.a.desired(spec)
+    assert r2.a._state["m"].last_request == r.clock()
+
+
+def test_stopping_or_deleting_a_model_drops_saved_state(tmp_path):
+    r = Rig(store=Store(tmp_path / "s.db"))
+    spec = r.model(replicas=1, min_replicas=0, max_replicas=1, idle_unload_s=600)
+    r.replica("r1")
+    r.a.desired(spec)
+    r.tick(600)
+    assert r.store.get_state("autoscaler:m") is not None
+    stopped = spec.model_copy(update={"replicas": 0})
+    r.store.put_model(stopped)
+    assert r.a.desired(stopped) == 0
+    assert r.store.get_state("autoscaler:m") is None
+    r.store.put_model(spec)  # started again: back at its floor, not the stale unloaded state
+    assert _restart(r).a.desired(spec) == 1
+
+
+def test_store_failure_does_not_break_scaling(tmp_path):
+    r = Rig()
+    spec = r.model(replicas=1, min_replicas=0, max_replicas=1, idle_unload_s=600)
+    r.replica("r1")
+    r.a.desired(spec)
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    r.store.put_state = boom
+    r.tick(600)
+    assert r.a.desired(spec) == 0  # in-memory state still decided

@@ -1,6 +1,7 @@
 """Spawn and supervise llama-server / ggml-rpc-server processes."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import psutil
 
+from gpupool.agent.firewall import RpcFirewall, Rule
 from gpupool.common.models import EngineSpec, EngineStatus
 
 log = logging.getLogger(__name__)
@@ -63,7 +65,10 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
         raise ValueError("server engine needs a model_path")
     cmd = [str(bins["server"]), "-m", model_path, "--host", bind_host, "--port", str(spec.port),
            "--alias", spec.model or "", "-c", str(spec.ctx_size), "-np", str(spec.parallel),
-           "-ngl", "999"]
+           "-ngl", "999",
+           # b11342 prints per-device model/KV/compute buffer sizes at verbosity 4 (the
+           # coordinator parses them); 5 adds a dry-run pass, so exactly 4.
+           "-lv", "4"]
     # --rpc MUST precede --device: llama.cpp resolves device names while parsing arguments,
     # so "RPC0" in --device only exists once --rpc has registered the servers (b11342 exits
     # with a usage error otherwise).
@@ -112,24 +117,46 @@ def _probe_host(bind_host: str) -> str:
     return "127.0.0.1" if bind_host in ("0.0.0.0", "", "::") else bind_host
 
 
+def _exposed(bind_host: str) -> bool:
+    """True when binding here may reach the public internet (wildcard or a global address)."""
+    if bind_host in ("", "0.0.0.0", "::"):
+        return True
+    try:
+        return ipaddress.ip_address(bind_host).is_global
+    except ValueError:
+        return False  # hostname: can't judge without resolving; stay quiet
+
+
 @dataclass
 class _Engine:
     spec: EngineSpec
     proc: subprocess.Popen
     log_path: Path
+    fw_rules: list[Rule] = field(default_factory=list)  # iptables rules to drop on stop
     running: bool = False
     stopped: bool = False  # we terminated it on purpose
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class ProcessManager:
-    def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str):
+    def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str, rpc_firewall: bool = False,
+                 firewall: RpcFirewall | None = None):
         self.llama_dir = Path(llama_dir)
         self.log_dir = Path(log_dir)
         self.bind_host = bind_host
+        self.rpc_firewall = rpc_firewall  # restrict RPC ports to EngineSpec.allowed_peers
         self._lock = threading.RLock()
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
+        self.firewall = (firewall or RpcFirewall()) if rpc_firewall else None
+        if self.firewall is not None:
+            self.firewall.setup()  # also flushes rules of engines a previous agent left behind
+        elif _exposed(bind_host):
+            log.warning("RPC engines bind %s, which is not a private address, and "
+                        "ggml-rpc-server has no authentication: anyone who can reach ports "
+                        "9000-9999 can use this GPU. Set GPUPOOL_RPC_FIREWALL=1 (root, Docker "
+                        "--cap-add NET_ADMIN) or firewall those ports to cluster hosts only.",
+                        bind_host or "0.0.0.0")
         self.reap_orphans()
 
     # A hard-killed agent (OOM killer, kill -9, server reboot of the agent only) leaves its
@@ -209,6 +236,19 @@ class ProcessManager:
                 raise PortInUse(f"port {spec.port} not available on {self.bind_host}")
             cmd = build_command(spec, self._binaries(), self.bind_host, model_path)
             self.log_dir.mkdir(parents=True, exist_ok=True)
+            if old is not None:
+                self._drop_rules(old)  # crashed engine being replaced: its rules are stale
+            fw_rules: list[Rule] = []
+            if self.firewall is not None and spec.kind == "rpc" and spec.allowed_peers:
+                # before the process exists, so the port is never reachable unprotected.
+                # Our own address too: the readiness probe connects to the bind address, and a
+                # connection to one's own IP has that IP (not 127.0.0.1) as its source; without
+                # it the engine never looks "running" (seen in a real Docker cluster).
+                peers = list(spec.allowed_peers)
+                own = _probe_host(self.bind_host)
+                if own not in peers and own not in ("127.0.0.1", "::1", "localhost"):
+                    peers.append(own)  # loopback already has its own rule
+                fw_rules = self.firewall.install(spec.port, peers)
             log_path = self.log_dir / f"{spec.engine_id}.log"
             env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
             kwargs = {}
@@ -216,13 +256,23 @@ class ProcessManager:
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             # File, not PIPE: an unread pipe fills up and blocks llama.cpp mid-load.
             # The child inherits the handle; the parent's copy is closed on leaving `with`.
-            with open(log_path, "wb") as logf:
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=logf,
-                                        stderr=subprocess.STDOUT, env=env, **kwargs)
-            eng = _Engine(spec=spec, proc=proc, log_path=log_path)
+            try:
+                with open(log_path, "wb") as logf:
+                    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=logf,
+                                            stderr=subprocess.STDOUT, env=env, **kwargs)
+            except BaseException:
+                if fw_rules and self.firewall is not None:
+                    self.firewall.remove(fw_rules)
+                raise
+            eng = _Engine(spec=spec, proc=proc, log_path=log_path, fw_rules=fw_rules)
             self._engines[spec.engine_id] = eng
             self._write_pid(spec.engine_id, proc)
         return self._status(eng)
+
+    def _drop_rules(self, eng: _Engine) -> None:
+        rules, eng.fw_rules = eng.fw_rules, []
+        if rules and self.firewall is not None:
+            self.firewall.remove(rules)
 
     def _status(self, eng: _Engine, tail_when_running: bool = True) -> EngineStatus:
         with eng.lock:
@@ -273,6 +323,7 @@ class ProcessManager:
                 eng.proc.kill()
                 eng.proc.wait()  # reap: no zombie
         self._clear_pid(engine_id)
+        self._drop_rules(eng)
         final = self._status(eng)
         # Forget it: otherwise every /report lists every engine ever stopped and the
         # coordinator keeps treating their ports as taken until the range is exhausted.

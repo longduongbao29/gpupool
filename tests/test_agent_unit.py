@@ -46,7 +46,7 @@ def test_build_server_single():
                       model="m", ctx_size=2048, parallel=2, extra_args=["--foo"])
     cmd = build_command(spec, BINS, "127.0.0.1", "/m.gguf")
     assert cmd == ["llama-server", "-m", "/m.gguf", "--host", "127.0.0.1", "--port", "9000",
-                   "--alias", "m", "-c", "2048", "-np", "2", "-ngl", "999", "--device", "CUDA0",
+                   "--alias", "m", "-c", "2048", "-np", "2", "-ngl", "999", "-lv", "4", "--device", "CUDA0",
                    "--split-mode", "layer", "--cache-reuse", "256", "--metrics", "--fit", "off",
                    "--foo"]
 
@@ -70,7 +70,7 @@ def test_build_server_requires_model_path():
 
 
 _BASE = ["llama-server", "-m", "/m.gguf", "--host", "h", "--port", "1", "--alias", "m",
-         "-c", "4096", "-np", "1", "-ngl", "999", "--device", "CUDA0", "--split-mode", "layer",
+         "-c", "4096", "-np", "1", "-ngl", "999", "-lv", "4", "--device", "CUDA0", "--split-mode", "layer",
          "--cache-reuse", "256", "--metrics", "--fit", "off"]
 
 

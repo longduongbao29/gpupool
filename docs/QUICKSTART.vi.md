@@ -140,6 +140,21 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 
 RPC của llama.cpp không mã hoá: giữ các server GPU trong mạng nội bộ tin cậy.
 
+## Bảo mật
+
+- **Cổng RPC không có xác thực.** `ggml-rpc-server` (cổng 9000–9999 trên mỗi server GPU) nhận mọi kết nối: ai kết
+  nối được đều có thể cấp phát VRAM và đọc/ghi tensor. Có hai cách giới hạn:
+  - đặt `GPUPOOL_RPC_FIREWALL=1` trên server GPU. Agent sẽ dùng iptables để mỗi cổng RPC chỉ nhận kết nối từ server
+    đầu (head) của replica (cộng loopback), và gỡ luật khi engine dừng. Cần quyền root; trong Docker thêm
+    `--cap-add NET_ADMIN` (compose: `cap_add: [NET_ADMIN]`). Nếu thiếu, agent ghi một dòng lỗi và chạy không có
+    bảo vệ;
+  - hoặc dùng tường lửa của bạn: chỉ cho phép 9000–9999 giữa các máy trong cụm.
+- Khi khởi động, agent cảnh báo nếu nó bind địa chỉ công khai mà chưa bật firewall.
+- Hãy tự đặt `GPUPOOL_ADMIN_KEY` (UI và API quản trị) và `GPUPOOL_API_KEYS` (client của `/v1`); không có API key thì
+  `/v1` mở cho bất kỳ ai tới được cổng 8080.
+- Cluster token và API key đi qua HTTP thường (không TLS): hãy để cụm trong mạng riêng hoặc VPN, và đặt proxy
+  chấm dứt TLS trước coordinator nếu client ở ngoài.
+
 ## Sau HTTP proxy
 
 Nếu các server ra internet qua proxy, hãy truyền biến proxy của máy chủ vào container

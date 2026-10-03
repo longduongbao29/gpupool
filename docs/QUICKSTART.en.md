@@ -142,6 +142,20 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 
 llama.cpp RPC is not encrypted: keep the GPU servers on a trusted internal network.
 
+## Security
+
+- **RPC ports are unauthenticated.** `ggml-rpc-server` (ports 9000–9999 on every GPU server) accepts any
+  connection: whoever can reach it can allocate GPU memory and read or write tensors. Restrict it in one of two ways:
+  - set `GPUPOOL_RPC_FIREWALL=1` on the GPU server. The agent then uses iptables so each RPC port only accepts the
+    server that heads the replica (plus loopback), and removes the rules when the engine stops. It needs root; in Docker
+    add `--cap-add NET_ADMIN` (compose: `cap_add: [NET_ADMIN]`). Without that it logs an error and runs unprotected;
+  - or use your own firewall: allow 9000–9999 only between cluster hosts.
+- The agent warns at startup when it binds a public address with the firewall off.
+- Set your own `GPUPOOL_ADMIN_KEY` (UI and admin API) and `GPUPOOL_API_KEYS` (clients of `/v1`); without API keys
+  `/v1` is open to anyone who reaches port 8080.
+- The cluster token and API keys travel over plain HTTP (no TLS): keep the cluster on a private network or VPN, and
+  put a TLS-terminating proxy in front of the coordinator if clients connect from outside.
+
 ## Behind an HTTP proxy
 
 If your servers reach the internet through a proxy, pass the host's proxy variables into the containers

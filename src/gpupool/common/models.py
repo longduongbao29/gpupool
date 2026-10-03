@@ -83,6 +83,9 @@ class EngineSpec(BaseModel):
     draft_model_path: str | None = None  # spec_type "draft": GGUF on the head node
     draft_device: str | None = None  # llama device the draft runs on, e.g. "CUDA0" (local to the head)
     draft_n_max: int = 4
+    # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
+    # only by agents with rpc_firewall on; ggml-rpc-server itself has no authentication.
+    allowed_peers: list[str] = Field(default_factory=list)
 
 
 class EngineStatus(BaseModel):
