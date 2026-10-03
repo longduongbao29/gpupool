@@ -15,7 +15,7 @@
 [![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.en.md)
 
-[Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [Measured](#measured-not-promised) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
+[Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
 
 </div>
 
@@ -223,35 +223,6 @@ Prefer a ready-made GGUF when one exists: it is faster and needs no conversion. 
 
 </details>
 
-## Measured, not promised
-
-All numbers below come from [docs/TEST_REPORT.en.md](docs/TEST_REPORT.en.md). Hardware: one Windows 11 laptop with a
-GTX 1650 Ti Max-Q (4 GB), Docker in WSL2, llama.cpp b11342. Servers beyond the first are emulated or simulated; see
-[Status](#status).
-
-| What | Result |
-| --- | --- |
-| Router overhead (Qwen2.5-0.5B, one GPU) | decode 185 tok/s through gpupool vs 182 tok/s `llama-bench` baseline |
-| KV cache quantization (Qwen2.5-3B, ctx 8192) | saves 132 MB (`q8_0`) and 204 MB (`q4_0`); decode 51.9 / 51.2 / 50.8 tok/s for f16 / q8_0 / q4_0 |
-| Speculative decoding (Qwen2.5-3B split over 2 simulated servers) | 48.9 tok/s none, 53.6 ngram, 53.9 with a 0.5B draft model |
-| Conversion, Qwen2.5-0.5B-Instruct to `Q4_K_M` (laptop CPU) | 143 s total including download, 397,807,488 bytes |
-| Conversion, Qwen2.5-1.5B-Instruct to `IQ3_M` with importance matrix (100 chunks) | 28 min, about 70 % of it calibration |
-| Size estimate before converting | within about 2 % of the real file (390.7 MB estimated vs 397.8 MB real) |
-| VRAM estimate (Qwen2.5-0.5B, ctx 4096) | +38 % before calibration, +12 % after, against 525 MB measured |
-| Crash recovery (coordinator killed mid-launch) | orphaned launch failed in about 5 s, new replica ready in about 30 s, no leftover engines |
-| Tests | 809 unit tests; CI end-to-end 33/33 checks in 249 s (coordinator + 3 CPU-only agents, split over RPC, three conversions) |
-| Coordinator image size | 1.77 GB with the conversion toolchain, 560 MB without (`WITH_CONVERT=0`) |
-
-> The 3B model split over a GPU plus two CPU "servers" ran at 11.6 tok/s in the early emulation. That run validated the
-> RPC path, not speed: 23 of 36 layers ran on CPU.
-
-### Status
-
-Tested on one Windows laptop: natively with emulated nodes against real llama.cpp, and as a simulated 3-server Docker
-cluster in WSL2. A CPU-only 3-server end-to-end test runs in CI. **Not yet run on a real multi-server LAN**, so speed
-across real networks (including speculative decoding over a real network) and models of 7B and larger are untested.
-Also not covered: an importance matrix on a GPU, a gated Hugging Face repo, and converted models of several GB.
-
 ## Using the API
 
 Any OpenAI-compatible client works; only the base URL and the model name change.
@@ -303,11 +274,11 @@ From the "still to do" and open-question lists in the [test report](docs/TEST_RE
 [platform design](docs/PLATFORM_DESIGN.en.md#10-open-questions-and-decisions).
 
 - [ ] Run on a real multi-server LAN, and measure speculative decoding over a real network
-- [ ] Models of 7B and larger (they need bigger GPUs than the test laptop has)
+- [ ] Validate models of 7B and larger on large GPUs
 - [ ] Per-client API keys and quotas, `/v1/embeddings`, TLS
 - [ ] Zero-downtime model swap
 - [ ] Upgrade llama.cpp
-- [ ] Decode-speed model per GPU architecture (today a fixed efficiency of 0.5, measured on one GTX 1650) and a separate prefill score
+- [ ] Decode-speed model per GPU architecture (today a single fixed efficiency of 0.5) and a separate prefill score
 - [ ] Importance matrices on GPU servers; distributing conversion jobs over several machines
 - [ ] LoRA adapters and vision projectors (`mmproj`) in conversion
 
@@ -362,8 +333,8 @@ on a private network or VPN, and put a TLS-terminating proxy in front of the coo
 <summary><b>Can I mix different GPUs?</b></summary>
 
 Yes. The scheduler reads each GPU's memory and ranks placements by estimated decode speed using memory bandwidth,
-network hops and GPU sharing. The estimate uses a fixed efficiency measured on one GTX 1650; datacenter GPUs may differ,
-so treat tok/s rankings there with care. Spreading over real multi-GPU, multi-server hardware is verified only with
+network hops and GPU sharing. The estimate uses one fixed efficiency for every GPU, so treat its tok/s figures as a ranking,
+not a promise. Spreading over real multi-GPU, multi-server hardware is verified only with
 simulated agents.
 
 </details>

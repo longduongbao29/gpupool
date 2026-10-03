@@ -15,7 +15,7 @@
 [![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
 
-[Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [Số đo thực tế](#số-đo-thực-tế-không-hứa-suông) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
+[Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
 
 </div>
 
@@ -223,35 +223,6 @@ Nếu đã có sẵn bản GGUF thì nên dùng nó: nhanh hơn và không cần
 
 </details>
 
-## Số đo thực tế, không hứa suông
-
-Mọi con số dưới đây lấy từ [docs/TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md). Phần cứng: một laptop Windows 11 với
-GTX 1650 Ti Max-Q (4 GB), Docker trong WSL2, llama.cpp b11342. Các server ngoài server đầu tiên là giả lập; xem
-[Hiện trạng](#hiện-trạng).
-
-| Hạng mục | Kết quả |
-| --- | --- |
-| Overhead của router (Qwen2.5-0.5B, một GPU) | decode 185 tok/s qua gpupool so với 182 tok/s của `llama-bench` |
-| Lượng tử hóa KV cache (Qwen2.5-3B, ctx 8192) | tiết kiệm 132 MB (`q8_0`) và 204 MB (`q4_0`); decode 51,9 / 51,2 / 50,8 tok/s với f16 / q8_0 / q4_0 |
-| Speculative decoding (Qwen2.5-3B chia trên 2 server giả lập) | 48,9 tok/s khi tắt, 53,6 với ngram, 53,9 với model draft 0.5B |
-| Chuyển đổi Qwen2.5-0.5B-Instruct sang `Q4_K_M` (CPU laptop) | tổng 143 s gồm cả tải, 397.807.488 byte |
-| Chuyển đổi Qwen2.5-1.5B-Instruct sang `IQ3_M` có importance matrix (100 chunk) | 28 phút, khoảng 70 % là calibrate |
-| Ước tính dung lượng trước khi chuyển đổi | lệch khoảng 2 % so với file thật (ước tính 390,7 MB, thật 397,8 MB) |
-| Ước tính VRAM (Qwen2.5-0.5B, ctx 4096) | +38 % trước khi hiệu chỉnh, +12 % sau, so với 525 MB đo được |
-| Phục hồi sự cố (kill coordinator giữa lúc khởi chạy) | lần khởi chạy mồ côi bị đánh dấu lỗi sau khoảng 5 s, replica mới sẵn sàng sau khoảng 30 s, không sót engine |
-| Kiểm thử | 809 unit test; end-to-end trên CI 33/33 kiểm tra trong 249 s (coordinator + 3 agent chỉ CPU, chia qua RPC, ba lần chuyển đổi) |
-| Dung lượng image coordinator | 1,77 GB có toolchain chuyển đổi, 560 MB nếu không (`WITH_CONVERT=0`) |
-
-> Model 3B chia trên một GPU cộng hai "server" CPU chạy 11,6 tok/s trong lần giả lập đầu. Lần chạy đó chỉ kiểm chứng
-> đường RPC chứ không đo tốc độ: 23 trên 36 layer chạy trên CPU.
-
-### Hiện trạng
-
-Đã kiểm thử trên một laptop Windows: chạy native với các node giả lập trên llama.cpp thật, và cụm Docker 3 server giả
-lập trong WSL2. Một bài end-to-end 3 server chỉ dùng CPU chạy trong CI. **Chưa chạy trên một mạng LAN nhiều server thật**,
-nên tốc độ qua mạng thật (kể cả speculative decoding qua mạng thật) và các model từ 7B trở lên chưa được kiểm thử.
-Cũng chưa kiểm thử: importance matrix trên GPU, repo Hugging Face bị gated, và model chuyển đổi dung lượng vài GB.
-
 ## Dùng API
 
 Mọi client tương thích OpenAI đều dùng được; chỉ đổi base URL và tên model.
@@ -303,11 +274,11 @@ Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo c�
 [thiết kế nền tảng](docs/PLATFORM_DESIGN.vi.md#10-câu-hỏi-mở-và-các-quyết-định).
 
 - [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding qua mạng thật
-- [ ] Model từ 7B trở lên (cần GPU lớn hơn laptop dùng để test)
+- [ ] Kiểm chứng model từ 7B trở lên trên GPU lớn
 - [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
 - [ ] Đổi model không gián đoạn (zero-downtime)
 - [ ] Nâng cấp llama.cpp
-- [ ] Mô hình tốc độ decode theo từng kiến trúc GPU (hiện là hiệu suất cố định 0,5, đo trên một GTX 1650) và điểm prefill riêng
+- [ ] Mô hình tốc độ decode theo từng kiến trúc GPU (hiện là một hiệu suất cố định 0,5) và điểm prefill riêng
 - [ ] Importance matrix trên server GPU; phân tán các job chuyển đổi sang nhiều máy
 - [ ] LoRA adapter và vision projector (`mmproj`) khi chuyển đổi
 
@@ -362,8 +333,8 @@ trong mạng riêng hoặc VPN, và đặt một proxy kết thúc TLS trước 
 <summary><b>Trộn các loại GPU khác nhau được không?</b></summary>
 
 Được. Scheduler đọc bộ nhớ của từng GPU và xếp hạng các phương án theo tốc độ decode ước tính dựa trên băng thông bộ
-nhớ, số chặng mạng và việc chia sẻ GPU. Ước tính dùng hiệu suất cố định đo trên một GTX 1650; GPU datacenter có thể
-khác, nên hãy thận trọng với bảng xếp hạng tok/s ở đó. Việc dàn trải trên phần cứng nhiều GPU, nhiều server thật mới
+nhớ, số chặng mạng và việc chia sẻ GPU. Ước tính dùng một hiệu suất cố định cho mọi GPU, nên hãy
+xem các con số tok/s như thứ hạng, không phải cam kết. Việc dàn trải trên phần cứng nhiều GPU, nhiều server thật mới
 chỉ được kiểm chứng bằng agent giả lập.
 
 </details>
