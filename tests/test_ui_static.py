@@ -239,7 +239,11 @@ def test_mock_simulate_contract_and_purity(client):
     def sim(body):
         return client.post("/api/simulate", json=body, headers=HEAD)
 
-    before = client.get("/api/state", headers=HEAD).json()["models"]
+    def models():
+        # Live load in the mock drifts over time; compare only what simulate could change.
+        return [{k: v for k, v in m.items() if k != "scaling"} for m in client.get("/api/state", headers=HEAD).json()["models"]]
+
+    before = models()
     keys = {"start", "stop", "preempt", "unplaced"}
     r = sim({"add": [{"name": "big", "file": "qwen2.5-3b-q4.gguf", "priority": 90, "replicas": 4}]}).json()
     assert keys <= r.keys() and r["start"] and r["preempt"] and r["stop"] and r["unplaced"]
@@ -253,7 +257,7 @@ def test_mock_simulate_contract_and_purity(client):
     assert not any(r[k] for k in keys)
     assert sim({"changes": [{"model": "nope", "priority": 70}]}).status_code == 404
     assert sim({}).status_code == 422
-    assert client.get("/api/state", headers=HEAD).json()["models"] == before  # pure: nothing changed
+    assert models() == before  # pure: nothing changed
     assert "huge" not in {m["spec"]["name"] for m in client.get("/api/state", headers=HEAD).json()["models"]}
 
 
