@@ -112,6 +112,6 @@ Everything after v0.3.0.
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/multi-gpu-inference/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/longduongbao29/multi-gpu-inference/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/longduongbao29/multi-gpu-inference/releases/tag/v0.2.0
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0

@@ -14,8 +14,8 @@ By contributing you agree that your work is released under the [MIT License](LIC
 You need Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/longduongbao29/multi-gpu-inference.git
-cd multi-gpu-inference
+git clone https://github.com/longduongbao29/gpupool.git
+cd gpupool
 uv sync                 # creates .venv with runtime and dev dependencies from uv.lock
 uv run pytest -q        # about 810 tests, no GPU, no llama.cpp, no network needed
 ```
@@ -101,7 +101,7 @@ Small, focused commits are easier to review than one large one.
 
 ## Where to ask
 
-- Bugs and feature ideas: [GitHub Issues](https://github.com/longduongbao29/multi-gpu-inference/issues) using the
+- Bugs and feature ideas: [GitHub Issues](https://github.com/longduongbao29/gpupool/issues) using the
   templates.
 - Questions: open an issue and label it `question`.
 - Security: [SECURITY.md](SECURITY.md).

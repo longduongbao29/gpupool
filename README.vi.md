@@ -8,10 +8,10 @@
 
 [English](README.md) | **Tiếng Việt**
 
-[![docker workflow](https://github.com/longduongbao29/multi-gpu-inference/actions/workflows/docker.yml/badge.svg)](https://github.com/longduongbao29/multi-gpu-inference/actions/workflows/docker.yml)
+[![docker workflow](https://github.com/longduongbao29/gpupool/actions/workflows/docker.yml/badge.svg)](https://github.com/longduongbao29/gpupool/actions/workflows/docker.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=multi-gpu-inference)
+[![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=gpupool)
 [![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
 

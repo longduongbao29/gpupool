@@ -15,7 +15,7 @@ Fixes go into the latest 0.3.x release; upgrade to receive them.
 
 **Do not open a public issue.** Report privately through GitHub:
 
-1. Open <https://github.com/longduongbao29/multi-gpu-inference/security/advisories/new> (repository, *Security* tab,
+1. Open <https://github.com/longduongbao29/gpupool/security/advisories/new> (repository, *Security* tab,
    *Report a vulnerability*).
 2. Describe the problem as below. Only the maintainer can see the report.
 

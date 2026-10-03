@@ -15,7 +15,7 @@ Bản sửa được đưa vào bản 0.3.x mới nhất; hãy nâng cấp để
 
 **Đừng mở issue công khai.** Hãy báo riêng qua GitHub:
 
-1. Mở <https://github.com/longduongbao29/multi-gpu-inference/security/advisories/new> (kho mã, tab *Security*,
+1. Mở <https://github.com/longduongbao29/gpupool/security/advisories/new> (kho mã, tab *Security*,
    *Report a vulnerability*).
 2. Mô tả vấn đề như dưới đây. Chỉ người bảo trì xem được báo cáo.
 

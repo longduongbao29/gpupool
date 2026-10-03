@@ -32,7 +32,7 @@ If you experience or see unacceptable behaviour, report it privately to the main
 ([@longduongbao29](https://github.com/longduongbao29)):
 
 - use GitHub's private "Report a vulnerability" form on the
-  [Security tab](https://github.com/longduongbao29/multi-gpu-inference/security/advisories/new) and start the
+  [Security tab](https://github.com/longduongbao29/gpupool/security/advisories/new) and start the
   description with "Code of Conduct", or
 - contact the maintainer through the contact options on the GitHub profile.
 

@@ -34,10 +34,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/longduongbao29/multi-gpu-inference"
-Repository = "https://github.com/longduongbao29/multi-gpu-inference"
-Issues = "https://github.com/longduongbao29/multi-gpu-inference/issues"
-Changelog = "https://github.com/longduongbao29/multi-gpu-inference/blob/master/CHANGELOG.md"
+Homepage = "https://github.com/longduongbao29/gpupool"
+Repository = "https://github.com/longduongbao29/gpupool"
+Issues = "https://github.com/longduongbao29/gpupool/issues"
+Changelog = "https://github.com/longduongbao29/gpupool/blob/master/CHANGELOG.md"
 
 [project.scripts]
 gpupool = "gpupool.cli:main"

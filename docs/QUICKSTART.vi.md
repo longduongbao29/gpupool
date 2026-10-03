@@ -385,7 +385,7 @@ hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo
 Coordinator:
 
 ```bash
-git clone https://github.com/longduongbao29/multi-gpu-inference && cd multi-gpu-inference
+git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # in ra cùng admin key và lệnh join
 ```
 

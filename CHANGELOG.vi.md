@@ -112,6 +112,6 @@ Mọi thứ sau v0.3.0.
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/multi-gpu-inference/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/longduongbao29/multi-gpu-inference/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/longduongbao29/multi-gpu-inference/releases/tag/v0.2.0
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0

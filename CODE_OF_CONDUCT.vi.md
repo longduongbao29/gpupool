@@ -32,7 +32,7 @@ Nếu bạn gặp hoặc chứng kiến hành vi không chấp nhận được, 
 ([@longduongbao29](https://github.com/longduongbao29)):
 
 - dùng biểu mẫu riêng tư "Report a vulnerability" của GitHub ở
-  [tab Security](https://github.com/longduongbao29/multi-gpu-inference/security/advisories/new) và mở đầu mô tả bằng
+  [tab Security](https://github.com/longduongbao29/gpupool/security/advisories/new) và mở đầu mô tả bằng
   "Code of Conduct", hoặc
 - liên hệ người bảo trì qua các cách liên lạc ghi trên hồ sơ GitHub.
 

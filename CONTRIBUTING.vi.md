@@ -14,8 +14,8 @@ Khi đóng góp, bạn đồng ý công sức của mình được phát hành t
 Bạn cần Python 3.12 và [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/longduongbao29/multi-gpu-inference.git
-cd multi-gpu-inference
+git clone https://github.com/longduongbao29/gpupool.git
+cd gpupool
 uv sync                 # tạo .venv với thư viện chạy và thư viện dev theo uv.lock
 uv run pytest -q        # khoảng 810 test, không cần GPU, llama.cpp hay mạng
 ```
@@ -104,7 +104,7 @@ Commit nhỏ, tập trung dễ duyệt hơn một commit lớn.
 
 ## Hỏi ở đâu
 
-- Lỗi và ý tưởng tính năng: [GitHub Issues](https://github.com/longduongbao29/multi-gpu-inference/issues) dùng các
+- Lỗi và ý tưởng tính năng: [GitHub Issues](https://github.com/longduongbao29/gpupool/issues) dùng các
   mẫu có sẵn.
 - Câu hỏi: mở issue và gắn nhãn `question`.
 - Bảo mật: [SECURITY.vi.md](SECURITY.vi.md).

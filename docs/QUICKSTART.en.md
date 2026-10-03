@@ -393,7 +393,7 @@ Drafting 4 tokens is the default; 8 was slower in our measurements.
 Coordinator:
 
 ```bash
-git clone https://github.com/longduongbao29/multi-gpu-inference && cd multi-gpu-inference
+git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # prints the same admin key and join command
 ```
 
