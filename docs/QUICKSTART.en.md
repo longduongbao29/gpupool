@@ -104,7 +104,28 @@ GPUPOOL_HOST_MODELS_DIR=/srv/gguf docker compose -f docker-compose.sim.yml up -d
 UI: `http://<docker host>:8080`, admin key `sim-admin`. server-a reports the real GPU; server-b and
 server-c report a simulated Tesla T4 and A100 (`GPUPOOL_FAKE_DEVICES`) but run on the same real GPU. The
 budgets (`SIM_BUDGET_A/B/C`, default 1300/1100/1100 MB) must add up to less than the real GPU memory.
-Each server gets its own IP on a private Docker network instead of `--network host`.
+Each server gets its own IP on a private Docker network instead of `--network host`. The RPC firewall is on
+in all three (`cap_add: [NET_ADMIN]`), so the multi-server splits also exercise it. Stop and wipe it with
+`docker compose -f docker-compose.sim.yml down -v`. Overrides: `SIM_ADMIN_KEY`, `SIM_CLUSTER_TOKEN`,
+`GPUPOOL_AGENT_IMAGE`, `GPUPOOL_COORDINATOR_IMAGE`.
+
+## CI end-to-end test (no GPU needed)
+
+`scripts/ci_e2e.py` runs the real Docker images against `docker-compose.ci.yml`: a coordinator and three
+CPU-only servers (`GPUPOOL_INCLUDE_CPU`, RPC firewall on). Each server offers one CPU device with a budget of
+`CI_BUDGET_MB` (default 120 MB), smaller than the test model, so SmolLM2-135M (Q8_0, about 140 MB) must be
+split over at least two servers through llama.cpp RPC. It needs Docker, Python 3 (stdlib only) and internet
+for the first model download (verified by SHA-256, then cached). Build the images first (or set
+`GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`), then:
+
+```bash
+python scripts/ci_e2e.py                       # options: --project gpupool-ci --port 8080 --keep
+```
+
+It checks: the three agents self-join, the model library, the API surface, start to *running*, a chat
+completion, `/metrics`, and stop (no engine left on any agent). Exit code 0 means all passed; on failure
+it prints `docker compose logs` and exits 1. The cluster is removed afterwards unless `--keep` is given.
+The model is cached in `GPUPOOL_CI_MODELS_DIR` (default `<repo>/.cache/ci-models`).
 
 ## Performance options (per model, in the deploy form)
 
@@ -112,6 +133,10 @@ Each server gets its own IP on a private Docker network instead of `--network ho
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | smaller KV cache, so a model can fit on fewer GPUs | ctx 8192: −132 / −204 MB, speed unchanged (51.9 / 51.2 / 50.8 tok/s) |
 | Speculative | none, ngram, draft | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+
+In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`),
+`draft_file` (a library model, for `draft`) and `draft_n_max` (1 to 16, default 4); see [API.en.md](API.en.md).
+They apply the next time the model starts.
 
 N-gram needs no extra memory but only helps when the output repeats earlier text. A draft model must share
 the tokenizer of the main model (checked when saving) and runs on the head's GPU (its memory is planned for).
@@ -146,15 +171,46 @@ llama.cpp RPC is not encrypted: keep the GPU servers on a trusted internal netwo
 
 - **RPC ports are unauthenticated.** `ggml-rpc-server` (ports 9000–9999 on every GPU server) accepts any
   connection: whoever can reach it can allocate GPU memory and read or write tensors. Restrict it in one of two ways:
-  - set `GPUPOOL_RPC_FIREWALL=1` on the GPU server. The agent then uses iptables so each RPC port only accepts the
-    server that heads the replica (plus loopback), and removes the rules when the engine stops. It needs root; in Docker
-    add `--cap-add NET_ADMIN` (compose: `cap_add: [NET_ADMIN]`). Without that it logs an error and runs unprotected;
+  - set `GPUPOOL_RPC_FIREWALL=1` on the GPU server. For every RPC engine the agent adds iptables (and ip6tables)
+    rules in its own chain that allow loopback, the head node of the replica and the agent's own address on that
+    port, and **drop everything else**. The rules are removed when the engine stops, and rules left by a crashed
+    agent are flushed at startup. It needs root and iptables (included in the image); in Docker add
+    `--cap-add NET_ADMIN` (compose: `cap_add: [NET_ADMIN]`, already set in the agent, sim and CI compose files).
+    Without that the agent logs an error and runs unprotected (see Troubleshooting);
   - or use your own firewall: allow 9000–9999 only between cluster hosts.
-- The agent warns at startup when it binds a public address with the firewall off.
-- Set your own `GPUPOOL_ADMIN_KEY` (UI and admin API) and `GPUPOOL_API_KEYS` (clients of `/v1`); without API keys
-  `/v1` is open to anyone who reaches port 8080.
+- The agent warns at startup when the firewall is off.
+- Keys: the **admin key** (`GPUPOOL_ADMIN_KEY`) protects the UI and admin API; the **cluster token**
+  (`GPUPOOL_CLUSTER_TOKEN`) authenticates servers to the coordinator and is part of the join command; **API keys**
+  (`GPUPOOL_API_KEYS`) are what clients of `/v1` send. Admin key and cluster token are generated on first start and
+  stored in the data volume (`secrets.json`); set your own to override.
+- Without `GPUPOOL_API_KEYS`, `/v1` is open to anyone who reaches port 8080: set them.
 - The cluster token and API keys travel over plain HTTP (no TLS): keep the cluster on a private network or VPN, and
   put a TLS-terminating proxy in front of the coordinator if clients connect from outside.
+
+## VRAM self-calibration
+
+The planner's memory estimates are corrected from reality. Once a replica is running, the coordinator compares
+the memory the engines really use with the estimate and keeps a smoothed factor per model (measured / estimated).
+The next placement of that model uses it, so a model that needs more or less than estimated stops
+over-committing or wasting GPUs. You see it in `/api/state`: each model has `calibration`, either
+`{"factor": ..., "samples": ...}` or `null` until the first measurement; a `calibrated` event is logged when the
+factor moves noticeably. There is nothing to configure. Removing a model forgets its factor.
+
+## What survives a coordinator restart
+
+Everything in the data volume (`/data`): files, secrets, the database. Engines run on the servers, so they keep
+running while the coordinator restarts. The control state is persisted and loaded again at boot:
+
+- autoscaler state per model: desired replica count, last request time and last decision (an unloaded on-demand
+  model stays unloaded, a scaled-up model stays scaled up); only the "up/down since" timers restart, which just
+  delays a scaling step;
+- preemption claims and cooldowns, crash-loop backoff counters, and the rebalance move in flight;
+- not kept: the periodic rebalance timer, which restarts at boot because the first reports are stale.
+
+A launch interrupted by a hard kill (`kill -9`, OOM, power loss) cannot be resumed: at the next start that replica
+is marked *failed* ("coordinator restarted during launch"), its half-started engines are stopped on the servers,
+and the next reconcile tick plans the model again. A clean shutdown does the same itself. Hugging Face downloads
+interrupted by a restart are resumed.
 
 ## Behind an HTTP proxy
 
@@ -291,21 +347,72 @@ that needs the files: it serves them to the GPU servers, so nothing has to be co
 Several folders: add more `-v` mounts, extend `GPUPOOL_MODEL_ROOTS` (comma-separated) and `GPUPOOL_PATH_MAP`
 (one JSON entry per folder).
 
-## Optional settings (environment variables on the coordinator)
+## Settings (environment variables)
 
-| Variable | Default | Purpose |
+Every setting can be given as `GPUPOOL_<NAME>` (the field name in upper case), in a TOML file (`--config`) or,
+for a few, a CLI flag. Precedence: CLI flag > environment > TOML file > default. Lists are comma-separated,
+dicts (`GPUPOOL_PATH_MAP`, `GPUPOOL_BUDGET_MB`) are JSON, booleans accept `1/0/true/false`, a port range is
+`9000-9999`. Everything below is optional except `GPUPOOL_JOIN` on an agent.
+
+### Coordinator (22 settings)
+
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| `GPUPOOL_API_KEYS` | empty (open) | comma-separated keys clients must send |
-| `GPUPOOL_MAX_REQUEST_MB` | 32 | largest request body accepted on /v1, in MB (bigger gets HTTP 413) |
-| `GPUPOOL_COLD_START_TIMEOUT_S` | 120 | how long a request waits for an unloaded (on-demand) model to load before HTTP 503 |
-| `GPUPOOL_REBALANCE_S` | 600 | how often replicas with a clearly better placement are moved (one at a time, new one first); 0 = only on demand |
-| `GPUPOOL_PUBLIC_URL` | detected | address servers use to reach the coordinator, if detection is wrong |
-| `GPUPOOL_WEBHOOK_URL` | empty | Slack/Discord webhook for alerts (server down, GPU lost, not enough VRAM) |
-| `HF_TOKEN` | empty | for gated or private Hugging Face repos |
-| `GPUPOOL_ADMIN_KEY`, `GPUPOOL_CLUSTER_TOKEN` | generated | set your own instead of generated ones |
+| `GPUPOOL_HOST` | `0.0.0.0` | address the coordinator listens on |
+| `GPUPOOL_PORT` | `8080` | listening port |
+| `GPUPOOL_DB_PATH` | `.gpupool/coordinator.db` (image: `/data/coordinator.db`) | SQLite database; `secrets.json` is stored next to it |
+| `GPUPOOL_ADMIN_KEY` | generated | key for the UI and the admin API |
+| `GPUPOOL_CLUSTER_TOKEN` | generated | token servers use to join |
+| `GPUPOOL_API_KEYS` | empty (open) | comma-separated keys clients must send to `/v1` |
+| `GPUPOOL_MODELS_DIR` | `.gpupool/models` (image: `/data/models`) | model library, served to the servers at `/files/<name>` |
+| `GPUPOOL_PATH_MAP` | `{}` | JSON `{"<host dir>": "<dir in container>"}` so users can type host paths |
+| `GPUPOOL_MODEL_ROOTS` | empty (image: `/models`) | comma-separated folders the UI may browse for `.gguf` (empty = models dir only) |
+| `GPUPOOL_HEARTBEAT_TIMEOUT_S` | `10` | seconds without a report before a server is considered down |
+| `GPUPOOL_RECONCILE_S` | `2` | how often desired and actual state are reconciled |
+| `GPUPOOL_MAX_REQUEST_MB` | `32` | largest `/v1` request body in MB (bigger gets HTTP 413) |
+| `GPUPOOL_COLD_START_TIMEOUT_S` | `120` | how long a request waits for an unloaded (on-demand) model before HTTP 503 |
+| `GPUPOOL_REBALANCE_S` | `600` | how often replicas with a clearly better placement are moved (one at a time, new one first); `0` = only on demand (`POST /api/rebalance`) |
+| `GPUPOOL_LAUNCH_TIMEOUT_S` | `600` | a replica not ready after this long is marked failed |
+| `GPUPOOL_LOW_FREE_MB` | `256` | a device with less free memory than this while hosting an engine makes the replica move |
+| `GPUPOOL_DRAIN_TIMEOUT_S` | `60` | how long a stopping replica gets to finish its requests |
+| `GPUPOOL_PORT_RANGE` | `9000-9999` | ports handed to engines on the servers (open them between servers) |
+| `GPUPOOL_POLL_S` | `2` | how often the coordinator polls each server's `/report` |
+| `HF_TOKEN` (or `GPUPOOL_HF_TOKEN`) | empty | for gated or private Hugging Face repos |
+| `GPUPOOL_PUBLIC_URL` | detected | address servers use to reach the coordinator, if detection is wrong (used in the join command) |
+| `GPUPOOL_WEBHOOK_URL` | empty | Slack/Discord/generic JSON webhook for alerts (server down, GPU lost, not enough VRAM) |
 
-On a GPU server: `GPUPOOL_MARGIN_PCT` (default `0.10`) is the share of each GPU's memory always left
-free for other users.
+The Docker image sets `GPUPOOL_HOST`, `GPUPOOL_PORT`, `GPUPOOL_DB_PATH`, `GPUPOOL_MODELS_DIR` and
+`GPUPOOL_MODEL_ROOTS` as shown. `docker-compose.coordinator.yml` also reads `GPUPOOL_HOST_MODELS_DIR` (host folder
+mounted at `/models`) and the proxy variables.
+
+### Agent, one per GPU server (17 settings)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GPUPOOL_JOIN` | none | `http://<coordinator>:8080#<cluster-token>`: replaces the next two (`--join`) |
+| `GPUPOOL_COORDINATOR_URL` | `http://127.0.0.1:8080` | coordinator address (wins over `GPUPOOL_JOIN`) |
+| `GPUPOOL_CLUSTER_TOKEN` | empty | cluster token (wins over `GPUPOOL_JOIN`) |
+| `GPUPOOL_AUTO_JOIN` | `true` | register with the coordinator by itself (`--no-auto-join` turns it off; then add the server in the UI) |
+| `GPUPOOL_NODE_ID` | hostname | name of the server in the pool |
+| `GPUPOOL_HOST` | auto-detected | address other servers reach this one on, and engines bind to; default is the local IP used to reach the coordinator |
+| `GPUPOOL_PORT` | `7070` | agent API port |
+| `GPUPOOL_LLAMA_DIR` | required (image: `/opt/llama`) | folder with `llama-server` and `rpc-server` (`--llama-dir`) |
+| `GPUPOOL_CACHE_DIR` | `.gpupool/cache` (image: `/data/cache`) | downloaded GGUF files |
+| `GPUPOOL_LOG_DIR` | `.gpupool/logs` (image: `/data/logs`) | one log file per engine |
+| `GPUPOOL_MARGIN_PCT` | `0.10` | share of each GPU's memory always left free for other users |
+| `GPUPOOL_MARGIN_MIN_MB` | `512` | ...but never less than this |
+| `GPUPOOL_BUDGET_MB` | `{}` | JSON cap per device, e.g. `{"CUDA0": 1200, "CPU": 2000}`; also gives a CPU device its size |
+| `GPUPOOL_INCLUDE_CPU` | `false` | also offer a `CPU` device (served through `rpc-server -d CPU`) |
+| `GPUPOOL_HEARTBEAT_S` | `2` | heartbeat interval (only used with push heartbeats) |
+| `GPUPOOL_PUSH_HEARTBEAT` | `false` | also push heartbeats, for coordinators older than pull mode; normally leave off |
+| `GPUPOOL_RPC_FIREWALL` | `false` | `1` = restrict each RPC port with iptables, see [Security](#security); needs root and `NET_ADMIN` |
+
+Read by the programs but not part of the settings above: `GPUPOOL_LOG` (log level, default `INFO`, both
+programs), `GPUPOOL_FAKE_DEVICES` (agent: JSON list of simulated GPUs, used by `docker-compose.sim.yml`), and
+`GPUPOOL_URL` (default `http://127.0.0.1:8080`) plus `GPUPOOL_ADMIN_KEY` for the CLI commands
+`gpupool register | plan | scale | undeploy | status`. `docker-compose.agent.yml` reads `GPUPOOL_JOIN` (required),
+`GPUPOOL_NODE_ID`, `GPUPOOL_HOST`, `GPUPOOL_MARGIN_PCT`, `GPUPOOL_RPC_FIREWALL`, `CUDA_ARCHS` and the build args
+described above. HTTP API: [API.en.md](API.en.md). Internals: [DESIGN.en.md](DESIGN.en.md).
 
 ## Troubleshooting
 
@@ -315,3 +422,9 @@ free for other users.
 | Agent log says the server was removed | it was deleted in the UI; add it again there (Servers → Add Server → agent URL `http://<server-ip>:7070`) |
 | Model stuck in *failed*: "not enough VRAM" | free GPUs, enable more GPUs, add a server, or use a smaller quantization |
 | `could not select device driver "" with capabilities: [[gpu]]` | the NVIDIA Container Toolkit is not installed on that server |
+| Agent log: `RPC firewall unavailable (...); RPC ports are NOT restricted` | `GPUPOOL_RPC_FIREWALL=1` but iptables is missing or the container lacks root/`NET_ADMIN`: add `--cap-add NET_ADMIN` (compose `cap_add: [NET_ADMIN]`) and recreate the container, or unset the variable and firewall 9000–9999 yourself |
+| Agent log: `RPC firewall: ... rule for port N failed ... port left unrestricted` | one iptables call failed and the rule was rolled back; read the message (usually the same missing capability). `ip6tables unavailable` only means IPv6 is not restricted |
+| Multi-server model stuck *starting* while the firewall is on, engine on another server never answers | the peer is refused. `RPC firewall: cannot resolve peer ...` means a name does not resolve on that server: use IPs (`GPUPOOL_HOST`) or fix DNS. To confirm, unset `GPUPOOL_RPC_FIREWALL` on that server and recreate it |
+| Model was *launching* when the coordinator was killed | marked *failed* ("coordinator restarted during launch") and planned again by itself within a reconcile tick |
+| Windows / WSL2: every container restarts about a minute after the last terminal is closed | WSL shuts its VM down about 1 minute after the last `wsl.exe` session, even with Docker running. In `%UserProfile%\.wslconfig` add `vmIdleTimeout=-1` under `[wsl2]`, then run `wsl --shutdown` and start Docker again |
+| Windows / WSL2: a bigger model fails to load or the engine is killed (out of memory) | WSL2 caps memory by default (4 GB here). Raise `memory=` under `[wsl2]` in `%UserProfile%\.wslconfig` (for example `memory=16GB`), then `wsl --shutdown` |

@@ -12,10 +12,33 @@ re-places replicas when a node dies.
 Built for shared servers: user space only (no sudo), mixed CUDA versions, VRAM that other people
 use too.
 
+## Features
+
+- **Multi-model, multi-server, multi-GPU.** Several models run at once; each one is placed on one GPU,
+  one server, or split across servers over llama.cpp RPC.
+- **Placement tiers and scoring.** Candidates are ranked by estimated decode speed (memory bandwidth,
+  network hops, GPU sharing); the winning placement is stored with its reasons and shown in the UI.
+- **Recommendation, capacity and what-if.** `/api/recommend` ranks GPU/server options for a model,
+  `/api/capacity` shows what still fits, `/api/simulate` answers "what would happen if" without changing anything.
+- **Priority and preemption.** A higher-priority model can take room from lower-priority ones.
+- **Autoscaling, including scale-to-zero.** Replicas follow load; an idle model can drop to zero and
+  cold-start on the next request.
+- **Make-before-break rebalancing.** When a better placement exists, the new replica is ready before the old one stops.
+- **KV cache quantization** (`f16`, `q8_0`, `q4_0`) to fit a model on fewer GPUs.
+- **Speculative decoding** (`ngram`, or a `draft` model) to cut RPC round trips when a model is split.
+- **RPC firewall.** Each agent restricts its `ggml-rpc-server` port (iptables) to the head and itself.
+- **VRAM self-calibration.** Measured engine buffers correct the memory estimate; the factor is persisted.
+- **Control state survives coordinator restarts** (SQLite), including recovery of launches interrupted by a crash.
+- **Deployment.** Docker images on GHCR (`ghcr.io/longduongbao29/gpupool-coordinator`, `ghcr.io/longduongbao29/gpupool-agent`),
+  images that build without GitHub access, HTTP proxy support, model files taken from host paths.
+- **Web UI** for servers, GPUs, models, deployments, recommendations and events.
+
 ## Status
 
-Early, tested on one Windows laptop emulating three nodes against real llama.cpp. See
-[docs/TEST_REPORT.en.md](docs/TEST_REPORT.en.md). Not yet run on a real multi-server cluster.
+Tested on one Windows laptop (GTX 1650 Ti, 4 GB): natively with emulated nodes against real llama.cpp,
+and as a simulated 3-server Docker cluster in WSL2 (`docker-compose.sim.yml`). A CPU-only 3-server
+end-to-end test also runs in CI. Not yet run on a real multi-server LAN. See
+[docs/TEST_REPORT.en.md](docs/TEST_REPORT.en.md).
 
 ## How it works
 
@@ -26,14 +49,15 @@ client ──OpenAI API──► coordinator (router + scheduler + reconciler, S
                                          └─RPC──► server C: agent ─ ggml-rpc-server
 ```
 
-- **agent** (one per server): reports GPUs via NVML, starts/stops llama.cpp processes, caches GGUF files.
-- **scheduler**: reads the GGUF header (no full download), estimates memory per layer, prefers one GPU,
-  then one server, then the fewest servers; GPUs before CPU RAM.
+- **agent** (one per server): reports GPUs via NVML, starts/stops llama.cpp processes, caches GGUF files, applies the RPC firewall.
+- **scheduler**: reads the GGUF header (no full download), estimates memory per layer, builds candidate
+  placements (one GPU, one server, subsets of servers; GPUs before CPU RAM) and scores them by estimated decode speed.
 - **router**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming, prefix-aware
   load balancing (shared system prompts hit the replica that has them cached), retry before the first byte.
-- **reconciler**: keeps the desired replica count, rolls back failed launches, fails over dead nodes, drains.
+- **reconciler**: keeps the desired replica count, rolls back failed launches, fails over dead nodes,
+  drains, autoscales, preempts and rebalances.
 
-Design: [docs/DESIGN.en.md](docs/DESIGN.en.md).
+Design: [docs/DESIGN.en.md](docs/DESIGN.en.md), [docs/PLATFORM_DESIGN.en.md](docs/PLATFORM_DESIGN.en.md).
 
 ## Quick start
 
@@ -57,7 +81,25 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
 ## Tests
 
 ```bash
-uv run pytest                 # unit tests
+uv run pytest                 # unit tests (about 609)
 uv run pytest -m real         # needs llama.cpp in .cache/llama/b11342-cuda12.4 and a GGUF in .cache/models
 uv run python scripts/e2e_local.py   # 3 emulated nodes on one machine, real llama.cpp
+
+# simulated 3-server cluster on one machine (needs Docker + NVIDIA Container Toolkit)
+docker compose -f docker-compose.sim.yml up -d
+
+# CI end-to-end: coordinator + 3 CPU-only agents (docker-compose.ci.yml), tiny model split over RPC
+uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep]
 ```
+
+`scripts/ci_e2e.py` needs the `gpupool-agent` and `gpupool-coordinator` images (override with
+`GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`); in GitHub Actions it is the `e2e` job.
+
+## Documentation
+
+- [Quick start and deployment](docs/QUICKSTART.en.md)
+- [HTTP API](docs/API.en.md)
+- [Design](docs/DESIGN.en.md)
+- [Platform design (multi-model scheduling)](docs/PLATFORM_DESIGN.en.md)
+- [UI design](docs/UI_DESIGN.en.md)
+- [Test report](docs/TEST_REPORT.en.md)
