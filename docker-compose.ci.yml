@@ -6,6 +6,10 @@
 # Each server offers ONE CPU device with a budget (CI_BUDGET_MB, default 120 MB) smaller than the
 # test model needs (~140 MB weights + KV cache), so the model cannot fit one server and gpupool must
 # split it over >= 2 servers through llama.cpp RPC - the path real multi-server installs depend on.
+# The coordinator image must be built with the conversion toolchain (WITH_CONVERT=1, the default):
+# the last stage of scripts/ci_e2e.py converts a Hugging Face model to GGUF inside the coordinator
+# (needs access to huggingface.co; set HF_TOKEN to avoid anonymous rate limits).
+#
 # NVML is absent without a GPU: the agent must still start and report just the CPU device.
 
 x-agent: &agent
@@ -28,6 +32,7 @@ services:
       GPUPOOL_ADMIN_KEY: ${CI_ADMIN_KEY:-ci-admin}
       GPUPOOL_CLUSTER_TOKEN: ${CI_CLUSTER_TOKEN:-ci-cluster-token}
       GPUPOOL_PUBLIC_URL: http://172.31.77.10:8080
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ${GPUPOOL_HOST_MODELS_DIR:-./models}:/models:ro
     networks:

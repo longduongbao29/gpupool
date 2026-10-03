@@ -655,3 +655,118 @@ def test_api_browse(client, tmp_path):
     body = r.json()
     assert [f["name"] for f in body["files"]] == ["a.gguf"] and body["truncated"] is False
     assert body["roots"][0]["exists"] is True
+
+
+# ---- converted items, locate_dir, hidden folders -----------------------------------------
+
+def _converted(lib, name="m-Q4_K_M.gguf", data=b"GGUF1234"):
+    lib.models_dir.mkdir(parents=True, exist_ok=True)
+    p = lib.models_dir / name
+    p.write_bytes(data)
+    return p
+
+
+def test_add_converted_registers_a_ready_item(lib):
+    p = _converted(lib)
+    assert not lib.name_taken(p.name)
+    item = lib.add_converted(p.name, p, "acme/model")
+    assert (item.source, item.status, item.bytes, item.hf_repo, item.hf_file) == (
+        "convert", "ready", 8, "acme/model", None)
+    assert lib.name_taken(p.name)
+    assert lib.part_paths(p.name) == [p.resolve()] and lib.resolve(p.name) == p.resolve()
+
+
+def test_add_converted_duplicate_is_409(lib):
+    p = _converted(lib)
+    lib.add_converted(p.name, p, None)
+    with pytest.raises(LibraryError) as e:
+        lib.add_converted(p.name, p, None)
+    assert e.value.status == 409
+
+
+def test_add_converted_refuses_path_tricks(lib, tmp_path):
+    p = _converted(lib)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "x.gguf").write_bytes(b"x")
+    sub = lib.models_dir / "sub"
+    sub.mkdir()
+    (sub / "y.gguf").write_bytes(b"y")
+    for name, path in [("x.gguf", outside / "x.gguf"),      # outside models_dir
+                       ("y.gguf", sub / "y.gguf"),          # nested
+                       ("other.gguf", p),                    # basename mismatch
+                       ("../m-Q4_K_M.gguf", p),              # name with a separator
+                       ("missing.gguf", lib.models_dir / "missing.gguf"),
+                       ("sub", sub)]:                        # not a regular file
+        with pytest.raises(LibraryError):
+            lib.add_converted(name, path, None)
+    assert lib.list() == []
+
+
+def test_add_converted_refuses_symlink(lib, tmp_path):
+    target = tmp_path / "real.gguf"
+    target.write_bytes(b"x")
+    lib.models_dir.mkdir(parents=True)
+    link = lib.models_dir / "link.gguf"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks not permitted")
+    with pytest.raises(LibraryError):
+        lib.add_converted("link.gguf", link, None)
+
+
+async def test_delete_converted_unlinks_its_file(lib):
+    p = _converted(lib)
+    lib.add_converted(p.name, p, None)
+    await lib.delete(p.name, lambda n: False)
+    assert not p.exists() and lib.get(p.name) is None
+
+
+async def test_delete_converted_never_unlinks_outside_models_dir(lib, tmp_path):
+    victim = tmp_path / "victim.gguf"
+    victim.write_bytes(b"precious")
+    lib.models_dir.mkdir(parents=True)
+    lib._exec("INSERT INTO library(name,path,source,bytes,downloaded,status,created_at)"
+              " VALUES('v.gguf',?,'convert',8,0,'ready',0)", (str(victim),))
+    await lib.delete("v.gguf", lambda n: False)
+    assert victim.exists() and lib.get("v.gguf") is None
+
+
+async def test_delete_converted_in_use_is_409(lib):
+    p = _converted(lib)
+    lib.add_converted(p.name, p, None)
+    with pytest.raises(LibraryError) as e:
+        await lib.delete(p.name, lambda n: True)
+    assert e.value.status == 409 and p.exists()
+
+
+def test_locate_dir(lib, tmp_path):
+    d = tmp_path / "hfmodel"
+    d.mkdir()
+    (d / "config.json").write_text("{}")
+    assert lib.locate_dir(str(d)) == d
+    with pytest.raises(LibraryError, match="absolute"):
+        lib.locate_dir("relative/dir")
+    with pytest.raises(LibraryError, match="not a directory"):
+        lib.locate_dir(str(d / "config.json"))
+    with pytest.raises(LibraryError, match="no such file"):
+        lib.locate_dir(str(tmp_path / "nope"))
+
+
+def test_locate_dir_translates_host_paths(tmp_path):
+    inside = tmp_path / "mounted" / "m"
+    inside.mkdir(parents=True)
+    lb = Library(":memory:", tmp_path / "models", http=httpx.AsyncClient(),
+                 path_map={"/host/models": str(tmp_path / "mounted")})
+    assert lb.locate_dir("/host/models/m") == inside
+    lb._db.close()
+
+
+def test_browse_skips_dot_directories(lib):
+    for d in (".convert", ".hf", "keep"):
+        (lib.models_dir / d).mkdir(parents=True, exist_ok=True)
+        (lib.models_dir / d / "x.gguf").write_bytes(b"x")
+    (lib.models_dir / "top.gguf").write_bytes(b"x")
+    names = sorted(Path(f["path"]).relative_to(lib.models_dir).as_posix() for f in lib.browse()["files"])
+    assert names == ["keep/x.gguf", "top.gguf"]

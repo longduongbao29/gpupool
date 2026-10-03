@@ -275,9 +275,11 @@
           &rarr; <b x-text="rbMove() && rbMove().new"></b>, started <span x-text="rbMove() && ago(rbMove().since)"></span></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
-          <button class="btn primary right" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div>
-        <div class="empty" x-show="filteredLibrary().length === 0">The library is empty. Add a model from Hugging Face or a local path.</div>
+        <div class="panel-head wrap"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
+          <div class="row right wrap" style="gap:var(--s-2)">
+            <button class="btn" @click="openConvert()" title="Turn a Hugging Face model or a folder of weights into a GGUF file"><span x-html="icon('swap')"></span> Convert a model</button>
+            <button class="btn primary" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div></div>
+        <div class="empty" x-show="filteredLibrary().length === 0">The library is empty. Add a GGUF from Hugging Face or a local path, or convert a model that has no GGUF yet.</div>
         <div class="tbl-scroll" x-show="filteredLibrary().length > 0">
         <table>
           <thead><tr><th>Name</th><th>Source</th><th>Size</th><th>Status</th><th></th></tr></thead>
@@ -285,7 +287,7 @@
             <template x-for="it in filteredLibrary()" :key="it.name">
               <tr>
                 <td style="font-weight:600" x-text="it.name"></td>
-                <td class="muted small"><span x-text="it.source === 'hf' ? 'Hugging Face' : 'Path'"></span><div class="ellipsis" style="max-width:260px" x-text="it.source === 'hf' ? it.hf_repo : it.path"></div></td>
+                <td class="muted small"><span x-text="srcLabel(it)"></span><div class="ellipsis" style="max-width:260px" x-text="srcDetail(it)"></div></td>
                 <td x-text="bytes(it.bytes)"></td>
                 <td class="wrapc" style="min-width:200px">
                   <span class="pill lead" :class="[libStatusClass(it), it.status==='downloading' ? 'spinning' : '']"><span class="spin" x-show="it.status==='downloading'"></span><span x-text="it.status"></span></span>
@@ -301,6 +303,108 @@
             </template>
           </tbody>
         </table>
+        </div>
+      </div>
+
+
+      <!-- ============ conversions ============ -->
+      <div class="panel mt" id="conversions">
+        <div class="panel-head wrap"><h2>Conversions</h2><span class="muted small">Hugging Face or folder to GGUF</span>
+          <button class="btn right" @click="openConvert()"><span x-html="icon('plus')"></span> Convert a model</button></div>
+        <div class="notice warn" style="margin:var(--s-3) var(--s-4) 0" x-show="convOpts.loaded && !convOpts.available" role="alert">
+          <b>Conversion is not available.</b> <span x-text="convOpts.problem || 'The conversion toolchain is not installed on this coordinator.'"></span>
+          <div class="muted small" style="margin-top:4px">You can still inspect a model, but jobs cannot be started.</div></div>
+        <div class="result bad" style="margin:var(--s-3) var(--s-4) 0" x-show="convErr" x-text="convErr"></div>
+        <div class="empty" x-show="convSeen !== null && convJobs.length === 0 && !convErr">No conversions yet. Use <b>Convert a model</b> to turn a Hugging Face model into a GGUF file.</div>
+        <div class="conv-list" x-show="convJobs.length > 0">
+          <template x-for="j in convJobs" :key="j.id">
+            <div class="cjob">
+              <div class="cjob-head">
+                <div class="grow">
+                  <div class="row wrap" style="gap:var(--s-2)">
+                    <span class="cjob-title" x-text="j.output_name"></span>
+                    <span class="pill lead" :class="[convStateClass(j), convIsRunning(j) ? 'spinning' : '', j.state === 'queued' ? '' : '']"><span class="spin" x-show="convIsRunning(j)"></span><span x-text="convStateText(j)"></span></span>
+                    <span class="chip mono" x-text="j.request.quant"></span>
+                  </div>
+                  <div class="muted small ellipsis" style="margin-top:2px"><span x-text="convSource(j)"></span> &middot; started <span x-text="ago(j.created_at)"></span></div>
+                </div>
+                <div class="cjob-actions">
+                  <button class="btn primary sm" x-show="j.state === 'done'" :disabled="!convInLibrary(j)" @click="convDeploy(j)" :title="convInLibrary(j) ? 'Open the new-model form with this file' : 'The file is not listed in the library yet'"><span x-html="icon('play')"></span> Deploy this model</button>
+                  <button class="btn sm" x-show="j.state === 'needs_review'" :disabled="convBusy[j.id]" @click="convAct(j, 'accept')" title="Add the converted file to the library despite the failed check"><span x-html="icon('alert')"></span> Accept anyway</button>
+                  <button class="btn sm" x-show="convIsActive(j)" :disabled="convBusy[j.id]" @click="convAct(j, 'cancel')"><span x-html="icon('stop')"></span> Cancel</button>
+                  <button class="btn sm" x-show="j.state === 'failed' || j.state === 'cancelled'" :disabled="convBusy[j.id]" @click="convAct(j, 'retry')"><span x-html="icon('swap')"></span> Retry</button>
+                  <button class="btn sm ghost danger icon" x-show="!convIsActive(j)" :disabled="convBusy[j.id]" @click="convAct(j, 'delete')" title="Delete this job" :aria-label="'Delete job ' + j.output_name" x-html="icon('trash')"></button>
+                </div>
+              </div>
+
+              <ol class="stepper" aria-label="Conversion stages">
+                <template x-for="st in convStages(j)" :key="st.key">
+                  <li :class="st.cls"><span class="sd"></span><span class="lbl" x-text="st.label"></span><span class="sr-only" x-text="' (' + st.cls + ')'"></span></li>
+                </template>
+              </ol>
+
+              <div x-show="convIsActive(j)">
+                <div class="bar" x-show="j.state !== 'queued'" :class="convPct(j) == null ? 'indet' : ''" role="progressbar" :aria-valuenow="convPct(j) == null ? null : Math.round(convPct(j))" aria-valuemin="0" aria-valuemax="100" :aria-label="'Progress of ' + j.output_name"><i :style="'width:' + (convPct(j) == null ? 35 : convPct(j)) + '%'"></i></div>
+                <div class="muted small" style="margin-top:4px" x-text="j.state === 'queued' ? 'Waiting for the worker...' : convProgressText(j)"></div>
+              </div>
+
+              <div class="cjob-meta">
+                <span x-show="j.est_output_bytes != null && j.output_bytes == null">Estimated size <b x-text="bytes(j.est_output_bytes)"></b></span>
+                <span x-show="j.output_bytes != null">Output <b x-text="bytes(j.output_bytes)"></b><span x-show="j.est_output_bytes != null"> (estimated <span x-text="bytes(j.est_output_bytes)"></span>)</span></span>
+                <span x-show="j.request.keep_source && j.request.source.hf_repo">Source files kept</span>
+              </div>
+
+              <div class="errbox" x-show="j.error" x-text="j.error" role="alert"></div>
+              <div class="notice warn" x-show="j.state === 'needs_review'"><b>Needs your review.</b> The file was converted, but an automatic check did not pass (see the validation below). It is not in the library yet. Accept it if you can live with the risk, or delete the job.</div>
+
+              <div x-show="j.validation">
+                <button type="button" class="link-btn" @click="convToggle(j, 'val')"><span class="chev-wrap" :class="{open: convValOpen(j)}" x-html="icon('chev')"></span><span x-text="convValOpen(j) ? 'Hide validation' : 'Show validation'"></span></button>
+                <template x-if="j.validation && convValOpen(j)">
+                  <div class="vpanel" style="margin-top:var(--s-2)">
+                    <div class="vchecks">
+                      <template x-for="c in convChecks(j.validation)" :key="c.key"><span class="pill lead chk" :class="convCheckClass(c.s)" x-text="c.t"></span></template>
+                    </div>
+                    <div class="muted small" x-show="j.validation.architecture || j.validation.n_layers != null || j.validation.vocab_size != null">
+                      <span x-show="j.validation.architecture">Architecture <b x-text="j.validation.architecture"></b></span>
+                      <span x-show="j.validation.n_layers != null"> &middot; <b x-text="j.validation.n_layers"></b> layers</span>
+                      <span x-show="j.validation.vocab_size != null"> &middot; vocabulary <b x-text="j.validation.vocab_size"></b></span>
+                    </div>
+                    <div class="errbox" x-show="(j.validation.errors || []).length" x-text="(j.validation.errors || []).join('\n')"></div>
+                    <div class="notice warn" x-show="(j.validation.warnings || []).length" style="margin:0"><template x-for="(w, i) in (j.validation.warnings || [])" :key="i"><div x-text="w"></div></template></div>
+                    <div x-show="(j.validation.tokenizer_cases || []).length">
+                      <div class="small" style="margin-bottom:6px"><b>Tokenizer check</b>
+                        <span class="muted"> &mdash; the same strings tokenized by the original model (HF) and by the GGUF</span>
+                        <span class="pill red" x-show="convMismatches(j.validation) > 0" style="margin-left:6px"><span x-text="convMismatches(j.validation)"></span> mismatch<span x-show="convMismatches(j.validation) !== 1">es</span></span></div>
+                      <div class="vtbl-wrap">
+                        <table class="vtbl">
+                          <thead><tr><th>Text</th><th>HF ids</th><th>GGUF ids</th><th>Result</th></tr></thead>
+                          <tbody>
+                            <template x-for="(c, i) in j.validation.tokenizer_cases" :key="i">
+                              <tr :class="{mism: !c.match}">
+                                <td class="mono" x-text="quoteText(c.text)"></td>
+                                <td class="ids" x-text="idsText(c.hf)"></td>
+                                <td class="ids" x-text="idsText(c.gguf)"></td>
+                                <td><span class="pill" :class="c.match ? 'green' : 'red'" x-text="c.match ? 'match' : 'mismatch'"></span></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div x-show="j.validation.generation_sample">
+                      <div class="small" style="margin-bottom:6px"><b>Generation sample</b> <span class="muted">(a few tokens on the CPU)</span></div>
+                      <pre class="sample" x-text="j.validation.generation_sample"></pre>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <div x-show="(j.log_tail || []).length">
+                <button type="button" class="link-btn" @click="convToggle(j, 'log')"><span class="chev-wrap" :class="{open: convUiOf(j).log}" x-html="icon('chev')"></span><span x-text="convUiOf(j).log ? 'Hide log' : 'Show log'"></span></button>
+                <pre class="logbox" x-show="convUiOf(j).log" style="margin-top:var(--s-2)" x-text="(j.log_tail || []).join('\n')"></pre>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -508,7 +612,7 @@
 </div>
 
 <!-- ============ modals ============ -->
-<div class="overlay" x-show="authed && addSrv.open" x-cloak @click.self="addSrv.open = false" @keydown.escape.window="addSrv.open = false; addMdl.open = false; form.open = false; delSrv = null" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+<div class="overlay" x-show="authed && addSrv.open" x-cloak @click.self="addSrv.open = false" @keydown.escape.window="addSrv.open = false; addMdl.open = false; conv.open = false; form.open = false; delSrv = null" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
   <div class="modal" x-show="addSrv.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
     <div class="modal-head"><h2>Add Server</h2><button class="btn ghost icon sm right" aria-label="Close" @click="addSrv.open = false" x-html="icon('x')"></button></div>
     <form class="modal-body" @submit.prevent="addServer()">
@@ -552,6 +656,9 @@
             <button class="btn" @click="listHf()" :disabled="addMdl.listing || !addMdl.repo.trim()"><span class="spin" x-show="addMdl.listing"></span> List files</button></div></label>
         <label class="field" x-show="addMdl.files.length"><span>File</span>
           <select x-model="addMdl.file"><template x-for="f in addMdl.files" :key="f.file"><option :value="f.file" x-text="f.file + '  (' + bytes(f.bytes) + ')'"></option></template></select></label>
+        <div class="notice warn" x-show="addMdl.noGguf" role="status"><b>No .gguf files in this repository.</b> It probably holds the original weights. gpupool can convert them to GGUF for you.
+          <div><button type="button" class="btn sm primary" @click="convertFromAdd()"><span x-html="icon('swap')"></span> Convert to GGUF</button></div></div>
+        <div class="muted small" x-show="!addMdl.noGguf && !addMdl.files.length">Not a GGUF repository? <button type="button" class="link-btn" style="font-size:inherit" @click="convertFromAdd()" :disabled="!addMdl.repo.trim()">Convert it to GGUF</button></div>
       </div>
       <div x-show="addMdl.tab==='path'">
         <label class="field"><span>Absolute path to a .gguf on the coordinator machine</span>
@@ -598,6 +705,149 @@
     <div class="modal-foot"><button class="btn" @click="addMdl.open = false">Cancel</button>
       <button class="btn primary" @click="addToLibrary()" :disabled="addMdl.busy || (addMdl.tab==='hf' ? !addMdl.file : !addMdl.path.trim())"
         x-text="addMdl.tab==='hf' ? 'Download' : 'Add'"></button></div>
+  </div>
+</div>
+
+<div class="overlay" x-show="authed && conv.open" x-cloak @click.self="conv.open = false" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="conv-title" x-show="conv.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><h2 id="conv-title">Convert a model to GGUF</h2><button class="btn ghost icon sm right" aria-label="Close" @click="conv.open = false" x-html="icon('x')"></button></div>
+    <div class="modal-body">
+      <div class="notice warn" x-show="convOpts.loaded && !convOpts.available" role="alert" style="margin:0 0 var(--s-3)">
+        <b>Conversion is not available.</b> <span x-text="convOpts.problem || 'The conversion toolchain is not installed on this coordinator.'"></span>
+        You can inspect a model, but starting a job is disabled.</div>
+
+      <!-- 1. source -->
+      <div class="tabs"><button type="button" :class="{active: conv.tab==='hf'}" @click="convSetTab('hf')">Hugging Face repo</button>
+        <button type="button" :class="{active: conv.tab==='path'}" @click="convSetTab('path')">Folder on the server</button></div>
+      <div x-show="conv.tab==='hf'">
+        <div class="row wrap src-row">
+          <label class="field grow" style="margin:0"><span>Repository (owner/name)</span>
+            <input type="text" x-model="conv.repo" placeholder="HuggingFaceTB/SmolLM2-135M-Instruct" @keydown.enter.prevent="convInspect()" @input="conv.err = ''" autocomplete="off" spellcheck="false"></label>
+          <label class="field" style="margin:0;width:140px"><span>Revision (optional)</span>
+            <input type="text" x-model="conv.revision" placeholder="main" @keydown.enter.prevent="convInspect()" autocomplete="off" spellcheck="false"></label>
+          <button class="btn primary" @click="convInspect()" :disabled="conv.inspecting || !conv.repo.trim()"><span class="spin" x-show="conv.inspecting"></span> Inspect</button>
+        </div>
+        <div class="help" style="margin-top:6px">The branch, tag or commit to convert. Leave empty for <code>main</code>. Only the weights, config and tokenizer files are downloaded.</div>
+      </div>
+      <div x-show="conv.tab==='path'">
+        <div class="row wrap src-row">
+          <label class="field grow" style="margin:0"><span>Absolute path of a model folder on the coordinator machine</span>
+            <input type="text" x-model="conv.path" placeholder="/models/hf/my-model" @keydown.enter.prevent="convInspect()" @input="conv.err = ''" autocomplete="off" spellcheck="false"></label>
+          <button class="btn primary" @click="convInspect()" :disabled="conv.inspecting || !conv.path.trim()"><span class="spin" x-show="conv.inspecting"></span> Inspect</button>
+        </div>
+        <div class="help" style="margin-top:6px">The folder must hold <code>config.json</code>, the tokenizer files and the <code>.safetensors</code> or <code>.bin</code> weights. When the coordinator runs in Docker it only sees mounted folders; a host path is translated if the folder is mounted. The folder is only read, never changed.</div>
+      </div>
+      <div class="result bad err-full" x-show="conv.err" role="alert" x-text="conv.err"></div>
+
+      <!-- 2. what the inspection found -->
+      <template x-if="conv.res">
+        <div style="margin-top:var(--s-4)">
+          <div class="row wrap" style="gap:var(--s-2)">
+            <h3 class="sec" style="margin:0" x-text="conv.res.source.hf_repo || conv.res.source.path"></h3>
+            <span class="pill lead" :class="convBlocker() ? 'red' : (conv.res.supported === true ? 'green' : 'amber')" x-text="conv.res.supported === false ? 'Not supported' : (convBlocker() ? 'Cannot convert' : (conv.res.supported === true ? 'Supported' : 'Support unknown'))"></span>
+            <span class="pill amber" x-show="conv.res.gated"><span x-html="icon('key')"></span>Gated</span>
+          </div>
+          <div class="conv-facts">
+            <div><div class="l">Architecture</div><div class="v" :title="conv.res.architecture || ''" x-text="conv.res.architecture || dash"></div></div>
+            <div><div class="l">Parameters</div><div class="v" x-text="humanParams(conv.res.params)"></div></div>
+            <div><div class="l">Layers</div><div class="v" x-text="conv.res.n_layers == null ? dash : conv.res.n_layers"></div></div>
+            <div><div class="l">Context length</div><div class="v" x-text="conv.res.context_length == null ? dash : conv.res.context_length.toLocaleString('en-US')"></div></div>
+            <div><div class="l">Weight format</div><div class="v" x-text="weightLabel(conv.res.weight_format)"></div></div>
+            <div><div class="l" x-text="conv.res.source.hf_repo ? 'Download size' : 'Size on disk'"></div><div class="v" x-text="conv.res.source_bytes ? bytes(conv.res.source_bytes) : dash"></div></div>
+          </div>
+
+          <div class="notice bad" x-show="convBlocker()" role="alert"><b>Cannot convert this model.</b> <span x-text="convBlocker()"></span>
+            <div x-show="conv.res.base_model"><button type="button" class="btn sm" @click="convUseBase(conv.res.base_model)">Inspect the base model <code x-text="conv.res.base_model"></code> instead</button></div></div>
+          <div class="notice warn" x-show="conv.res.gated"><b>Gated repository.</b> The download needs a Hugging Face token with access granted: set <code>HF_TOKEN</code> on the coordinator and accept the licence on the model page, or the job fails at the download.
+            <a :href="hfUrl(conv.res.source.hf_repo || '')" target="_blank" rel="noopener" x-show="conv.res.source.hf_repo">Open the model page</a></div>
+          <div class="notice warn" x-show="conv.res.prequantized && conv.res.prequant_supported !== false"><b>Already quantized (<span x-text="conv.res.prequantized"></span>).</b> The converter can read it back, but quantizing again loses quality on top of the first loss.
+            <span x-show="conv.res.base_model">Better start from the original model:</span>
+            <div x-show="conv.res.base_model"><button type="button" class="btn sm" @click="convUseBase(conv.res.base_model)">Inspect <code x-text="conv.res.base_model"></code></button>
+              <a :href="hfUrl(conv.res.base_model || '')" target="_blank" rel="noopener" style="margin-left:8px">Open on Hugging Face</a></div></div>
+          <div class="notice info" x-show="conv.res.remote_code"><b>Ships its own Python code.</b> This repository contains custom code (<code>*.py</code> / <code>auto_map</code>). It is not downloaded or run unless you allow it under <i>Advanced</i>; some models cannot be converted without it.</div>
+          <div class="notice info" x-show="(conv.res.gguf_alternatives || []).length"><b>Already published as GGUF.</b> Downloading a ready-made file is faster and needs no conversion:
+            <ul><template x-for="g in conv.res.gguf_alternatives" :key="g"><li><code x-text="g"></code> &mdash; <button type="button" class="link-btn" style="font-size:inherit" @click="convUseGguf(g)">download instead</button></li></template></ul></div>
+          <div class="notice warn" x-show="(conv.res.warnings || []).length"><template x-for="(w, i) in (conv.res.warnings || [])" :key="i"><div x-text="w"></div></template></div>
+          <details style="margin-top:var(--s-2)" x-show="(conv.res.files || []).length || (conv.res.skipped || []).length">
+            <summary class="muted small" style="cursor:pointer"><span x-text="(conv.res.files || []).length"></span> file(s) will be used<span x-show="(conv.res.skipped || []).length">, <span x-text="(conv.res.skipped || []).length"></span> skipped</span></summary>
+            <div class="small muted" style="margin-top:6px">
+              <template x-for="f in (conv.res.files || [])" :key="f.name"><div><code x-text="f.name"></code> <span x-text="bytes(f.bytes)"></span></div></template>
+              <div x-show="(conv.res.skipped || []).length" style="margin-top:6px">Skipped: <span x-text="(conv.res.skipped || []).join(', ')"></span></div>
+            </div>
+          </details>
+
+          <!-- 3. quantization -->
+          <div x-show="convertible()">
+            <h3 class="sec">Quantization</h3>
+            <div class="help" style="margin-top:-4px">Quantizing shrinks the file and the memory it needs, at some cost in quality. Estimates are for this model and your current GPUs.</div>
+            <div class="notice info" x-show="(conv.res.recommend_reasons || []).length" style="margin:0 0 var(--s-3)"><b>Recommended: <span x-text="conv.res.recommended"></span></b>
+              <ul><template x-for="(r, i) in (conv.res.recommend_reasons || [])" :key="i"><li x-text="r"></li></template></ul></div>
+            <div class="qlist" role="radiogroup" aria-label="Quantization type">
+              <template x-for="o in conv.res.options" :key="o.type">
+                <label class="qopt" :class="{sel: conv.quant === o.type}">
+                  <input type="radio" name="conv-quant" :value="o.type" :checked="conv.quant === o.type" @change="convPick(o.type)" :aria-label="'Quantization ' + o.type">
+                  <div class="qmain">
+                    <div class="row wrap" style="gap:6px">
+                      <b class="qtype" x-text="o.type"></b>
+                      <span class="pill" :class="tierClass(o.tier)" x-text="tierLabel(o.tier)"></span>
+                      <span class="pill green" x-show="isRecommended(o)">Recommended</span>
+                      <template x-if="fitBadge(o)"><span class="pill lead chk" :class="fitBadge(o).cls" x-text="fitBadge(o).text"></span></template>
+                    </div>
+                    <div class="muted small" x-text="o.note"></div>
+                  </div>
+                  <div class="qnums">
+                    <div><b x-text="o.est_bytes == null ? dash : bytes(o.est_bytes)"></b><span>file</span></div>
+                    <div><b x-text="o.est_vram_mb == null ? dash : gb(o.est_vram_mb) + ' GB'"></b><span>VRAM</span></div>
+                  </div>
+                </label>
+              </template>
+            </div>
+            <div class="notice warn" x-show="convOption() && convOption().fits_pool === false"><b>Too big for this cluster.</b> The file can be converted, but it cannot be served until more GPUs are added. A smaller type may fit.</div>
+
+            <!-- 4. output -->
+            <label class="field" style="margin-top:var(--s-4)"><span>Output file name</span>
+              <input type="text" x-model="conv.name" @input="convNameInput(); conv.err = ''" autocomplete="off" spellcheck="false" :aria-invalid="!convNameOk()"></label>
+            <div class="help" style="margin-top:-6px">Name of the file in the model library. It must end in <code>.gguf</code>. Follows the quantization type until you edit it.</div>
+            <div class="opt-row" x-show="conv.tab === 'hf'"><label class="switch"><input type="checkbox" x-model="conv.keepSource" aria-label="Keep the downloaded source"><span></span></label>
+              <div class="txt"><div>Keep downloaded source</div><div class="help">Keep the Hugging Face files after a successful conversion, so converting the same model again (another quantization) skips the download. They take about <b x-text="conv.res.source_bytes ? bytes(conv.res.source_bytes) : 'as much as the model'"></b> of disk.</div></div></div>
+
+            <details class="adv" :open="conv.advOpen" @toggle="conv.advOpen = $event.target.open">
+              <summary>Advanced</summary>
+              <div class="adv-body">
+                <label class="field"><span>Intermediate precision</span>
+                  <select x-model="conv.adv.intermediate"><option value="auto">Auto (recommended)</option><option value="f16">f16</option><option value="bf16">bf16</option><option value="f32">f32</option></select></label>
+                <div class="help" style="margin-top:-6px">The 16/32-bit file written before quantizing. Auto keeps the model's own precision (bf16 stays bf16). f32 is rarely needed and doubles the temporary disk space.</div>
+                <div class="help danger-note" x-show="convViaConvert()">The selected type is written by the converter directly, so the quantization options below do not apply.</div>
+                <div class="row" style="align-items:flex-start">
+                  <label class="field grow"><span>Output tensor type</span>
+                    <select x-model="conv.adv.output_tensor_type" :disabled="convViaConvert()"><option value="">Default</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q6_K">q6_K</option><option value="q5_K">q5_K</option><option value="q4_K">q4_K</option></select></label>
+                  <label class="field grow"><span>Token embedding type</span>
+                    <select x-model="conv.adv.token_embedding_type" :disabled="convViaConvert()"><option value="">Default</option><option value="f16">f16</option><option value="q8_0">q8_0</option><option value="q6_K">q6_K</option><option value="q5_K">q5_K</option><option value="q4_K">q4_K</option></select></label>
+                </div>
+                <div class="help" style="margin-top:-6px">Precision of the output layer and of the word-embedding table. Keeping them higher (for example q8_0) costs a little size and helps quality on small types. Default lets llama-quantize decide.</div>
+                <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.leave_output_tensor" :disabled="convViaConvert()" aria-label="Leave output tensor"><span></span></label>
+                  <div class="txt"><div>Leave output tensor</div><div class="help">Do not quantize the output layer at all. Slightly bigger file, slightly better quality.</div></div></div>
+                <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.pure" :disabled="convViaConvert()" aria-label="Pure quantization"><span></span></label>
+                  <div class="txt"><div>Pure</div><div class="help">Use the chosen type for every tensor instead of the usual mix of types. Usually lowers quality for the same size; mostly for experiments.</div></div></div>
+                <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.validate_generation" aria-label="Validate generation"><span></span></label>
+                  <div class="txt"><div>Validate generation</div><div class="help">After converting, load the file on the CPU and generate a few tokens to prove it works. Adds some seconds; the header and tokenizer checks always run.</div></div></div>
+                <div class="opt-row"><label class="switch"><input type="checkbox" x-model="conv.adv.allow_remote_code" aria-label="Allow remote code"><span></span></label>
+                  <div class="txt"><div>Allow remote code</div><div class="help danger-note">Dangerous: downloads the repository's Python files and runs them inside the coordinator, with its permissions. Turn on only for a repository you trust, and only if the conversion fails without it (custom tokenizers).</div></div></div>
+                <label class="field" style="margin-bottom:0"><span>Threads</span><input type="number" min="0" step="1" x-model="conv.adv.threads" style="width:110px"></label>
+                <div class="help">CPU threads for converting and quantizing. 0 uses the coordinator's default.</div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </template>
+    </div>
+    <div class="modal-foot split">
+      <div class="muted small" x-show="conv.res && convertible() && convStartBlock()" x-text="convStartBlock()" style="max-width:60%"></div>
+      <div class="foot-group" style="margin-left:auto">
+        <button class="btn" @click="conv.open = false">Cancel</button>
+        <button class="btn primary" @click="convStart()" :disabled="!!convStartBlock()" :title="convStartBlock()"><span class="spin" x-show="conv.busy"></span><span x-show="!conv.busy" x-html="icon('play')"></span> Start conversion</button>
+      </div>
+    </div>
   </div>
 </div>
 

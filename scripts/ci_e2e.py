@@ -4,10 +4,13 @@ model split over several servers through llama.cpp RPC.
 Why it exists: Dockerfile errors, a wrong Python in the image or a bad multi-server split passed
 the unit tests and only showed up when real images ran. Stdlib only, so it runs on a bare CI host.
 
-    python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep]
+    python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
 
 Environment: GPUPOOL_AGENT_IMAGE / GPUPOOL_COORDINATOR_IMAGE (default gpupool-*:latest),
 GPUPOOL_CI_MODELS_DIR (where the GGUF is cached; default <repo>/.cache/ci-models).
+The last stage converts a Hugging Face model to GGUF inside the coordinator (download, convert,
+quantize, validate) and serves the result; --skip-convert leaves it out (it needs the coordinator
+image built with WITH_CONVERT=1 and network access to huggingface.co).
 Exit code 0 = all checks passed; on failure `docker compose logs` is printed.
 """
 from __future__ import annotations
@@ -34,6 +37,12 @@ MODEL_BYTES = 144_811_360
 MODEL_SHA256 = "5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83"
 MODEL_URL = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}"
 MODEL_NAME = "smol"
+# The conversion stage: the safetensors repo of the same model, to Q4_K_M, then served as CONVERT_MODEL_NAME.
+CONVERT_REPO = "HuggingFaceTB/SmolLM2-135M-Instruct"
+CONVERT_QUANT = "Q4_K_M"
+CONVERT_MODEL_NAME = "smol-converted"
+CONVERT_TIMEOUT = 1500  # seconds: download ~270 MB, convert, quantize, validate on a CI CPU
+CONVERT_FAIL_STATES = ("failed", "needs_review", "cancelled")
 ADMIN_KEY = "ci-admin"  # matches CI_ADMIN_KEY's default in docker-compose.ci.yml
 
 results: list[tuple[str, bool, str]] = []
@@ -122,6 +131,73 @@ def compose(project: str, *args: str, check_rc: bool = True) -> subprocess.Compl
                           check=check_rc, text=True)
 
 
+def fmt_job(job: dict) -> str:
+    """Everything useful for a failed conversion job in one block."""
+    return json.dumps({k: job.get(k) for k in ("state", "error", "validation", "log_tail", "output_name")}, indent=2)
+
+
+def run_convert_checks() -> None:
+    print("== 8. HF -> GGUF conversion in the coordinator", flush=True)
+    opts = api("GET", "/api/convert/options")
+    check("conversion toolchain available in the coordinator image", opts.get("available") is True,
+          str(opts.get("problem")))
+    t0 = time.monotonic()
+    job = api("POST", "/api/convert", {"source": {"hf_repo": CONVERT_REPO}, "quant": CONVERT_QUANT})
+    check("conversion job accepted", bool(job.get("id")), f"{job.get('id')} -> {job.get('output_name')}")
+    job_id, out_name = job["id"], job["output_name"]
+
+    last = {"state": ""}
+
+    def finished():
+        j = api("GET", f"/api/convert/{job_id}")
+        if j["state"] != last["state"]:
+            last["state"] = j["state"]
+            print(f"     job {job_id}: {j['state']} ({time.monotonic() - t0:.0f}s)", flush=True)
+        if j["state"] in CONVERT_FAIL_STATES:
+            raise SystemExit(f"conversion job ended in state {j['state']}: " + fmt_job(j))
+        return j if j["state"] == "done" else None
+    try:
+        job = wait(finished, CONVERT_TIMEOUT, "conversion job done", every=5)
+    except SystemExit:
+        # A timeout reaches here too: show where the job was stuck.
+        try:
+            print(fmt_job(api("GET", f"/api/convert/{job_id}")), file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        raise
+    check("conversion job done", True, f"{time.monotonic() - t0:.0f}s, {job.get('output_bytes')} B")
+    val = job.get("validation") or {}
+    check("GGUF header validated", val.get("header_ok") is True, str(val.get("errors") or val.get("warnings")))
+
+    item = next((i for i in api("GET", "/api/library") if i["name"] == out_name), None)
+    check("library has the converted file with source convert",
+          bool(item) and item["source"] == "convert" and item["status"] == "ready",
+          str({k: item.get(k) for k in ("name", "source", "status", "bytes")} if item else "missing"))
+
+    api("PUT", f"/api/models/{CONVERT_MODEL_NAME}", {"file": out_name, "ctx_size": 512})
+    api("POST", f"/api/models/{CONVERT_MODEL_NAME}/start", {"replicas": 1})
+    t0 = time.monotonic()
+
+    def conv_model():
+        return next((m for m in state()["models"] if m["spec"]["name"] == CONVERT_MODEL_NAME), None)
+
+    def running():
+        m = conv_model()
+        if m and m["state"] == "failed":
+            raise SystemExit(f"converted model failed to start: {m.get('error')}")
+        return m if m and m["state"] == "running" else None
+    wait(running, 600, "converted model running", every=3)
+    check("converted model running", True, f"{time.monotonic() - t0:.0f}s")
+    r = api("POST", "/v1/chat/completions", {
+        "model": CONVERT_MODEL_NAME, "max_tokens": 24, "temperature": 0,
+        "messages": [{"role": "user", "content": "Say hello in one short sentence."}]},
+        auth=False, timeout=300)
+    ans = r["choices"][0]["message"]["content"]
+    check("converted model answers a chat", bool(ans.strip()), repr(ans.strip()[:80]))
+    api("POST", f"/api/models/{CONVERT_MODEL_NAME}/stop")
+    wait(lambda: (conv_model() or {}).get("state") == "stopped", 180, "converted model stopped")
+
+
 def run_checks() -> None:
     print("== 1. cluster up: 3 CPU-only agents self-join", flush=True)
     t0 = time.monotonic()
@@ -196,6 +272,8 @@ def main() -> int:
     ap.add_argument("--project", default="gpupool-ci")
     ap.add_argument("--port", type=int, default=8080, help="coordinator port on the host")
     ap.add_argument("--keep", action="store_true", help="leave the cluster running")
+    ap.add_argument("--skip-convert", action="store_true",
+                    help="skip the HF -> GGUF conversion stage (needs network + the toolchain image)")
     args = ap.parse_args()
     base = f"http://127.0.0.1:{args.port}"
     models_dir = Path(os.environ.get("GPUPOOL_CI_MODELS_DIR", ROOT / ".cache" / "ci-models")).resolve()
@@ -207,6 +285,8 @@ def main() -> int:
         check("model file present and verified", True, f"{path.name} {path.stat().st_size} B sha256 ok")
         compose(args.project, "up", "-d")
         run_checks()
+        if not args.skip_convert:
+            run_convert_checks()
         ok = True
     except BaseException as e:
         print(f"\nFAILED: {e}", file=sys.stderr, flush=True)

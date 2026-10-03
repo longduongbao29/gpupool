@@ -1,7 +1,8 @@
 """Model library: GGUF files the coordinator serves to heads as coordinator://<name>.
 
-Two kinds of items: "hf" (downloaded from Hugging Face into models_dir, owned by us) and
-"path" (an existing file registered in place, never copied or deleted by us).
+Three kinds of items: "hf" (downloaded from Hugging Face into models_dir, owned by us),
+"path" (an existing file registered in place, never copied or deleted by us) and "convert"
+(a GGUF produced by the converter, a single file in models_dir owned by us).
 Files are only ever looked up by item name, never by joining user input to a directory.
 """
 from __future__ import annotations
@@ -113,7 +114,7 @@ class Library:
             return None
         if item.source == "hf":
             paths = [self.models_dir / n for n in self._part_names(item)]
-        else:
+        else:  # "path" and "convert": one file at item.path
             paths = [Path(item.path)]
         return paths if all(p.is_file() for p in paths) else None
 
@@ -248,6 +249,39 @@ class Library:
             f"it only sees mounted folders ({', '.join(seen)}). Mount the folder "
             "(GPUPOOL_HOST_MODELS_DIR) or use the path inside the container.")
 
+    def locate_dir(self, path: str) -> Path:
+        """Translate an absolute host path to an existing directory visible to this process."""
+        if not path or not _is_abs(path):
+            raise LibraryError("path must be absolute")
+        p = self._locate(path)
+        if not p.is_dir():
+            raise LibraryError(f"not a directory: {p}")
+        return p
+
+    def name_taken(self, name: str) -> bool:
+        return self.get(name) is not None
+
+    def add_converted(self, name: str, path: Path, hf_repo: str | None) -> LibraryItem:
+        """Register a GGUF the converter already moved to models_dir/<name>.
+
+        The path must be that exact file: anything else (another folder, a symlink out, a
+        different basename) is refused so a caller bug can never register or later delete an
+        arbitrary file."""
+        p = Path(path)
+        if p.name != name or Path(name).name != name:
+            raise LibraryError("converted file name does not match the library name")
+        base = self.models_dir.resolve()
+        if p.is_symlink() or not p.is_file() or p.resolve().parent != base:
+            raise LibraryError("converted file must be a regular file directly inside models_dir")
+        try:
+            self._exec(
+                "INSERT INTO library(name,path,source,hf_repo,hf_file,bytes,downloaded,status,"
+                "created_at) VALUES(?,?,?,?,NULL,?,0,'ready',?)",
+                (name, str(p.resolve()), "convert", hf_repo, p.stat().st_size, self._clock()))
+        except sqlite3.IntegrityError as e:
+            raise LibraryError(f"library already has a model named {name}", 409) from e
+        return self.get(name)  # type: ignore[return-value]
+
     def _locate(self, path: str) -> Path:
         """The path as given if it exists here, else its path_map translation. Raises an
         actionable error for a missing file or a symlink whose target is not visible."""
@@ -292,6 +326,8 @@ class Library:
                     return
                 try:
                     if e.is_dir(follow_symlinks=False):
+                        if e.name.startswith("."):
+                            continue  # .convert / .hf hold intermediates and downloads
                         if depth < max_depth:
                             walk(e.path, depth + 1)
                         continue
@@ -369,6 +405,14 @@ class Library:
                         p.unlink()
                     except OSError:
                         pass  # missing, or still open by the cancelled task (it cleans up)
+        elif item.source == "convert":
+            # Owned file, but only ever one inside models_dir (never trust a stored path blindly).
+            try:
+                p = Path(item.path).resolve()
+                if p.parent == self.models_dir.resolve() and p.is_file():
+                    p.unlink()
+            except OSError:
+                pass
 
     @staticmethod
     def _part_names(item: LibraryItem) -> list[str]:

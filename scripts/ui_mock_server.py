@@ -31,11 +31,21 @@ Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-au
 dry_run false it starts the move: a replacement replica appears (state starting), GET /api/state carries
 `rebalance.in_progress`, and ~20 s later the old replica is dropped (events rebalance_started, rebalanced). Afterwards the
 dry run answers with no moves ("all replicas are well placed"). `rebalance.next_run_ts` is 10 min after start.
+Conversion (Hugging Face / server folder -> GGUF): every route of the real API under /api/convert*. Inspectable sources:
+HuggingFaceTB/SmolLM2-135M-Instruct (small, supported), Qwen/Qwen2.5-7B-Instruct (job ends in needs_review: one tokenizer mismatch),
+Qwen/Qwen2.5-72B-Instruct (recommendation depends on the live GPUs), Qwen/Qwen2.5-7B-Instruct-AWQ (pre-quantized, unsupported, base_model set),
+acme/NovelNet-7B (unsupported architecture), meta-llama/Llama-3.1-8B-Instruct (gated: the job fails at the download),
+acme/Quirky-3B (ships remote code: the job fails unless allow_remote_code) and the server folders /models/hf/smollm2-135m and
+/models/hf/broken-model (fails while converting). Those repos have no .gguf files in GET /api/hf/files. Jobs walk queued -> downloading
+-> converting -> quantizing -> validating in about 20 s of wall-clock time. Three jobs are seeded at start: done (in the library),
+failed (Quirky-3B) and a running Qwen2.5-7B job. POST /api/_mock/convert_available {"available": false} simulates a missing toolchain.
 """
 from __future__ import annotations
 
 import math
+import re
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -123,6 +133,8 @@ def reset() -> None:
     add_event("warning", "rebalance_failed", "Rebalance of chat-batch aborted: replacement replica did not become ready in time", None, "chat-batch")
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
+    if "seed_conversions" in globals():  # defined further down; at import time the first reset() runs before it exists
+        seed_conversions()
 
 
 def add_event(level: str, kind: str, message: str, node_id=None, model=None) -> None:
@@ -392,6 +404,8 @@ def set_gpu(node_id: str, device_id: str, body: dict) -> dict:
 def hf_files(repo: str = Query(...)) -> list[dict]:
     if "/" not in repo:
         raise HTTPException(404, f"Repository {repo} not found")
+    if repo.lower() in REPOS:  # a safetensors-only repo: no .gguf files, so the UI offers "Convert to GGUF"
+        return []
     base = repo.split("/")[1].replace("-GGUF", "").lower()
     return [{"file": f"{base}-q4_k_m.gguf", "bytes": 2_300_000_000}, {"file": f"{base}-q8_0.gguf", "bytes": 3_900_000_000}]
 
@@ -795,9 +809,453 @@ def mock_kill(node_id: str) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Model conversion (Hugging Face / folder -> GGUF): mirrors the routes and JSON shapes of the real coordinator API.
+# ---------------------------------------------------------------------------------------------------------------------
+# (type, bits per weight, tier, via, quality note), best quality first. Same order and notes as the real option list.
+QUANTS = [
+    ("F16", 16.0, "lossless", "convert", "16-bit floats, no quantization loss (~14.0 GB for a 7B model)"),
+    ("BF16", 16.0, "lossless", "convert", "16-bit brain floats, same size as F16 and a wider value range"),
+    ("Q8_0", 8.5, "near_lossless", "convert", "+0.0026 ppl @ Llama-3-8B, practically indistinguishable from F16"),
+    ("Q6_K", 6.5625, "near_lossless", "quantize", "+0.0217 ppl @ Llama-3-8B"),
+    ("Q5_K_M", 5.69, "balanced", "quantize", "+0.0569 ppl @ Llama-3-8B, very good quality"),
+    ("Q5_K_S", 5.54, "balanced", "quantize", "+0.1049 ppl @ Llama-3-8B"),
+    ("Q4_K_M", 4.89, "balanced", "quantize", "+0.1754 ppl @ Llama-3-8B, the usual sweet spot of size and quality"),
+    ("Q4_K_S", 4.58, "small", "quantize", "+0.2689 ppl @ Llama-3-8B"),
+    ("IQ4_XS", 4.25, "small", "quantize", "4.25 bits per weight, close to Q4_K_S at a smaller size"),
+    ("Q4_0", 4.55, "small", "quantize", "+0.4685 ppl @ Llama-3-8B, legacy format"),
+    ("Q3_K_L", 4.3, "small", "quantize", "+0.5562 ppl @ Llama-3-8B, noticeable quality loss"),
+    ("Q3_K_M", 3.91, "tiny", "quantize", "+0.6569 ppl @ Llama-3-8B"),
+    ("Q3_K_S", 3.5, "tiny", "quantize", "+1.6321 ppl @ Llama-3-8B, clear quality loss"),
+    ("Q2_K", 3.35, "tiny", "quantize", "+3.5199 ppl @ Llama-3-8B, last resort"),
+]
+QUANT_BY_TYPE = {q[0]: q for q in QUANTS}
+ACTIVE_JOB_STATES = ("queued", "downloading", "converting", "quantizing", "validating")
+CONVERT: dict = {"problem": None}  # a string makes the toolchain "missing": options.available false, POST /api/convert 503
+JOBS: dict[str, dict] = {}
+INSPECT_DELAY = [0.0]  # seconds a real run adds to inspect so the spinner is visible (set in __main__)
+STAGE_SECONDS = {"queued": 1.5, "downloading": 6.0, "converting": 5.0, "quantizing": 5.0, "validating": 3.0}
+
+# Fake Hugging Face repos (all lower-cased keys). `files` are (name, bytes); the rest of the fields is what inspect reports.
+_ST = "safetensors"
+REPOS: dict[str, dict] = {
+    "huggingfacetb/smollm2-135m-instruct": dict(
+        repo="HuggingFaceTB/SmolLM2-135M-Instruct", arch="LlamaForCausalLM", model_type="llama", params=134_515_008, layers=30, ctx=8192,
+        files=[("config.json", 861), ("tokenizer.json", 2_104_556), ("tokenizer_config.json", 3_764), ("model.safetensors", 269_060_552)],
+        skipped=["README.md", ".gitattributes", "onnx/model.onnx"],
+        alts=["bartowski/SmolLM2-135M-Instruct-GGUF", "HuggingFaceTB/SmolLM2-135M-Instruct-GGUF"]),
+    "qwen/qwen2.5-7b-instruct": dict(
+        repo="Qwen/Qwen2.5-7B-Instruct", arch="Qwen2ForCausalLM", model_type="qwen2", params=7_615_616_512, layers=28, ctx=32768,
+        files=[("config.json", 663), ("tokenizer.json", 7_031_645), ("tokenizer_config.json", 7_305), ("vocab.json", 2_776_833),
+               ("merges.txt", 1_671_839)] + [(f"model-0000{i}-of-00004.safetensors", b) for i, b in
+                                              enumerate((3_945_000_000, 3_864_000_000, 3_864_000_000, 3_563_000_000), 1)],
+        skipped=["README.md", "LICENSE", ".gitattributes"], alts=["Qwen/Qwen2.5-7B-Instruct-GGUF", "bartowski/Qwen2.5-7B-Instruct-GGUF"]),
+    "qwen/qwen2.5-72b-instruct": dict(
+        repo="Qwen/Qwen2.5-72B-Instruct", arch="Qwen2ForCausalLM", model_type="qwen2", params=72_706_203_648, layers=80, ctx=32768,
+        files=[("config.json", 664), ("tokenizer.json", 7_031_645)] + [(f"model-{i:05d}-of-00037.safetensors", 3_900_000_000) for i in range(1, 38)],
+        skipped=["README.md", "LICENSE"], alts=["Qwen/Qwen2.5-72B-Instruct-GGUF"]),
+    "qwen/qwen2.5-7b-instruct-awq": dict(
+        repo="Qwen/Qwen2.5-7B-Instruct-AWQ", arch="Qwen2ForCausalLM", model_type="qwen2", params=7_615_616_512, layers=28, ctx=32768,
+        files=[("config.json", 1_196), ("tokenizer.json", 7_031_645), ("model-00001-of-00002.safetensors", 3_990_000_000),
+               ("model-00002-of-00002.safetensors", 1_590_000_000)],
+        skipped=["README.md"], prequantized="awq", prequant_supported=False, base="Qwen/Qwen2.5-7B-Instruct",
+        alts=["Qwen/Qwen2.5-7B-Instruct-GGUF"],
+        warnings=["Quant method awq is not yet supported by the converter: the weights are already 4-bit AWQ and cannot be turned back into floats."]),
+    "acme/novelnet-7b": dict(
+        repo="acme/NovelNet-7B", arch="NovelNetForCausalLM", model_type="novelnet", params=7_000_000_000, layers=32, ctx=4096,
+        files=[("config.json", 700), ("tokenizer.model", 500_000), ("model.safetensors", 14_000_000_000)], skipped=[], supported=False,
+        warnings=["Architecture NovelNetForCausalLM is not known to the pinned llama.cpp converter (b11342)."]),
+    "meta-llama/llama-3.1-8b-instruct": dict(
+        repo="meta-llama/Llama-3.1-8B-Instruct", arch="LlamaForCausalLM", model_type="llama", params=8_030_261_248, layers=32, ctx=131072,
+        files=[("config.json", 855), ("tokenizer.json", 9_085_657)] + [(f"model-0000{i}-of-00004.safetensors", b) for i, b in
+                                                                       enumerate((4_976_698_672, 4_999_802_720, 4_915_916_176, 1_168_138_808), 1)],
+        skipped=["README.md", "LICENSE"], gated=True, alts=["bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"],
+        warnings=["Gated repository: the download needs a Hugging Face token that has been granted access (HF_TOKEN)."]),
+    "acme/quirky-3b": dict(
+        repo="acme/Quirky-3B", arch="QuirkyForCausalLM", model_type="llama", params=3_212_749_824, layers=28, ctx=8192,
+        files=[("config.json", 900), ("tokenizer_config.json", 4_000), ("model.safetensors", 6_425_499_648)], skipped=["tokenization_quirky.py", "modeling_quirky.py"],
+        remote_code=True, warnings=["The repository ships custom Python code (tokenization_quirky.py). It is skipped unless you allow remote code."]),
+}
+# Fake server folders: path -> same fields as a repo (no gated / alts).
+FOLDERS: dict[str, dict] = {
+    "/models/hf/smollm2-135m": {**REPOS["huggingfacetb/smollm2-135m-instruct"], "alts": [], "skipped": ["README.md"]},
+    "/models/hf/broken-model": dict(arch="LlamaForCausalLM", model_type="llama", params=1_100_000_000, layers=22, ctx=2048,
+                                    files=[("config.json", 700), ("pytorch_model.bin", 2_200_000_000)], skipped=[], fmt="pytorch_bin"),
+}
+
+
+def _cluster() -> dict:
+    """Stable usable-VRAM numbers of the live pool (alive + enabled GPUs, 2 GB reserved each) for fit checks."""
+    mbs = [max(0, g["total_mb"] - 2048) for s in SERVERS.values() if s["alive"] for g in s["gpus"] if s["gpu_enabled"].get(g["device_id"], True)]
+    return {"largest_gpu_mb": max(mbs, default=0), "pool_mb": sum(mbs)}
+
+
+def _options(params: int, layers: int, cluster: dict) -> list[dict]:
+    out = []
+    for t, bpw, tier, via, note in QUANTS:
+        est = int(params * bpw / 8 * 1.01)
+        vram = int(est / 1048576 + layers * 8.4 + 500)  # file + KV cache at ctx 4096 + runtime overhead
+        out.append({"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "est_bytes": est, "est_vram_mb": vram,
+                    "fits_single_gpu": vram <= cluster["largest_gpu_mb"], "fits_pool": vram <= cluster["pool_mb"], "recommended": False})
+    return out
+
+
+def _recommend(opts: list[dict], cluster: dict) -> tuple[str, list[str]]:
+    """Best non-lossless type that leaves 30 % headroom on the largest GPU, else the best one that fits at all."""
+    big = cluster["largest_gpu_mb"]
+    lossy = [o for o in opts if o["type"] not in ("F16", "BF16")]
+    roomy = next((o for o in lossy if o["est_vram_mb"] <= big * 0.7), None)
+    if roomy:
+        return roomy["type"], [f"Best quality that leaves 30% of the largest GPU ({big // 1024} GB) free for context and batching",
+                               f"{roomy['type']} needs about {roomy['est_vram_mb'] / 1024:.1f} GB of VRAM",
+                               "F16/BF16 are skipped: twice the size of Q8_0 for no audible difference"]
+    single = next((o for o in lossy if o["fits_single_gpu"]), None)
+    if single:
+        return single["type"], [f"The largest type that still fits one GPU ({big // 1024} GB)", "Little headroom is left for a long context"]
+    pool = next((o for o in lossy if o["fits_pool"]), None)
+    if pool:
+        return pool["type"], ["No single GPU can hold it: this is the best type that fits the whole pool",
+                              "It will run split over several GPUs (slower, over the network)"]
+    return "Q2_K", ["Nothing fits the cluster at the moment; Q2_K is the smallest type available"]
+
+
+def _translate_folder(p: str) -> str:
+    return MODEL_ROOT + p[len(HOST_ROOT):] if p == HOST_ROOT or p.startswith(HOST_ROOT + "/") else p
+
+
+def _inspect(spec: dict) -> dict:
+    """Mock of POST /api/convert/inspect for a SourceSpec dict."""
+    repo, path = spec.get("hf_repo"), spec.get("path")
+    if (repo is None) == (path is None):
+        raise HTTPException(422, "give exactly one of hf_repo or path")
+    rev = spec.get("revision") or "main"
+    if repo is not None:
+        if repo.count("/") != 1 or not all(repo.split("/")):
+            raise HTTPException(400, f"{repo!r} is not a Hugging Face repository id: use owner/name")
+        d = REPOS.get(repo.lower())
+        if d is None:
+            raise HTTPException(404, f"Repository {repo} was not found on Hugging Face (or it is private: set HF_TOKEN)")
+        source = {"hf_repo": d["repo"], "revision": rev, "path": None}
+    else:
+        if not path.startswith("/"):
+            raise HTTPException(400, "path must be absolute")
+        p = _translate_folder(path).rstrip("/")
+        d = FOLDERS.get(p)
+        if d is None:
+            raise HTTPException(400, f"No such folder inside the coordinator: {p}. The coordinator runs in Docker and only sees its mounted "
+                                     f"folders: {MODEL_ROOT} (host folder {HOST_ROOT}). Try {MODEL_ROOT}/hf/smollm2-135m.")
+        source = {"hf_repo": None, "revision": "main", "path": p}
+    if INSPECT_DELAY[0]:
+        time.sleep(INSPECT_DELAY[0])
+    cl = _cluster()
+    opts = _options(d["params"], d["layers"], cl)
+    rec, reasons = _recommend(opts, cl)
+    next(o for o in opts if o["type"] == rec)["recommended"] = True
+    files = [{"name": n, "bytes": b} for n, b in d["files"]]
+    return {"source": source, "architecture": d["arch"], "model_type": d["model_type"], "supported": d.get("supported", True), "params": d["params"],
+            "n_layers": d["layers"], "context_length": d["ctx"], "weight_format": d.get("fmt", _ST), "prequantized": d.get("prequantized"),
+            "prequant_supported": d.get("prequant_supported") if d.get("prequantized") else None, "source_bytes": sum(f["bytes"] for f in files),
+            "files": files, "skipped": list(d.get("skipped", [])), "remote_code": bool(d.get("remote_code")), "gated": bool(d.get("gated")),
+            "base_model": d.get("base"), "gguf_alternatives": list(d.get("alts", [])), "options": opts, "recommended": rec,
+            "recommend_reasons": reasons, "warnings": list(d.get("warnings", []))}
+
+
+def _model_base(spec: dict) -> str:
+    src = (spec.get("hf_repo") or spec.get("path") or "model").rstrip("/")
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", src.split("/")[-1]).lstrip(".-") or "model"
+
+
+def _check_output_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.gguf", name) or re.search(r"-\d{5}-of-\d{5}\.gguf$", name):
+        raise HTTPException(400, f"{name!r} is not a valid output name: use letters, digits, dot, dash and underscore, ending in .gguf "
+                                 "(not a split part such as -00001-of-00002.gguf)")
+    return name
+
+
+def _normalize_request(body: dict) -> dict:
+    """Validate a ConvertRequest body like pydantic would (422) and fill the defaults."""
+    src = body.get("source")
+    if not isinstance(src, dict):
+        raise HTTPException(422, "source: field required")
+    quant = body.get("quant", "Q4_K_M")
+    if quant not in QUANT_BY_TYPE:
+        raise HTTPException(422, f"quant: must be one of {', '.join(QUANT_BY_TYPE)}")
+    adv = body.get("advanced") or {}
+    inter = adv.get("intermediate", "auto")
+    if inter not in ("auto", "f16", "bf16", "f32"):
+        raise HTTPException(422, "advanced.intermediate: must be one of auto, f16, bf16, f32")
+    threads = adv.get("threads", 0)
+    if not isinstance(threads, int) or isinstance(threads, bool) or threads < 0:
+        raise HTTPException(422, "advanced.threads: must be an integer >= 0")
+    for k in ("leave_output_tensor", "pure", "allow_remote_code", "validate_generation"):
+        if k in adv and not isinstance(adv[k], bool):
+            raise HTTPException(422, f"advanced.{k}: must be a boolean")
+    advanced = {"intermediate": inter, "output_tensor_type": adv.get("output_tensor_type") or None,
+                "token_embedding_type": adv.get("token_embedding_type") or None,
+                "leave_output_tensor": bool(adv.get("leave_output_tensor", False)), "pure": bool(adv.get("pure", False)),
+                "allow_remote_code": bool(adv.get("allow_remote_code", False)),
+                "validate_generation": bool(adv.get("validate_generation", True)), "threads": threads}
+    source = {"hf_repo": src.get("hf_repo"), "revision": src.get("revision") or "main", "path": src.get("path")}
+    return {"source": source, "quant": quant, "name": body.get("name") or None, "keep_source": bool(body.get("keep_source", False)), "advanced": advanced}
+
+
+def _validation(ok: bool, generation: bool) -> dict:
+    cases = [("Hello, world!", [9906, 11, 1917, 0]), ("The quick brown fox", [791, 4062, 14198, 39935]),
+             ("def f(x):\n    return x  # tab\there", [755, 282, 2120, 1680, 220, 220, 220, 471, 865, 220, 674, 1587, 3984, 1618]),
+             ("  leading spaces and 日本語", [220, 6522, 12908, 323, 220, 101, 102, 103])]
+    out = [{"text": t, "hf": ids, "gguf": list(ids), "match": True} for t, ids in cases]
+    warnings: list[str] = []
+    if not ok:
+        out[2]["gguf"] = out[2]["gguf"][:4] + [256] + out[2]["gguf"][4:]  # one extra token: whitespace handling differs
+        out[2]["match"] = False
+        warnings.append("The GGUF tokenizer split 1 of 4 test strings differently from the original; whitespace handling may differ.")
+    return {"header_ok": True, "architecture": "llama", "n_layers": 30, "vocab_size": 49152, "chat_template": True, "tokenizer_ok": ok,
+            "tokenizer_cases": out, "generation_ok": True if generation else None,
+            "generation_sample": "The capital of France is Paris. It is known for the Eiffel Tower and its museums." if generation else None,
+            "warnings": warnings, "errors": []}
+
+
+def _conv_fail_point(j: dict) -> tuple[str, float, str] | None:
+    """(stage, fraction at which it fails, error) for the jobs that are meant to fail, else None."""
+    s, adv = j["request"]["source"], j["request"]["advanced"]
+    repo = (s.get("hf_repo") or "").lower()
+    if repo == "meta-llama/llama-3.1-8b-instruct":
+        return "downloading", 0.0, ("Hugging Face answered 403 for meta-llama/Llama-3.1-8B-Instruct: the repository is gated or private. "
+                                    "Set HF_TOKEN on the coordinator to a token that has been granted access.")
+    if repo == "acme/quirky-3b" and not adv["allow_remote_code"]:
+        return "converting", 0.4, ("convert_hf_to_gguf.py exited with code 1: ValueError: Loading acme/Quirky-3B requires executing custom code "
+                                  "(tokenization_quirky.py). Enable 'Allow remote code' if you trust the repository.")
+    if s.get("path") == "/models/hf/broken-model":
+        return "converting", 0.6, ("convert_hf_to_gguf.py exited with code 1: KeyError: 'rope_theta' while reading config.json "
+                                  "(the folder looks truncated)")
+    return None
+
+
+def _conv_outcome(j: dict) -> str:
+    return "needs_review" if (j["request"]["source"].get("hf_repo") or "").lower() == "qwen/qwen2.5-7b-instruct" else "done"
+
+
+def _conv_logs(state: str, frac: float, j: dict) -> list[str]:
+    n = max(1, int(frac * 339))
+    if state == "downloading":
+        return [f"GET {f['name']}" for f in _inspect_files(j)[: 1 + int(frac * 3)]] + [f"{int(frac * 100):3d}% of {j['bytes_total']} bytes"]
+    if state == "converting":
+        return ["INFO:hf-to-gguf:Loading model: " + (j["request"]["source"].get("hf_repo") or j["request"]["source"].get("path")), "INFO:hf-to-gguf:gguf: loading model weight map",
+                f"INFO:hf-to-gguf:blk.{int(frac * 27)}.attn_q.weight, torch.bfloat16 --> F16, shape = {{3584, 3584}}",
+                f"Writing: {int(frac * 100):3d}%|{'#' * int(frac * 20):<20}| {int(frac * 15):d}.2G/15.2G"]
+    if state == "quantizing":
+        return ["main: build = 11342", f"[{n:4d}/ 339] blk.{int(frac * 27)}.ffn_up.weight - [3584, 18944, 1, 1], type = f16, converting to q4_K .. size = 129.50 MiB -> 36.51 MiB"]
+    return ["tokenizer check: 4 test strings", "generation check: 8 tokens on the CPU"]
+
+
+def _inspect_files(j: dict) -> list[dict]:
+    d = REPOS.get((j["request"]["source"].get("hf_repo") or "").lower()) or {"files": []}
+    return [{"name": n, "bytes": b} for n, b in d["files"]]
+
+
+def _conv_stages(j: dict) -> list[tuple[str, float]]:
+    out = [("queued", STAGE_SECONDS["queued"])]
+    if j["request"]["source"].get("hf_repo"):
+        out.append(("downloading", STAGE_SECONDS["downloading"]))
+    out.append(("converting", STAGE_SECONDS["converting"]))
+    if QUANT_BY_TYPE[j["request"]["quant"]][3] == "quantize":
+        out.append(("quantizing", STAGE_SECONDS["quantizing"]))
+    out.append(("validating", STAGE_SECONDS["validating"]))
+    return out
+
+
+def _conv_finish(j: dict, state: str, error: str | None = None) -> None:
+    j["state"], j["error"], j["finished_at"] = state, error, time.time()
+    if state == "failed":
+        return
+    j["stage_progress"] = 1.0
+    j["output_bytes"] = int(j["est_output_bytes"] * 0.995)
+    adv = j["request"]["advanced"]
+    j["validation"] = _validation(state == "done", adv["validate_generation"])
+    if state == "done":
+        _conv_to_library(j)
+
+
+def _conv_to_library(j: dict) -> None:
+    s = j["request"]["source"]
+    LIBRARY[j["output_name"]] = {"name": j["output_name"], "path": f"/data/models/{j['output_name']}", "source": "convert",
+                                 "hf_repo": s.get("hf_repo"), "hf_file": None, "bytes": j["output_bytes"], "downloaded": j["output_bytes"],
+                                 "status": "ready", "error": None, "created_at": time.time()}
+
+
+def _conv_advance(j: dict) -> None:
+    """Move an active job along its wall-clock timeline (queued, download, convert, quantize, validate, outcome)."""
+    if j["state"] not in ACTIVE_JOB_STATES:
+        return
+    el, t, fail = time.time() - j["_t0"], 0.0, _conv_fail_point(j)
+    for state, dur in _conv_stages(j):
+        frac = min(1.0, max(0.0, (el - t) / dur))
+        if fail and fail[0] == state and el >= t + dur * fail[1]:
+            j["state"], j["stage_progress"] = state, fail[1]
+            j["started_at"] = j["started_at"] or j["_t0"] + STAGE_SECONDS["queued"]
+            j["log_tail"] = _conv_logs(state, fail[1], j) + ["ERROR: " + fail[2].split(": ", 1)[-1]]
+            _conv_finish(j, "failed", fail[2])
+            return
+        if el < t + dur:
+            j["state"] = state
+            if state != "queued":
+                j["started_at"] = j["started_at"] or j["_t0"] + STAGE_SECONDS["queued"]
+            j["stage_progress"] = None if state == "queued" else round(frac, 3)
+            if state == "downloading":
+                j["bytes_total"], j["bytes_done"] = j["_src_bytes"], int(frac * j["_src_bytes"])
+            j["log_tail"] = [] if state == "queued" else _conv_logs(state, frac, j)
+            return
+        t += dur
+    if j["request"]["source"].get("hf_repo"):
+        j["bytes_done"] = j["bytes_total"] = j["_src_bytes"]
+    j["log_tail"] = ["validation finished"]
+    _conv_finish(j, _conv_outcome(j))
+
+
+def _conv_new(request: dict, name: str, insp: dict, created: float) -> dict:
+    opt = next(o for o in insp["options"] if o["type"] == request["quant"])
+    j = {"id": uuid.uuid4().hex[:12], "request": request, "state": "queued", "stage_progress": None, "bytes_done": 0, "bytes_total": None,
+         "output_name": name, "output_bytes": None, "est_output_bytes": opt["est_bytes"], "validation": None, "error": None, "log_tail": [],
+         "created_at": created, "started_at": None, "finished_at": None, "_t0": created, "_src_bytes": insp["source_bytes"]}
+    JOBS[j["id"]] = j
+    return j
+
+
+def _conv_json(j: dict) -> dict:
+    _conv_advance(j)
+    return _clean(j)
+
+
+def _conv_job(job_id: str) -> dict:
+    j = JOBS.get(job_id)
+    if j is None:
+        raise HTTPException(404, f"No conversion job {job_id}")
+    _conv_advance(j)
+    return j
+
+
+def seed_conversions() -> None:
+    """Three jobs of the demo: one finished (and in the library), one failed, one running that ends in needs_review."""
+    JOBS.clear()
+    CONVERT["problem"] = None
+    done_req = _normalize_request({"source": {"hf_repo": "HuggingFaceTB/SmolLM2-135M-Instruct"}, "quant": "Q6_K",
+                                   "name": "SmolLM2-135M-Instruct-Q6_K.gguf"})
+    j = _conv_new(done_req, "SmolLM2-135M-Instruct-Q6_K.gguf", _inspect(done_req["source"]), T0 - 3600)
+    j.update(started_at=T0 - 3598, bytes_done=j["_src_bytes"], bytes_total=j["_src_bytes"], state="done", stage_progress=1.0,
+             output_bytes=int(j["est_output_bytes"] * 0.995), finished_at=T0 - 3540, log_tail=["validation finished"],
+             validation=_validation(True, True))
+    LIBRARY[j["output_name"]] = {"name": j["output_name"], "path": f"/data/models/{j['output_name']}", "source": "convert",
+                                 "hf_repo": "HuggingFaceTB/SmolLM2-135M-Instruct", "hf_file": None, "bytes": j["output_bytes"],
+                                 "downloaded": j["output_bytes"], "status": "ready", "error": None, "created_at": T0 - 3540}
+    bad_req = _normalize_request({"source": {"hf_repo": "acme/Quirky-3B"}, "quant": "Q4_K_M", "name": "Quirky-3B-Q4_K_M.gguf"})
+    j = _conv_new(bad_req, "Quirky-3B-Q4_K_M.gguf", _inspect(bad_req["source"]), T0 - 1800)
+    fp = _conv_fail_point(j)
+    j.update(started_at=T0 - 1798, bytes_done=j["_src_bytes"], bytes_total=j["_src_bytes"], state="failed", stage_progress=fp[1], error=fp[2],
+             finished_at=T0 - 1780, log_tail=_conv_logs("converting", 0.4, j) + ["ERROR: " + fp[2].split(": ", 1)[-1]])
+    run_req = _normalize_request({"source": {"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}, "quant": "Q4_K_M", "name": "Qwen2.5-7B-Instruct-Q4_K_M.gguf"})
+    _conv_new(run_req, "Qwen2.5-7B-Instruct-Q4_K_M.gguf", _inspect(run_req["source"]), time.time())
+
+
+@app.get("/api/convert/options", dependencies=[api])
+def convert_options() -> dict:
+    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"], "cluster": _cluster(),
+            "quant_options": [{"type": t, "bpw": bpw, "tier": tier, "note": note, "via": via, "est_bytes": None, "est_vram_mb": None,
+                               "fits_single_gpu": None, "fits_pool": None, "recommended": False} for t, bpw, tier, via, note in QUANTS]}
+
+
+@app.post("/api/convert/inspect", dependencies=[api])
+def convert_inspect(body: dict) -> dict:
+    return _inspect(body)
+
+
+@app.post("/api/convert", dependencies=[api])
+def convert_start(body: dict) -> dict:
+    req = _normalize_request(body)
+    if CONVERT["problem"] is not None:
+        raise HTTPException(503, CONVERT["problem"])
+    insp = _inspect(req["source"])
+    if insp["supported"] is False:
+        raise HTTPException(400, f"Architecture {insp['architecture']} is not supported by the converter")
+    if insp["prequantized"] and insp["prequant_supported"] is False:
+        raise HTTPException(400, f"Quant method {insp['prequantized']} is not yet supported: convert the original model "
+                                 f"({insp['base_model'] or 'unquantized'}) instead")
+    if insp["weight_format"] == "none":
+        raise HTTPException(400, "No safetensors or PyTorch weights were found in the source")
+    name = _check_output_name(req["name"] or f"{_model_base(req['source'])}-{req['quant']}.gguf")
+    req["name"] = name
+    if name in LIBRARY or any(j["output_name"] == name and j["state"] not in ("done", "failed", "cancelled") for j in JOBS.values()):
+        raise HTTPException(409, f"{name} already exists in the library or is being produced by another job; pick another name")
+    return _conv_json(_conv_new(req, name, insp, time.time()))
+
+
+@app.get("/api/convert", dependencies=[api])
+def convert_list() -> list[dict]:
+    return [_conv_json(j) for j in sorted(JOBS.values(), key=lambda j: -j["created_at"])]
+
+
+@app.get("/api/convert/{job_id}", dependencies=[api])
+def convert_get(job_id: str) -> dict:
+    return _conv_json(_conv_job(job_id))
+
+
+@app.post("/api/convert/{job_id}/cancel", dependencies=[api])
+def convert_cancel(job_id: str) -> dict:
+    j = _conv_job(job_id)
+    if j["state"] not in ACTIVE_JOB_STATES:
+        raise HTTPException(409, f"Job {job_id} is {j['state']}, only an active job can be cancelled")
+    j["state"], j["finished_at"], j["error"] = "cancelled", time.time(), None
+    j["log_tail"] = j["log_tail"] + ["cancelled by the user"]
+    return _clean(j)
+
+
+@app.post("/api/convert/{job_id}/retry", dependencies=[api])
+def convert_retry(job_id: str) -> dict:
+    j = _conv_job(job_id)
+    if j["state"] not in ("failed", "cancelled"):
+        raise HTTPException(409, f"Job {job_id} is {j['state']}, only a failed or cancelled job can be retried")
+    if CONVERT["problem"] is not None:
+        raise HTTPException(503, CONVERT["problem"])
+    j.update(state="queued", stage_progress=None, bytes_done=0, bytes_total=None, output_bytes=None, validation=None, error=None, log_tail=[],
+             started_at=None, finished_at=None, _t0=time.time())
+    return _clean(j)
+
+
+@app.post("/api/convert/{job_id}/accept", dependencies=[api])
+def convert_accept(job_id: str) -> dict:
+    j = _conv_job(job_id)
+    if j["state"] != "needs_review":
+        raise HTTPException(409, f"Job {job_id} is {j['state']}, only a job that needs review can be accepted")
+    j["state"], j["finished_at"] = "done", time.time()
+    _conv_to_library(j)
+    add_event("info", "convert_done", f"{j['output_name']} accepted into the library", None, None)
+    return _clean(j)
+
+
+@app.delete("/api/convert/{job_id}", dependencies=[api])
+def convert_delete(job_id: str) -> dict:
+    j = _conv_job(job_id)
+    if j["state"] in ACTIVE_JOB_STATES:
+        raise HTTPException(409, f"Job {job_id} is {j['state']}: cancel it first")
+    del JOBS[job_id]  # the library file of a finished job is never touched
+    return {"ok": True}
+
+
+@app.post("/api/_mock/convert_available")
+def mock_convert_available(body: dict) -> dict:
+    """Dev helper: {"available": false} makes the toolchain "missing" (problem text, jobs refuse to start)."""
+    CONVERT["problem"] = None if body.get("available", True) else str(
+        body.get("problem") or "The conversion toolchain is not installed: llama-quantize was not found in /opt/llama/bin (set GPUPOOL_LLAMA_TOOLS_DIR).")
+    return {"available": CONVERT["problem"] is None, "problem": CONVERT["problem"]}
+
+
+
+seed_conversions()
+
+
 app.mount("/", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
 
 if __name__ == "__main__":
     import uvicorn
 
+    INSPECT_DELAY[0] = 0.5  # visible spinner; tests keep it at 0
     uvicorn.run(app, host="127.0.0.1", port=8090)

@@ -78,6 +78,12 @@ class CoordinatorConfig(BaseModel):
     # Optional webhook (Slack/Discord/generic JSON POST) for warning and error events, so an
     # operator hears about a dead server even with the UI closed.
     webhook_url: str = ""
+    # Hugging Face -> GGUF conversion. The toolchain is optional: without it conversion jobs are
+    # refused with an explanation, everything else works. The coordinator image ships it.
+    convert_dir: Path | None = None  # llama.cpp source subset: convert_hf_to_gguf.py, conversion/, gguf-py/
+    convert_python: str = "python3"  # interpreter with the converter's deps (torch, transformers, ...)
+    llama_tools_dir: Path | None = None  # llama-quantize, llama-tokenize, llama-simple (CPU build)
+    convert_threads: int = 0  # llama-quantize threads; 0 = all CPUs
 
 
 def load_toml(path: Path) -> dict:

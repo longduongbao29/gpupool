@@ -33,3 +33,63 @@ def test_ci_budget_is_smaller_than_the_model() -> None:
     budget = int(re.search(r"CI_BUDGET_MB:-(\d+)", compose).group(1))
     assert budget * 2**20 < ci_e2e.MODEL_BYTES, "the model must not fit one server"
     assert len(ci_e2e.MODEL_SHA256) == 64
+
+
+def test_ci_e2e_has_a_skippable_conversion_stage() -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import ci_e2e
+
+    src = (ROOT / "scripts" / "ci_e2e.py").read_text(encoding="utf-8")
+    assert "--skip-convert" in src and callable(ci_e2e.run_convert_checks)
+    assert ci_e2e.CONVERT_REPO == "HuggingFaceTB/SmolLM2-135M-Instruct"
+    assert ci_e2e.CONVERT_QUANT == "Q4_K_M"
+    # The stage talks to the API contract of the conversion job system.
+    for route in ("/api/convert/options", "/api/convert", "/api/library"):
+        assert route in src
+    assert {"failed", "needs_review", "cancelled"} <= set(ci_e2e.CONVERT_FAIL_STATES)
+
+
+def test_ci_coordinator_can_reach_huggingface() -> None:
+    doc = yaml.safe_load((ROOT / "docker-compose.ci.yml").read_text())
+    assert "HF_TOKEN" in doc["services"]["coordinator"]["environment"]
+
+
+def test_coordinator_dockerfile_selects_the_toolchain_with_a_build_arg() -> None:
+    text = (ROOT / "docker" / "coordinator.Dockerfile").read_text(encoding="utf-8")
+    assert "ARG WITH_CONVERT=1" in text
+    # Stage selection (not a conditional RUN), so BuildKit skips the toolchain when WITH_CONVERT=0.
+    assert "FROM final-${WITH_CONVERT}" in text
+    assert "AS final-0" in text and "AS final-1" in text
+    assert "TORCH_INDEX_URL" in text
+    for target in ("llama-quantize", "llama-tokenize", "llama-simple"):
+        assert target in text
+    # The three paths the coordinator's config reads must be set together, only in final-1.
+    tail = text.split("AS final-1", 1)[1]
+    for var in ("GPUPOOL_CONVERT_DIR=/opt/llama.cpp", "GPUPOOL_CONVERT_PYTHON=/opt/convert-venv/bin/python",
+                "GPUPOOL_LLAMA_TOOLS_DIR=/opt/llama/bin"):
+        assert var in tail
+        assert var not in text.split("AS final-1", 1)[0]
+
+
+def test_coordinator_compose_passes_convert_build_args() -> None:
+    doc = yaml.safe_load((ROOT / "docker-compose.coordinator.yml").read_text())
+    args = doc["services"]["coordinator"]["build"]["args"]
+    assert args["WITH_CONVERT"] == "${WITH_CONVERT:-1}"
+    assert args["TORCH_INDEX_URL"].startswith("${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu")
+
+
+def test_workflow_builds_and_smoke_tests_the_toolchain_image() -> None:
+    text = (ROOT / ".github" / "workflows" / "docker.yml").read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    jobs = doc["jobs"]
+
+    def build_args(job: str, dockerfile: str) -> str:
+        step = next(s for s in jobs[job]["steps"] if s.get("with", {}).get("file") == dockerfile)
+        return step["with"].get("build-args", "")
+
+    # Published image and the e2e image share the build args, otherwise the gha cache would miss.
+    assert "WITH_CONVERT=1" in build_args("coordinator", "docker/coordinator.Dockerfile")
+    assert "WITH_CONVERT=1" in build_args("e2e", "docker/coordinator.Dockerfile")
+    assert "--print-supported-models" in text and "llama-quantize" in text

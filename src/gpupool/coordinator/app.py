@@ -16,7 +16,12 @@ from pydantic import BaseModel, ValidationError
 
 from gpupool.common.auth import require_bearer
 from gpupool.common.config import CoordinatorConfig, detect_local_ip, load_or_create_secrets
+from gpupool.common.net import external_client
 from gpupool.common.models import ALL_REPLICA_STATES, ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
+from gpupool.converter import source as convert_source
+from gpupool.converter.jobs import ConvertManager
+from gpupool.converter.models import ClusterVram, InspectResult, SourceSpec
+from gpupool.converter.toolchain import Toolchain
 from gpupool.coordinator.agent_client import AgentClient, AgentError
 from gpupool.coordinator.autoscaler import Autoscaler
 from gpupool.coordinator.api import (
@@ -27,11 +32,12 @@ from gpupool.coordinator.api import (
     spec_or_404,
 )
 from gpupool.coordinator.events import Notifier
+from gpupool.coordinator.convert_api import make_convert_router
 from gpupool.coordinator.library import Library
 from gpupool.coordinator.library_api import make_files_router, make_library_router
 from gpupool.coordinator.poller import Poller
 from gpupool.coordinator.reconciler import Reconciler
-from gpupool.coordinator.store import ServerRecord, Store
+from gpupool.coordinator.store import ServerRecord, Store, gpu_key
 from gpupool.router.balancer import Balancer
 from gpupool.router.proxy import RouterMetrics, make_router, prom_label_escape
 from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
@@ -120,6 +126,8 @@ def create_app(
     start_background: bool = True,
     library: Library | None = None,
     autoscaler: Autoscaler | None = None,
+    convert_manager=None,
+    convert_inspect: Callable[[SourceSpec], Awaitable[InspectResult]] | None = None,
 ) -> FastAPI:
     store = store or Store(cfg.db_path)
     client = client or AgentClient(cfg.cluster_token)
@@ -140,11 +148,22 @@ def create_app(
     reconciler.poller = poller
     autoscaler.node_alive = reconciler.node_alive
 
+    # The conversion feature. A missing toolchain (convert_dir, tools) is not an error: the manager
+    # reports it through available() and refuses jobs. A broken converter package is a bug and
+    # must fail loudly, not silently disable the feature.
+    own_hf_http = external_client(timeout=httpx.Timeout(30.0, read=120.0), follow_redirects=True)
+    hf = convert_source.HfClient(own_hf_http, cfg.hf_token)
+    toolchain = Toolchain(cfg.convert_dir, cfg.convert_python, cfg.llama_tools_dir)
+    if convert_manager is None:
+        convert_manager = ConvertManager(cfg.db_path, cfg.models_dir, toolchain, library, hf,
+                                         threads=cfg.convert_threads)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         tasks = []
         if start_background:
             library.resume()  # restart HF downloads interrupted by a previous run
+            convert_manager.start()  # interrupted conversion jobs go back to the queue
             tasks = [asyncio.create_task(poller.run(), name="poller"),
                      asyncio.create_task(reconciler.run(), name="reconciler"),
                      asyncio.create_task(autoscaler.run(), name="autoscaler"),
@@ -157,6 +176,8 @@ def create_app(
             await asyncio.gather(*tasks, return_exceptions=True)
             await autoscaler.aclose()
             await reconciler.shutdown()
+            await convert_manager.shutdown()  # before the library: it may still be adding a file
+            await own_hf_http.aclose()
             await library.shutdown()
             await notifier.aclose()
             await client.aclose()
@@ -166,6 +187,7 @@ def create_app(
     app.state.store, app.state.reconciler, app.state.balancer = store, reconciler, balancer
     app.state.poller, app.state.library, app.state.notifier = poller, library, notifier
     app.state.autoscaler = autoscaler
+    app.state.convert = convert_manager
     cluster_auth = Depends(require_bearer(cfg.cluster_token))
     admin_auth = Depends(require_bearer(cfg.admin_key))
 
@@ -228,6 +250,31 @@ def create_app(
                                        balancer=balancer, library=library, cfg=cfg,
                                        admin_dep=admin_auth, notifier=notifier,
                                        autoscaler=autoscaler))
+
+    # ---- conversion
+    def cluster_vram() -> ClusterVram:
+        """Usable MB of the largest enabled CUDA GPU and of all of them, over live registered
+        servers. Same selection and per-device number (usable_mb) as /api/capacity."""
+        registered = {s.node_id for s in store.list_servers()}
+        flags = store.gpu_flags()
+        now = reconciler.clock()
+        usable: list[int] = []
+        for n in store.list_nodes():
+            if n.report.node_id not in registered or not reconciler.node_alive(n, now):
+                continue
+            for d in n.report.devices:
+                if d.kind == "cuda" and flags.get((n.report.node_id, gpu_key(d)), True):
+                    usable.append(d.usable_mb)
+        return ClusterVram(largest_gpu_mb=max(usable, default=0), pool_mb=sum(usable))
+
+    async def default_inspect(spec: SourceSpec) -> InspectResult:
+        return await convert_source.inspect_source(
+            spec, hf=hf, locate_dir=library.locate_dir, cluster=cluster_vram(),
+            supported_architectures=await toolchain.supported_architectures())
+
+    app.include_router(make_convert_router(
+        convert_manager, require_bearer(cfg.admin_key), cluster_vram,
+        convert_inspect or default_inspect))
 
     # ---- admin
     @app.post("/admin/models", dependencies=[admin_auth])

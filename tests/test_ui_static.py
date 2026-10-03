@@ -5,6 +5,7 @@ import importlib.util
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -434,3 +435,257 @@ def test_ui_has_kv_cache_and_speculative_controls():
         assert needle in html, needle
     # the request bodies of save, recommend and preview impact all carry the fields
     assert js.count("pb.body") >= 3
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Model conversion (Hugging Face / folder -> GGUF): mock contract + UI checks
+# ---------------------------------------------------------------------------------------------------------------
+def _fast_forward(mock, job_id: str, seconds: float = 100.0) -> None:
+    mock.JOBS[job_id]["_t0"] -= seconds  # the mock's jobs advance with wall-clock time
+
+
+def _at(mock, job_id: str, seconds: float) -> None:
+    mock.JOBS[job_id]["_t0"] = time.time() - seconds
+
+
+def _submit(client, repo: str, **extra):
+    body = {"source": {"hf_repo": repo}, **extra}
+    return client.post("/api/convert", json=body, headers=HEAD)
+
+
+def _library_names(client) -> set[str]:
+    return {i["name"] for i in client.get("/api/state", headers=HEAD).json()["library"]}
+
+
+def test_mock_convert_options_and_availability(client, mock):
+    from gpupool.converter.models import ClusterVram, QuantOption
+
+    o = client.get("/api/convert/options", headers=HEAD).json()
+    assert o["available"] is True and o["problem"] is None
+    ClusterVram.model_validate(o["cluster"])
+    assert o["cluster"]["largest_gpu_mb"] > 0 and o["cluster"]["pool_mb"] >= o["cluster"]["largest_gpu_mb"]
+    opts = [QuantOption.model_validate(x) for x in o["quant_options"]]
+    assert [x.type for x in opts][:3] == ["F16", "BF16", "Q8_0"] and len(opts) == 14
+    assert all(x.est_bytes is None and x.fits_pool is None for x in opts)
+    assert client.get("/api/convert/options").status_code == 401
+    r = client.post("/api/_mock/convert_available", json={"available": False}).json()
+    assert r["available"] is False and r["problem"]
+    o = client.get("/api/convert/options", headers=HEAD).json()
+    assert o["available"] is False and o["problem"] == r["problem"]
+    assert _submit(client, "HuggingFaceTB/SmolLM2-135M-Instruct").status_code == 503
+    # inspect still works without the toolchain
+    assert client.post("/api/convert/inspect", json={"hf_repo": "HuggingFaceTB/SmolLM2-135M-Instruct"}, headers=HEAD).status_code == 200
+    mock.reset()  # reset() restores the toolchain
+    assert client.get("/api/convert/options", headers=HEAD).json()["available"] is True
+
+
+def test_mock_convert_inspect_matches_the_real_model(client):
+    from gpupool.converter.models import InspectResult
+
+    def inspect(**src):
+        return client.post("/api/convert/inspect", json=src, headers=HEAD)
+
+    small = InspectResult.model_validate(inspect(hf_repo="HuggingFaceTB/SmolLM2-135M-Instruct").json())
+    assert small.supported and small.params == 134_515_008 and small.weight_format == "safetensors" and len(small.options) == 14
+    assert small.recommended in {o.type for o in small.options} and sum(o.recommended for o in small.options) == 1
+    assert small.recommend_reasons and small.gguf_alternatives and small.source.revision == "main"
+    big = InspectResult.model_validate(inspect(hf_repo="Qwen/Qwen2.5-72B-Instruct", revision="abc123").json())
+    assert big.source.revision == "abc123" and big.recommended != small.recommended  # the recommendation follows the model size
+    f16 = next(o for o in big.options if o.type == "F16")
+    assert f16.fits_single_gpu is False and f16.fits_pool is True  # "needs several GPUs"
+    assert next(o for o in big.options if o.type == "Q4_K_M").fits_single_gpu is True
+    assert all(o.est_bytes and o.est_vram_mb for o in big.options)
+    awq = InspectResult.model_validate(inspect(hf_repo="Qwen/Qwen2.5-7B-Instruct-AWQ").json())
+    assert awq.prequantized == "awq" and awq.prequant_supported is False and awq.base_model == "Qwen/Qwen2.5-7B-Instruct"
+    novel = InspectResult.model_validate(inspect(hf_repo="acme/NovelNet-7B").json())
+    assert novel.supported is False and novel.warnings
+    assert InspectResult.model_validate(inspect(hf_repo="meta-llama/Llama-3.1-8B-Instruct").json()).gated is True
+    assert InspectResult.model_validate(inspect(hf_repo="acme/Quirky-3B").json()).remote_code is True
+    folder = InspectResult.model_validate(inspect(path="/models/hf/smollm2-135m").json())
+    assert folder.source.path == "/models/hf/smollm2-135m" and folder.source.hf_repo is None
+    translated = InspectResult.model_validate(inspect(path="/srv/gguf/hf/smollm2-135m").json())
+    assert translated.source.path == "/models/hf/smollm2-135m"  # a host path is translated
+    assert inspect(hf_repo="nobody/nothing").status_code == 404
+    assert inspect(hf_repo="no-slash").status_code == 400
+    assert inspect(path="relative/dir").status_code == 400 and inspect(path="/nope").status_code == 400
+    assert inspect(hf_repo="a/b", path="/x").status_code == 422 and inspect().status_code == 422
+
+
+def test_mock_recommendation_follows_the_live_gpus(client, mock):
+    def rec():
+        return client.post("/api/convert/inspect", json={"hf_repo": "Qwen/Qwen2.5-72B-Instruct"}, headers=HEAD).json()["recommended"]
+
+    before = rec()
+    for g in mock.SERVERS["CTG-Server-1"]["gpus"]:  # take the four 80 GB cards out of the pool: only the 24 GB cards remain
+        mock.SERVERS["CTG-Server-1"]["gpu_enabled"][g["device_id"]] = False
+    assert rec() != before
+
+
+def test_mock_hf_files_empty_for_safetensors_repos(client):
+    assert client.get("/api/hf/files?repo=HuggingFaceTB/SmolLM2-135M-Instruct", headers=HEAD).json() == []
+    assert client.get("/api/hf/files?repo=Qwen/Qwen2.5-3B-Instruct-GGUF", headers=HEAD).json()  # other repos keep their files
+
+
+def test_mock_convert_seeded_jobs_match_the_real_model(client):
+    from gpupool.converter.models import ConvertJob
+
+    jobs = [ConvertJob.model_validate(j) for j in client.get("/api/convert", headers=HEAD).json()]
+    assert {j.state for j in jobs} == {"queued", "done", "failed"}  # newest first
+    assert jobs[0].created_at >= jobs[1].created_at >= jobs[2].created_at
+    done = next(j for j in jobs if j.state == "done")
+    assert done.validation.tokenizer_ok is True and done.validation.tokenizer_cases and done.output_bytes
+    assert done.output_name in _library_names(client)
+    failed = next(j for j in jobs if j.state == "failed")
+    assert failed.error and failed.log_tail
+    assert ConvertJob.model_validate(client.get(f"/api/convert/{done.id}", headers=HEAD).json()).id == done.id
+    assert client.get("/api/convert/nope", headers=HEAD).status_code == 404
+    assert client.get("/api/convert").status_code == 401
+
+
+def test_mock_convert_job_walks_to_done_and_enters_the_library(client, mock):
+    from gpupool.converter.models import ConvertJob
+
+    r = _submit(client, "HuggingFaceTB/SmolLM2-135M-Instruct", quant="Q4_K_M")
+    assert r.status_code == 200
+    job = ConvertJob.model_validate(r.json())
+    assert job.state == "queued" and job.output_name == "SmolLM2-135M-Instruct-Q4_K_M.gguf" and job.est_output_bytes
+    seen = set()
+    for t in (2.0, 5.0, 10.0, 14.0, 17.5):  # inside each stage
+        _at(mock, job.id, t)
+        cur = ConvertJob.model_validate(client.get(f"/api/convert/{job.id}", headers=HEAD).json())
+        seen.add(cur.state)
+        if cur.state == "downloading":
+            assert cur.bytes_total and 0 < cur.bytes_done < cur.bytes_total and 0 < cur.stage_progress < 1
+        if cur.state in ("converting", "quantizing", "validating"):
+            assert cur.log_tail and cur.stage_progress is not None
+    assert seen == {"downloading", "converting", "quantizing", "validating"}
+    _fast_forward(mock, job.id)
+    done = ConvertJob.model_validate(client.get(f"/api/convert/{job.id}", headers=HEAD).json())
+    assert done.state == "done" and done.output_bytes and done.validation.generation_ok is True and done.finished_at
+    lib = {i["name"]: i for i in client.get("/api/state", headers=HEAD).json()["library"]}
+    assert lib[done.output_name]["source"] == "convert" and lib[done.output_name]["status"] == "ready"
+    assert lib[done.output_name]["hf_repo"] == "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+
+def test_mock_convert_direct_types_skip_quantize_and_folders_skip_download(client, mock):
+    from gpupool.converter.models import ConvertJob
+
+    r = client.post("/api/convert", json={"source": {"path": "/models/hf/smollm2-135m"}, "quant": "Q8_0",
+                                          "advanced": {"validate_generation": False}}, headers=HEAD)
+    job = ConvertJob.model_validate(r.json())
+    states = set()
+    for t in (2.0, 5.0, 8.0):
+        _at(mock, job.id, t)
+        states.add(client.get(f"/api/convert/{job.id}", headers=HEAD).json()["state"])
+    assert states == {"converting", "validating"}  # no download, no quantize
+    _fast_forward(mock, job.id)
+    done = ConvertJob.model_validate(client.get(f"/api/convert/{job.id}", headers=HEAD).json())
+    assert done.state == "done" and done.validation.generation_ok is None and done.request.advanced.validate_generation is False
+
+
+def test_mock_convert_needs_review_then_accept(client, mock):
+    from gpupool.converter.models import ConvertJob
+
+    running = next(j for j in client.get("/api/convert", headers=HEAD).json() if j["state"] == "queued")
+    assert client.post(f"/api/convert/{running['id']}/accept", headers=HEAD).status_code == 409  # not reviewable yet
+    _fast_forward(mock, running["id"])
+    job = ConvertJob.model_validate(client.get(f"/api/convert/{running['id']}", headers=HEAD).json())
+    assert job.state == "needs_review" and job.validation.tokenizer_ok is False
+    bad = [c for c in job.validation.tokenizer_cases if not c.match]
+    assert len(bad) == 1 and bad[0].hf != bad[0].gguf
+    assert job.output_name not in _library_names(client)  # not in the library until accepted
+    acc = ConvertJob.model_validate(client.post(f"/api/convert/{job.id}/accept", headers=HEAD).json())
+    assert acc.state == "done" and acc.output_name in _library_names(client)
+    assert client.post(f"/api/convert/{acc.id}/accept", headers=HEAD).status_code == 409
+
+
+def test_mock_convert_failures_retry_and_remote_code(client, mock):
+    from gpupool.converter.models import ConvertJob
+
+    gated = ConvertJob.model_validate(_submit(client, "meta-llama/Llama-3.1-8B-Instruct", quant="Q4_K_M").json())
+    _fast_forward(mock, gated.id)
+    g = ConvertJob.model_validate(client.get(f"/api/convert/{gated.id}", headers=HEAD).json())
+    assert g.state == "failed" and "HF_TOKEN" in g.error and g.bytes_done == 0
+    quirky = ConvertJob.model_validate(_submit(client, "acme/Quirky-3B", quant="Q5_K_M").json())
+    _fast_forward(mock, quirky.id)
+    q = ConvertJob.model_validate(client.get(f"/api/convert/{quirky.id}", headers=HEAD).json())
+    assert q.state == "failed" and "custom code" in q.error and q.log_tail
+    assert client.post(f"/api/convert/{q.id}/cancel", headers=HEAD).status_code == 409  # only active jobs cancel
+    assert client.post(f"/api/convert/{q.id}/retry", headers=HEAD).json()["state"] == "queued"
+    ok = ConvertJob.model_validate(_submit(client, "acme/Quirky-3B", quant="Q6_K", advanced={"allow_remote_code": True}).json())
+    _fast_forward(mock, ok.id)
+    assert client.get(f"/api/convert/{ok.id}", headers=HEAD).json()["state"] == "done"
+    broken = client.post("/api/convert", json={"source": {"path": "/models/hf/broken-model"}, "quant": "Q4_0"}, headers=HEAD).json()
+    _fast_forward(mock, broken["id"])
+    assert "KeyError" in client.get(f"/api/convert/{broken['id']}", headers=HEAD).json()["error"]
+
+
+def test_mock_convert_cancel_retry_delete_rules(client, mock):
+    job = _submit(client, "HuggingFaceTB/SmolLM2-135M-Instruct", quant="Q6_K", name="mine.gguf").json()
+    assert client.post(f"/api/convert/{job['id']}/retry", headers=HEAD).status_code == 409  # active
+    assert client.post(f"/api/convert/{job['id']}/accept", headers=HEAD).status_code == 409
+    assert client.delete(f"/api/convert/{job['id']}", headers=HEAD).status_code == 409  # cancel first
+    c = client.post(f"/api/convert/{job['id']}/cancel", headers=HEAD).json()
+    assert c["state"] == "cancelled" and c["finished_at"]
+    _fast_forward(mock, job["id"])
+    assert client.get(f"/api/convert/{job['id']}", headers=HEAD).json()["state"] == "cancelled"  # stays cancelled
+    assert client.post(f"/api/convert/{job['id']}/cancel", headers=HEAD).status_code == 409
+    assert client.post(f"/api/convert/{job['id']}/retry", headers=HEAD).json()["state"] == "queued"
+    client.post(f"/api/convert/{job['id']}/cancel", headers=HEAD)
+    assert client.delete(f"/api/convert/{job['id']}", headers=HEAD).json() == {"ok": True}
+    assert client.get(f"/api/convert/{job['id']}", headers=HEAD).status_code == 404
+    assert client.delete(f"/api/convert/{job['id']}", headers=HEAD).status_code == 404
+    for action in ("cancel", "retry", "accept"):
+        assert client.post(f"/api/convert/nope/{action}", headers=HEAD).status_code == 404
+    # deleting a finished job leaves its library file alone
+    done = next(j for j in client.get("/api/convert", headers=HEAD).json() if j["state"] == "done")
+    assert client.delete(f"/api/convert/{done['id']}", headers=HEAD).status_code == 200
+    assert done["output_name"] in _library_names(client)
+
+
+def test_mock_convert_request_validation(client):
+    smol = "HuggingFaceTB/SmolLM2-135M-Instruct"
+    assert _submit(client, "Qwen/Qwen2.5-7B-Instruct-AWQ").status_code == 400  # pre-quantized, unsupported
+    assert _submit(client, "acme/NovelNet-7B").status_code == 400
+    assert _submit(client, "nobody/nothing").status_code == 404
+    assert _submit(client, smol, quant="Q1_X").status_code == 422
+    assert _submit(client, smol, advanced={"intermediate": "f64"}).status_code == 422
+    assert _submit(client, smol, advanced={"threads": -1}).status_code == 422
+    assert client.post("/api/convert", json={}, headers=HEAD).status_code == 422
+    for bad in ("../x.gguf", "x.bin", "a b.gguf", ".hidden.gguf", "m-00001-of-00002.gguf"):
+        assert _submit(client, smol, name=bad).status_code == 400, bad
+    assert _submit(client, smol, name="llama-8b.gguf").status_code == 409  # already in the library
+    assert _submit(client, smol, quant="Q3_K_M").status_code == 200
+    assert _submit(client, smol, quant="Q3_K_M").status_code == 409  # another live job already makes that file
+    default = _submit(client, "Qwen/Qwen2.5-72B-Instruct", quant="Q2_K").json()
+    assert default["output_name"] == "Qwen2.5-72B-Instruct-Q2_K.gguf" and default["request"]["keep_source"] is False
+
+
+def test_ui_has_conversion_flow():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    for needle in ("/api/convert/inspect", "/api/convert/options", '"/api/convert"', "keep_source", "allow_remote_code",
+                   "validate_generation", "output_tensor_type", "token_embedding_type", "leave_output_tensor", "intermediate",
+                   "prequant_supported", "stage_progress", "bytes_done",
+                   "log_tail", "tokenizer_cases", "fits_single_gpu", "fits_pool",
+                   "needs_review", "convPoll", "2000", "convAct", "convDeploy", "noGguf", "action"):
+        assert needle in js, needle
+    for needle in ("Convert a model", "Convert to GGUF", "Folder on the server", "Hugging Face repo", "Inspect", "Quantization",
+                   "Recommended", "Output file name", "Keep downloaded source", "Advanced", "Allow remote code",
+                   "runs them inside the coordinator", "Validate generation", "Threads", "Conversions", "Deploy this model",
+                   "Accept anyway", "Retry", "Tokenizer check", "Generation sample", "download instead", "Conversion is not available",
+                   "Show log", "Already quantized", "Gated repository", "recommend_reasons", "conv.res.base_model", "gguf_alternatives", "est_vram_mb", "conv.res.options", "generation_sample", "tokenizer_cases", "log_tail", "Ships its own Python code", "Start conversion"):
+        assert needle in html, needle
+    for text in ("Fits one GPU", "Needs several GPUs (slower, over network)", "Does not fit the cluster", "Lossless",
+                 "Near-lossless", "Balanced", "Small", "Tiny", "Download", "Convert", "Quantize", "Validate", "Converted"):
+        assert text in js, text
+    assert "srcLabel" in js and "srcLabel(it)" in html  # library rows of converted files
+    assert "conv.open = false" in html and 'aria-labelledby="conv-title"' in html and 'role="progressbar"' in html
+
+
+def test_ui_conversion_styles_use_tokens():
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    block = css[css.index("conversion (Hugging Face -> GGUF)"):css.index("reduced motion")]
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", block), "use design tokens, not literal colours"
+    for cls in (".stepper", ".cjob", ".qopt", ".logbox", ".vtbl tr.mism", ".bar.indet", ".adv", ".notice"):
+        assert cls in block, cls

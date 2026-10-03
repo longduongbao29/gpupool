@@ -157,7 +157,7 @@ class LibraryItem(BaseModel):
 
     name: str  # unique file name, e.g. "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     path: str  # absolute path on the coordinator machine
-    source: Literal["hf", "path"]
+    source: Literal["hf", "path", "convert"]  # convert: written by a conversion job, owned like hf
     hf_repo: str | None = None
     hf_file: str | None = None  # path inside the repo (may contain "/")
     bytes: int | None = None  # total size when known

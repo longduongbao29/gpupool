@@ -12,6 +12,10 @@ services:
         # Where ghcr.io is blocked: a registry mirror, or UV_FROM_PYPI=1 to pip install uv.
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.10}
         UV_FROM_PYPI: ${UV_FROM_PYPI:-}
+        # 1 = ship the HF -> GGUF conversion toolchain (adds ~2 GB), 0 = lean image.
+        WITH_CONVERT: ${WITH_CONVERT:-1}
+        # PyTorch CPU wheel index; set a mirror where download.pytorch.org is blocked.
+        TORCH_INDEX_URL: ${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         http_proxy: ${http_proxy:-}
         https_proxy: ${https_proxy:-}
         no_proxy: ${no_proxy:-}

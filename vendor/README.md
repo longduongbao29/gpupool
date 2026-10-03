@@ -8,7 +8,7 @@ of MB): this folder is only a drop-off for the build context. `.dockerignore` do
 the Dockerfiles bind-mount it read-only (BuildKit, the default since Docker 23), so nothing from here
 ends up in an image layer.
 
-## 1. llama.cpp source (agent image)
+## 1. llama.cpp source (agent image and coordinator image)
 
 Download the GitHub tag archive for the pinned tag (`LLAMA_CPP_REF`, default `b11342`) on any machine
 that can reach GitHub, and save it under exactly this name:
@@ -26,6 +26,14 @@ llama.cpp's CMake derives its build number from git, which a tarball does not ha
 passes `-DLLAMA_BUILD_NUMBER=11342` (the tag without `b`) and `-DLLAMA_BUILD_COMMIT=<short sha>` (read
 from the commit id GitHub stores in the tarball header). `llama-server --version` then reports
 `build 11342`, which the agent shows as `llama_version`.
+
+The coordinator image uses the same tarball when it is built with `WITH_CONVERT=1` (the default): it
+compiles `llama-quantize`, `llama-tokenize` and `llama-simple` (CPU only) and ships `convert_hf_to_gguf.py`
+for the Hugging Face -> GGUF conversion. Same lookup order (tarball, `git clone`, `LLAMA_CPP_URL`). The
+conversion also installs CPU-only PyTorch from `https://download.pytorch.org/whl/cpu`; behind a mirror pass
+`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu` (PyPI packages follow the usual
+`PIP_INDEX_URL` / `UV_INDEX_URL` / proxy settings). `--build-arg WITH_CONVERT=0` builds the lean coordinator
+without any of this.
 
 During the build llama.cpp also tries to download its web UI from Hugging Face (gpupool does not use
 it). If that fails it only prints a warning; `--build-arg LLAMA_USE_PREBUILT_UI=OFF` skips the attempt.
@@ -72,7 +80,7 @@ Dành cho server chặn git / GitHub. Mọi thứ ở đây đều tuỳ chọn:
 để đặt file vào build context. `.dockerignore` không loại trừ nó và Dockerfile bind-mount nó ở chế độ chỉ
 đọc (BuildKit, mặc định từ Docker 23), nên không có gì ở đây lọt vào layer của image.
 
-## 1. Mã nguồn llama.cpp (image agent)
+## 1. Mã nguồn llama.cpp (image agent và image coordinator)
 
 Trên một máy ra được GitHub, tải bản nén của tag đã ghim (`LLAMA_CPP_REF`, mặc định `b11342`) và lưu đúng tên:
 
@@ -89,6 +97,13 @@ CMake của llama.cpp lấy số build từ git, mà tarball không có git, nê
 `-DLLAMA_BUILD_NUMBER=11342` (tên tag bỏ chữ `b`) và `-DLLAMA_BUILD_COMMIT=<sha ngắn>` (đọc từ commit id
 GitHub ghi trong header của tarball). `llama-server --version` sẽ báo `build 11342`, agent hiển thị đó là
 `llama_version`.
+
+Image coordinator dùng chính tarball này khi build với `WITH_CONVERT=1` (mặc định): nó biên dịch
+`llama-quantize`, `llama-tokenize`, `llama-simple` (chỉ CPU) và kèm `convert_hf_to_gguf.py` để chuyển đổi
+Hugging Face -> GGUF. Thứ tự tìm nguồn giống nhau (tarball, `git clone`, `LLAMA_CPP_URL`). Việc chuyển đổi còn
+cài PyTorch bản CPU từ `https://download.pytorch.org/whl/cpu`; sau mirror thì truyền
+`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu` (gói PyPI theo cấu hình `PIP_INDEX_URL` /
+`UV_INDEX_URL` / proxy như thường lệ). `--build-arg WITH_CONVERT=0` build coordinator gọn nhẹ, không có phần này.
 
 Khi build, llama.cpp còn thử tải web UI của nó từ Hugging Face (gpupool không dùng). Tải lỗi chỉ in cảnh báo;
 `--build-arg LLAMA_USE_PREBUILT_UI=OFF` bỏ qua bước thử này.

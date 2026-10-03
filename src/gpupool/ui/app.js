@@ -93,6 +93,24 @@ function emptyBrowse() {
   return { loading: false, loaded: false, err: "", roots: [], files: [], truncated: false };
 }
 
+// Conversion: stage order of a job and how each job state maps onto it.
+var CONV_STAGES = [["download", "Download"], ["convert", "Convert"], ["quantize", "Quantize"], ["validate", "Validate"]];
+var CONV_STATE_STAGE = { downloading: 0, converting: 1, quantizing: 2, validating: 3 };
+var CONV_ACTIVE = ["queued", "downloading", "converting", "quantizing", "validating"];
+var CONV_TIER = {
+  lossless: ["Lossless", "accent"], near_lossless: ["Near-lossless", "green"], balanced: ["Balanced", "blue"],
+  small: ["Small", "amber"], tiny: ["Tiny", ""]
+};
+
+// State of the "Convert a model" modal.
+function emptyConv() {
+  return {
+    open: false, tab: "hf", repo: "", revision: "", path: "", inspecting: false, err: "", res: null, quant: "Q4_K_M",
+    name: "", nameEdited: false, keepSource: false, advOpen: false, busy: false,
+    adv: { intermediate: "auto", output_tensor_type: "", token_embedding_type: "", leave_output_tensor: false, pure: false, allow_remote_code: false, validate_generation: true, threads: 0 }
+  };
+}
+
 function app() {
   return {
     // ----- session -----
@@ -131,7 +149,18 @@ function app() {
     addSrv: { open: false, url: "", name: "gpu-node-1", busy: false },
     delSrv: null, // server object pending delete confirmation
     // add model modal
-    addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", browse: emptyBrowse() },
+    addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", noGguf: false, browse: emptyBrowse() },
+    // conversion (Hugging Face -> GGUF)
+    conv: emptyConv(),
+    convOpts: { loaded: false, available: true, problem: null, quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } },
+    convJobs: [],
+    convErr: "",
+    convSeen: null, // job id -> last seen state (null until the first poll: the backlog never toasts)
+    convStage: {}, // job id -> last active stage index seen, to show where a failed job stopped
+    convUi: {}, // job id -> { log, val } expanded panels
+    convBusy: {}, // job id -> an action is in flight
+    convPollAt: 0,
+    convPolling: false,
     // deploy (new / edit) modal
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
@@ -153,6 +182,7 @@ function app() {
       var self = this;
       setInterval(function () { self.nowTs = Date.now() / 1000; }, 5000);
       this.timer = setInterval(function () { if (!document.hidden && self.authed) self.refresh(); }, 2000);
+      setInterval(function () { self.convTick(); }, 1000);
       document.addEventListener("visibilitychange", function () { if (!document.hidden && self.authed) self.refresh(); });
     },
 
@@ -510,7 +540,7 @@ function app() {
 
     // ================= library =================
     openAddModel: function () {
-      this.addMdl = { open: true, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", browse: emptyBrowse() };
+      this.addMdl = { open: true, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", noGguf: false, browse: emptyBrowse() };
     },
     // Files the coordinator can see under its model folders (inside Docker: only the mounted ones).
     loadBrowse: async function (force) {
@@ -546,10 +576,11 @@ function app() {
       this.addMdl.listing = true;
       this.addMdl.files = [];
       this.addMdl.file = "";
+      this.addMdl.noGguf = false;
       try {
         var files = await this.api("GET", "/api/hf/files?repo=" + encodeURIComponent(repo).replace(/%2F/g, "/"));
         this.addMdl.files = files || [];
-        if (!this.addMdl.files.length) this.toast("No .gguf files in that repository", "error");
+        if (!this.addMdl.files.length) { this.addMdl.noGguf = true; this.toast("No .gguf files in that repository", "error"); }
         else this.addMdl.file = this.addMdl.files[0].file;
       } catch (e) { this.fail(e); }
       this.addMdl.listing = false;
@@ -583,10 +614,309 @@ function app() {
         await this.refresh();
       } catch (e) { this.fail(e); }
     },
+    srcLabel: function (it) { return it.source === "hf" ? "Hugging Face" : (it.source === "convert" ? "Converted" : "Path"); },
+    srcDetail: function (it) { return it.source === "path" ? it.path : (it.hf_repo || it.path); },
     libPct: function (it) {
       return it.bytes ? Math.min(100, Math.round((it.downloaded || 0) * 100 / it.bytes)) : 0;
     },
     libStatusClass: function (it) { return it.status === "ready" ? "green" : (it.status === "failed" ? "red" : "amber"); },
+
+    // ================= conversion: Hugging Face / folder -> GGUF =================
+    convActive: function () {
+      return this.convJobs.some(function (j) { return CONV_ACTIVE.indexOf(j.state) >= 0; });
+    },
+    // One timer for everything: jobs are polled every 2 s while one is active, every 10 s on the Models page, else not at all.
+    convTick: function () {
+      if (!this.authed || document.hidden) return;
+      if (this.view === "models" && !this.convOpts.loaded && !this.convOptsBusy) {
+        this.convOptsBusy = true;
+        var self = this;
+        this.convLoadOptions().then(function () { self.convOptsBusy = false; });
+      }
+      var every = this.convActive() ? 2000 : (this.view === "models" ? 10000 : 0);
+      if (this.convPollAt === 0 || (every && Date.now() - this.convPollAt >= every)) this.convPoll();
+    },
+    convPoll: async function () {
+      if (this.convPolling || !this.authed) return;
+      this.convPolling = true;
+      this.convPollAt = Date.now();
+      try {
+        var jobs = await this.api("GET", "/api/convert");
+        this.convApply(Array.isArray(jobs) ? jobs : []);
+        this.convErr = "";
+      } catch (e) {
+        if (e.status === 404) this.convErr = "This coordinator does not support model conversion.";
+        else if (e.status !== 401) this.convErr = e.message;
+      }
+      this.convPolling = false;
+    },
+    // Store the polled jobs; toast the transitions seen since the previous poll.
+    convApply: function (jobs) {
+      var seen = this.convSeen, next = {}, self = this, libDirty = false;
+      jobs.forEach(function (j) {
+        next[j.id] = j.state;
+        if (CONV_STATE_STAGE[j.state] !== undefined) self.convStage[j.id] = CONV_STATE_STAGE[j.state];
+        if (seen === null || seen[j.id] === undefined || seen[j.id] === j.state) return;
+        if (j.state === "done") { self.toast("Converted " + j.output_name + ": it is in the library now", "ok"); libDirty = true; }
+        else if (j.state === "needs_review") self.toast(j.output_name + " converted but needs your review", "warning", false, 9000);
+        else if (j.state === "failed") self.toast("Conversion of " + j.output_name + " failed", "error");
+      });
+      this.convSeen = next;
+      this.convJobs = jobs;
+      if (libDirty) this.refresh();
+    },
+    convLoadOptions: async function () {
+      try {
+        var o = await this.api("GET", "/api/convert/options");
+        this.convOpts = { loaded: true, available: !!o.available, problem: o.problem || null,
+          quant_options: o.quant_options || [], cluster: o.cluster || { largest_gpu_mb: 0, pool_mb: 0 } };
+      } catch (e) {
+        if (e.status === 404) this.convOpts = { loaded: true, available: false, problem: "This coordinator does not support model conversion.", quant_options: [], cluster: { largest_gpu_mb: 0, pool_mb: 0 } };
+        else { this.convOpts.loaded = true; this.fail(e); }
+      }
+    },
+    // prefill: { repo } or { path }. The inspection starts at once.
+    openConvert: function (prefill) {
+      var c = emptyConv();
+      c.open = true;
+      if (prefill && prefill.repo) { c.tab = "hf"; c.repo = prefill.repo; }
+      else if (prefill && prefill.path) { c.tab = "path"; c.path = prefill.path; }
+      this.conv = c;
+      this.convLoadOptions();
+      if (prefill && (prefill.repo || prefill.path)) this.convInspect();
+    },
+    convertFromAdd: function () {
+      var repo = this.addMdl.repo.trim();
+      this.addMdl.open = false;
+      this.openConvert({ repo: repo });
+    },
+    // Hand a ready-made GGUF repo from the inspection over to the normal "Add model" flow.
+    convUseGguf: function (repo) {
+      this.conv.open = false;
+      this.openAddModel();
+      this.addMdl.repo = repo;
+      this.listHf();
+    },
+    convUseBase: function (repo) {
+      this.conv.tab = "hf";
+      this.conv.repo = repo;
+      this.conv.revision = "";
+      this.convInspect();
+    },
+    convSetTab: function (t) { this.conv.tab = t; this.conv.err = ""; this.conv.res = null; },
+    convSpec: function () {
+      var c = this.conv;
+      if (c.tab === "path") return c.path.trim() ? { path: c.path.trim() } : null;
+      var repo = c.repo.trim().replace(/^https?:\/\/huggingface\.co\//, "").replace(/\/+$/, "");
+      if (!repo) return null;
+      return { hf_repo: repo, revision: c.revision.trim() || "main" };
+    },
+    convInspect: async function () {
+      var spec = this.convSpec(), c = this.conv;
+      if (!spec) return;
+      c.inspecting = true;
+      c.err = "";
+      c.res = null;
+      try {
+        var r = await this.api("POST", "/api/convert/inspect", spec);
+        c.res = r;
+        c.quant = r.recommended || "Q4_K_M";
+        c.nameEdited = false;
+        c.name = this.convDefaultName();
+        c.advOpen = false;
+        c.adv.allow_remote_code = false;
+      } catch (e) {
+        if (e.status !== 401) c.err = e.message || String(e);
+      }
+      c.inspecting = false;
+    },
+    // Same rule as the backend default "<model>-<QUANT>.gguf".
+    convDefaultName: function () {
+      var c = this.conv, src = c.tab === "path" ? c.path.trim().replace(/\/+$/, "") : c.repo.trim().replace(/\/+$/, "");
+      var base = src.split("/").pop().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "") || "model";
+      return base + "-" + c.quant + ".gguf";
+    },
+    convPick: function (t) {
+      this.conv.quant = t;
+      if (!this.conv.nameEdited) this.conv.name = this.convDefaultName();
+    },
+    convNameInput: function () {
+      this.conv.nameEdited = this.conv.name.trim() !== "" && this.conv.name !== this.convDefaultName();
+    },
+    convNameOk: function () { return /^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$/i.test(this.conv.name.trim()); },
+    convOption: function () {
+      var c = this.conv;
+      return c.res ? (c.res.options || []).find(function (o) { return o.type === c.quant; }) || null : null;
+    },
+    convViaConvert: function () { var o = this.convOption(); return !!o && o.via === "convert"; },
+    // Can this source be converted at all (the picker is hidden otherwise)?
+    convertible: function () {
+      var r = this.conv.res;
+      if (!r) return false;
+      if (r.supported === false) return false;
+      if (r.prequantized && r.prequant_supported === false) return false;
+      return r.weight_format !== "none";
+    },
+    convBlocker: function () {
+      var r = this.conv.res;
+      if (!r) return "";
+      if (r.supported === false) return "The converter does not support the architecture " + (r.architecture || "of this model") + ", so it cannot be converted.";
+      if (r.prequantized && r.prequant_supported === false) return "This model is already quantized with " + r.prequantized.toUpperCase() + ", a format the converter cannot read back. Convert the original (unquantized) model instead.";
+      if (r.weight_format === "none") return "No safetensors or PyTorch weight files were found, so there is nothing to convert.";
+      return "";
+    },
+    convStartBlock: function () {
+      var c = this.conv;
+      if (!this.convOpts.available) return "Conversion is not available on this coordinator";
+      if (!c.res || !this.convertible()) return "Inspect a convertible model first";
+      if (!this.convNameOk()) return "The output name must end in .gguf and use only letters, digits, dot, dash and underscore";
+      if (c.busy) return "Starting...";
+      return "";
+    },
+    convBody: function () {
+      var c = this.conv, a = c.adv, quantFlags = !this.convViaConvert();
+      var th = parseInt(a.threads, 10);
+      return {
+        source: this.convSpec(), quant: c.quant, name: c.name.trim(), keep_source: !!c.keepSource && c.tab === "hf",
+        advanced: {
+          intermediate: a.intermediate,
+          output_tensor_type: quantFlags && a.output_tensor_type ? a.output_tensor_type : null,
+          token_embedding_type: quantFlags && a.token_embedding_type ? a.token_embedding_type : null,
+          leave_output_tensor: quantFlags && !!a.leave_output_tensor, pure: quantFlags && !!a.pure,
+          allow_remote_code: !!a.allow_remote_code, validate_generation: !!a.validate_generation,
+          threads: isNaN(th) || th < 0 ? 0 : th
+        }
+      };
+    },
+    convStart: async function () {
+      var c = this.conv;
+      if (this.convStartBlock()) return;
+      c.busy = true;
+      c.err = "";
+      try {
+        var j = await this.api("POST", "/api/convert", this.convBody());
+        this.toast("Conversion started: " + ((j && j.output_name) || c.name), "ok");
+        c.open = false;
+        this.go("models");
+        await this.convPoll();
+      } catch (e) {
+        if (e.status !== 401) c.err = e.message || String(e);
+      }
+      c.busy = false;
+    },
+    // ----- option display -----
+    tierLabel: function (t) { return (CONV_TIER[t] || [String(t), ""])[0]; },
+    tierClass: function (t) { return (CONV_TIER[t] || ["", ""])[1]; },
+    isRecommended: function (o) { return !!this.conv.res && (o.recommended || o.type === this.conv.res.recommended); },
+    // "fits one GPU" / "needs several GPUs" / "does not fit the cluster", or null when unknown.
+    fitBadge: function (o) {
+      if (o.fits_single_gpu === true) return { cls: "green", text: "Fits one GPU" };
+      if (o.fits_pool === true) return { cls: "amber", text: "Needs several GPUs (slower, over network)" };
+      if (o.fits_pool === false) return { cls: "red", text: "Does not fit the cluster" };
+      return null;
+    },
+    humanParams: function (n) {
+      if (n == null) return this.dash;
+      if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+      if (n >= 1e6) return Math.round(n / 1e6) + "M";
+      return String(n);
+    },
+    weightLabel: function (f) { return { safetensors: "safetensors", pytorch_bin: "PyTorch .bin", none: "none found" }[f] || this.dash; },
+    hfUrl: function (repo) { return "https://huggingface.co/" + repo; },
+    // ----- jobs -----
+    convSource: function (j) {
+      var s = (j.request && j.request.source) || {};
+      return s.hf_repo ? s.hf_repo + (s.revision && s.revision !== "main" ? "@" + s.revision : "") : (s.path || "");
+    },
+    convStateClass: function (j) {
+      return { queued: "", downloading: "amber", converting: "amber", quantizing: "amber", validating: "amber", needs_review: "amber", done: "green", failed: "red", cancelled: "" }[j.state] || "";
+    },
+    convStateText: function (j) { return String(j.state).replace(/_/g, " "); },
+    convIsActive: function (j) { return CONV_ACTIVE.indexOf(j.state) >= 0; },
+    convIsRunning: function (j) { return CONV_STATE_STAGE[j.state] !== undefined; },
+    // Index of the stage a failed / cancelled job stopped in: remembered from polling, else guessed from its data.
+    convStoppedAt: function (j) {
+      if (this.convStage[j.id] !== undefined) return this.convStage[j.id];
+      var hf = !!(j.request && j.request.source && j.request.source.hf_repo);
+      if (hf && (j.bytes_total == null || j.bytes_done < j.bytes_total)) return 0;
+      if (j.validation) return 3;
+      if ((j.log_tail || []).some(function (l) { return /^\[\s*\d+\/\s*\d+\]|llama-quantize|quantiz/i.test(l); })) return 2;
+      return 1; // downloaded (or a local folder) and not yet validated: most likely it stopped while converting
+    },
+    // Four steps with a status class each: done / active / failed / skipped / todo.
+    convStages: function (j) {
+      var hf = !!(j.request && j.request.source && j.request.source.hf_repo), cur;
+      if (j.state === "done" || j.state === "needs_review") cur = 4;
+      else if (CONV_STATE_STAGE[j.state] !== undefined) cur = CONV_STATE_STAGE[j.state];
+      else if (j.state === "queued") cur = -1;
+      else cur = this.convStoppedAt(j);
+      var stopped = j.state === "failed" || j.state === "cancelled";
+      return CONV_STAGES.map(function (st, i) {
+        var cls = "todo";
+        if (i === 0 && !hf) cls = "skipped";
+        else if (stopped && i === cur) cls = j.state === "failed" ? "failed" : "todo";
+        else if (i < cur) cls = "done";
+        else if (i === cur && !stopped) cls = "active";
+        return { key: st[0], label: st[1], cls: cls };
+      });
+    },
+    // 0..100, or null when the stage has no measurable progress (shown as a moving bar).
+    convPct: function (j) {
+      if (j.state === "done" || j.state === "needs_review") return 100;
+      if (j.state === "downloading") return j.bytes_total ? Math.min(100, j.bytes_done * 100 / j.bytes_total) : null;
+      return j.stage_progress == null ? null : Math.max(0, Math.min(100, j.stage_progress * 100));
+    },
+    convProgressText: function (j) {
+      var p = this.convPct(j);
+      if (j.state === "downloading") return this.bytes(j.bytes_done) + (j.bytes_total ? " / " + this.bytes(j.bytes_total) : "") + (p == null ? "" : " (" + Math.round(p) + "%)");
+      return p == null ? "Working..." : Math.round(p) + "%";
+    },
+    convUiOf: function (j) { return this.convUi[j.id] || { log: false, val: null }; },
+    convToggle: function (j, what) {
+      var u = this.convUi[j.id] || { log: false, val: null };
+      if (what === "log") u.log = !u.log;
+      else u.val = !this.convValOpen(j);
+      this.convUi[j.id] = u;
+    },
+    convValOpen: function (j) { var v = this.convUiOf(j).val; return v === null ? j.state === "needs_review" : v; },
+    // Check chips of a validation result: ok / bad / skip.
+    convChecks: function (v) {
+      var tri = function (x, ok, bad, skip) { return x === true ? { s: "ok", t: ok } : (x === false ? { s: "bad", t: bad } : { s: "skip", t: skip }); };
+      var c = tri(v.chat_template, "Chat template present", "No chat template", "Chat template unknown");
+      if (v.chat_template === false) c.s = "skip"; // a missing template is informational, not a failure
+      return [
+        tri(v.header_ok, "GGUF header valid", "GGUF header invalid", "GGUF header not checked"),
+        tri(v.tokenizer_ok, "Tokenizer matches the original", "Tokenizer differs from the original", "Tokenizer comparison could not run"),
+        tri(v.generation_ok, "Generated text", "Generation failed", "Generation skipped"),
+        c
+      ].map(function (x, i) { return { key: i, s: x.s, t: x.t }; });
+    },
+    convCheckClass: function (s) { return s === "ok" ? "green" : (s === "bad" ? "red" : ""); },
+    convMismatches: function (v) { return (v.tokenizer_cases || []).filter(function (x) { return !x.match; }).length; },
+    idsText: function (ids) {
+      var a = ids || [];
+      return "[" + a.slice(0, 24).join(", ") + (a.length > 24 ? ", ... +" + (a.length - 24) : "") + "]";
+    },
+    quoteText: function (s) { return JSON.stringify(String(s == null ? "" : s)); },
+    convAct: async function (j, action) {
+      var mism = j.validation ? this.convMismatches(j.validation) : 0;
+      if (action === "accept" && !confirm("Accept " + j.output_name + " anyway?\n\nThe automatic checks found a problem" +
+        (mism ? " (the tokenizer produced different token ids than the original model on " + mism + " test string(s))" : "") +
+        ". The model will be added to the library, but it may answer with garbled or wrong text. Only accept it if you plan to check it yourself.")) return;
+      if (action === "delete" && !confirm("Delete this conversion job?\n\nIts temporary files are removed. A model already in the library is kept.")) return;
+      if (action === "cancel" && !confirm("Cancel the conversion of " + j.output_name + "?")) return;
+      this.convBusy[j.id] = true;
+      try {
+        if (action === "delete") await this.api("DELETE", "/api/convert/" + encodeURIComponent(j.id));
+        else await this.api("POST", "/api/convert/" + encodeURIComponent(j.id) + "/" + action);
+        if (action === "accept") this.toast(j.output_name + " added to the library", "ok");
+        await this.convPoll();
+        if (action === "accept") await this.refresh();
+      } catch (e) { this.fail(e); }
+      delete this.convBusy[j.id];
+    },
+    convDeploy: function (j) { this.openForm(null, j.output_name); },
+    convInLibrary: function (j) { return this.readyLibrary().some(function (l) { return l.name === j.output_name; }); },
 
     // ================= deployments =================
     endpoint: function () {
@@ -936,7 +1266,7 @@ function app() {
         "resp = client.chat.completions.create(\n    model=\"" + name + "\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(resp.choices[0].message.content)";
     },
 
-    go: function (v) { this.view = v; try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
+    go: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
     title: function () {
       return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers", "Manage servers and the GPUs in the pool"],
         gpus: ["GPUs", "Every GPU across all servers"], events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"], settings: ["Settings", "Connection details and snippets"] }[this.view];
