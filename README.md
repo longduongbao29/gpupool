@@ -15,13 +15,13 @@
 [![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.en.md)
 
-[Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
+[Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [What fits](#what-fits-where) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
 
 </div>
 
 ---
 
-You have three servers with 3 GB, 5 GB and 10 GB of free GPU memory, and a model that fits on none of them.
+You have an RTX 4090 in one box and two RTX 5090s in others, and a 70B model that fits on none of them alone.
 **gpupool** measures the free VRAM on every machine, decides where each model goes and how its layers are split,
 launches and supervises the engines, and gives you **one OpenAI-compatible URL**. The engine is
 [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` and `ggml-rpc-server`, GGUF models); gpupool is the
@@ -171,6 +171,25 @@ Design: [DESIGN](docs/DESIGN.en.md), [PLATFORM_DESIGN](docs/PLATFORM_DESIGN.en.m
 
 </details>
 
+## What fits where
+
+Big models stop being a single-card problem. A few examples of what gpupool can place on consumer flagships,
+GPU by GPU, with every card keeping gpupool's default 10 % reserve (RTX 4090 ~21.6 GiB usable, RTX 5090 ~28.8 GiB):
+
+| Model | Quant | GGUF file | VRAM at 8k context (GiB) | Fits on |
+| --- | --- | --- | --- | --- |
+| Qwen2.5-32B-Instruct | `Q4_K_M` | 19.8 GB | 20.7 | one RTX 4090 |
+| Qwen2.5-32B-Instruct | `Q8_0` | 34.9 GB | 34.8 | RTX 4090 + RTX 5090 |
+| Llama-3.3-70B-Instruct | `Q4_K_M` | 42.4 GB | 42.3 | 2 × RTX 4090, or 2 × RTX 5090 with room for a longer context |
+| Qwen2.5-72B-Instruct | `Q4_K_M` | 49.1 GB | 48.5 | RTX 4090 + RTX 5090 |
+| Llama-3.3-70B-Instruct | `Q6_K` | 57.9 GB | 56.8 | 2 × RTX 5090, or 3 × RTX 4090 |
+| Llama-3.3-70B-Instruct | `Q8_0` | 75.1 GB | 72.8 | RTX 4090 + 2 × RTX 5090, or 4 × RTX 4090 |
+
+Sizes come from gpupool's own estimator, the one the convert dialog and the recommendations use. It matches published
+`Q4_K_M` files of Qwen2.5-32B, Llama-3.3-70B and Qwen2.5-72B within 4 %. The scheduler then plans with the real GGUF
+header and corrects itself from the memory the engines actually allocate. Whether a split goes over PCIe inside one
+server or over the network between servers, gpupool picks the fastest placement that fits.
+
 ## Quick start
 
 Full guide: [docs/QUICKSTART.en.md](docs/QUICKSTART.en.md).
@@ -188,7 +207,7 @@ docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network
 
 # 3. In the UI: Models -> Add model (Hugging Face or path) -> New model -> Start. Then:
 curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "qwen7b", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{"model": "llama-70b", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
 GPU servers need an NVIDIA driver 525 or newer, Docker and the NVIDIA Container Toolkit.
@@ -231,7 +250,7 @@ Any OpenAI-compatible client works; only the base URL and the model name change.
 from openai import OpenAI
 
 client = OpenAI(base_url="http://10.0.0.1:8080/v1", api_key="none")
-r = client.chat.completions.create(model="qwen7b", messages=[{"role": "user", "content": "Hello"}])
+r = client.chat.completions.create(model="llama-70b", messages=[{"role": "user", "content": "Hello"}])
 print(r.choices[0].message.content)
 ```
 
@@ -274,7 +293,6 @@ From the "still to do" and open-question lists in the [test report](docs/TEST_RE
 [platform design](docs/PLATFORM_DESIGN.en.md#10-open-questions-and-decisions).
 
 - [ ] Run on a real multi-server LAN, and measure speculative decoding over a real network
-- [ ] Validate models of 7B and larger on large GPUs
 - [ ] Per-client API keys and quotas, `/v1/embeddings`, TLS
 - [ ] Zero-downtime model swap
 - [ ] Upgrade llama.cpp

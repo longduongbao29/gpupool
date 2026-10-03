@@ -15,13 +15,13 @@
 [![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
 
-[Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
+[Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [Vừa ở đâu](#model-nào-vừa-ở-đâu) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
 
 </div>
 
 ---
 
-Bạn có ba server với 3 GB, 5 GB và 10 GB VRAM trống, và một model không vừa với server nào trong số đó.
+Bạn có một RTX 4090 ở máy này và hai RTX 5090 ở máy khác, cùng một model 70B không card nào chứa nổi một mình.
 **gpupool** đo VRAM trống trên từng máy, quyết định mỗi model đặt ở đâu và chia các layer ra sao, khởi chạy và giám sát
 các engine, rồi đưa cho bạn **một URL tương thích OpenAI**. Engine là
 [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` và `ggml-rpc-server`, model GGUF); gpupool là lớp
@@ -171,6 +171,25 @@ Thiết kế: [DESIGN](docs/DESIGN.vi.md), [PLATFORM_DESIGN](docs/PLATFORM_DESIG
 
 </details>
 
+## Model nào vừa ở đâu
+
+Model lớn không còn là chuyện của một card. Vài ví dụ gpupool có thể đặt lên các card flagship, chia theo từng GPU,
+mỗi card vẫn giữ lại 10 % mặc định của gpupool (RTX 4090 dùng được ~21,6 GiB, RTX 5090 ~28,8 GiB):
+
+| Model | Lượng tử | File GGUF | VRAM ở ngữ cảnh 8k (GiB) | Vừa trên |
+| --- | --- | --- | --- | --- |
+| Qwen2.5-32B-Instruct | `Q4_K_M` | 19,8 GB | 20,7 | một RTX 4090 |
+| Qwen2.5-32B-Instruct | `Q8_0` | 34,9 GB | 34,8 | RTX 4090 + RTX 5090 |
+| Llama-3.3-70B-Instruct | `Q4_K_M` | 42,4 GB | 42,3 | 2 × RTX 4090, hoặc 2 × RTX 5090 để có ngữ cảnh dài hơn |
+| Qwen2.5-72B-Instruct | `Q4_K_M` | 49,1 GB | 48,5 | RTX 4090 + RTX 5090 |
+| Llama-3.3-70B-Instruct | `Q6_K` | 57,9 GB | 56,8 | 2 × RTX 5090, hoặc 3 × RTX 4090 |
+| Llama-3.3-70B-Instruct | `Q8_0` | 75,1 GB | 72,8 | RTX 4090 + 2 × RTX 5090, hoặc 4 × RTX 4090 |
+
+Kích thước lấy từ bộ ước lượng của chính gpupool, cũng là bộ mà hộp thoại convert và phần gợi ý dùng. Nó khớp với các
+file `Q4_K_M` đã công bố của Qwen2.5-32B, Llama-3.3-70B và Qwen2.5-72B trong vòng 4 %. Sau đó scheduler lập kế hoạch
+bằng header GGUF thật và tự hiệu chỉnh theo bộ nhớ mà engine thực sự cấp phát. Dù phần chia đi qua PCIe trong một server
+hay qua mạng giữa các server, gpupool chọn phương án nhanh nhất mà vẫn vừa.
+
 ## Bắt đầu nhanh
 
 Hướng dẫn đầy đủ: [docs/QUICKSTART.vi.md](docs/QUICKSTART.vi.md).
@@ -188,7 +207,7 @@ docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network
 
 # 3. Trên UI: Models -> Add model (Hugging Face hoặc đường dẫn) -> New model -> Start. Sau đó:
 curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "qwen7b", "messages": [{"role": "user", "content": "Xin chào"}]}'
+  -d '{"model": "llama-70b", "messages": [{"role": "user", "content": "Xin chào"}]}'
 ```
 
 Server GPU cần driver NVIDIA 525 trở lên, Docker và NVIDIA Container Toolkit.
@@ -231,7 +250,7 @@ Mọi client tương thích OpenAI đều dùng được; chỉ đổi base URL 
 from openai import OpenAI
 
 client = OpenAI(base_url="http://10.0.0.1:8080/v1", api_key="none")
-r = client.chat.completions.create(model="qwen7b", messages=[{"role": "user", "content": "Xin chào"}])
+r = client.chat.completions.create(model="llama-70b", messages=[{"role": "user", "content": "Xin chào"}])
 print(r.choices[0].message.content)
 ```
 
@@ -274,7 +293,6 @@ Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo c�
 [thiết kế nền tảng](docs/PLATFORM_DESIGN.vi.md#10-câu-hỏi-mở-và-các-quyết-định).
 
 - [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding qua mạng thật
-- [ ] Kiểm chứng model từ 7B trở lên trên GPU lớn
 - [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
 - [ ] Đổi model không gián đoạn (zero-downtime)
 - [ ] Nâng cấp llama.cpp

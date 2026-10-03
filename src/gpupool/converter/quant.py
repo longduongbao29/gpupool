@@ -91,31 +91,39 @@ def imatrix_wanted(t: QuantType, mode: ImatrixMode) -> bool:
     return o.needs_imatrix or o.bpw < IMATRIX_AUTO_BPW
 
 
-# llama-quantize keeps the token embedding / output matrices near 8 bits in the low-bit types.
-# The table's bpw is a whole-model average measured on Llama-3-8B, whose embeddings are ~13 % of
-# the weights; models with a big vocabulary and few layers (Qwen2.5-0.5B: 28 %) came out ~25 %
-# larger than that average predicts. So the embedding part is costed separately when known.
-_EMBED_BPW = 8.5
+# llama-quantize stores the output matrix (output.weight, or the shared token embedding of a model
+# with tied embeddings) as Q6_K in every type below Q6_K; the input embedding is quantized like
+# the other weights. The table's bpw is a whole-model average measured on Llama-3-8B, whose output
+# matrix is ~6.5 % of the weights, so the rest ("core") is derived from that reference. Costing the
+# output matrix separately keeps the estimate right at both ends: big-vocabulary small models
+# (Qwen2.5-0.5B: the tied embedding is 28 % of the weights) and 70B models (it is 1.5 %), where
+# one whole-model average was 24 % low and 7 % low respectively.
+_OUTPUT_BPW = 6.5625  # Q6_K
 _REF_PARAMS = 8.03e9
-_REF_EMBED = 128_256 * 4096 * 2  # Llama-3-8B: vocab x hidden, untied input + output
+_REF_OUTPUT = 128_256 * 4096  # Llama-3-8B output.weight: vocab x hidden
 
 
 def _core_bpw(t: QuantType) -> float:
-    """bpw of the non-embedding weights, derived from the whole-model reference average."""
+    """bpw of every weight except the output matrix, derived from the whole-model reference."""
     bpw = _BY_TYPE[t].bpw
-    if bpw >= _EMBED_BPW:
+    if bpw >= _OUTPUT_BPW:
         return bpw
-    return (bpw * _REF_PARAMS - _EMBED_BPW * _REF_EMBED) / (_REF_PARAMS - _REF_EMBED)
+    return (bpw * _REF_PARAMS - _OUTPUT_BPW * _REF_OUTPUT) / (_REF_PARAMS - _REF_OUTPUT)
+
+
+def _vocab_hidden_tied(config: dict) -> tuple[int | None, int | None, bool]:
+    cfg = {**config, **config["text_config"]} if isinstance(config.get("text_config"), dict) else config
+    vocab = _cfg_int(cfg, "vocab_size", "padded_vocab_size")
+    hidden = _cfg_int(cfg, "hidden_size", "n_embd", "d_model")
+    tied = bool(cfg.get("tie_word_embeddings", config.get("tie_word_embeddings", True)))
+    return vocab, hidden, tied
 
 
 def embedding_params(config: dict) -> int:
     """vocab x hidden, twice when input and output embeddings are not tied; 0 when unknown."""
-    cfg = {**config, **config["text_config"]} if isinstance(config.get("text_config"), dict) else config
-    vocab = _cfg_int(cfg, "vocab_size", "padded_vocab_size")
-    hidden = _cfg_int(cfg, "hidden_size", "n_embd", "d_model")
+    vocab, hidden, tied = _vocab_hidden_tied(config)
     if not (vocab and hidden):
         return 0
-    tied = cfg.get("tie_word_embeddings", config.get("tie_word_embeddings", True))
     return vocab * hidden * (1 if tied else 2)
 
 
@@ -133,20 +141,33 @@ _FALLBACK_BPW: dict[str, float] = {
 
 
 def estimate_bytes(params: int, t: QuantType, config: dict | None = None) -> int:
-    """Estimated GGUF size. With the model's config.json the embeddings and llama-quantize's
+    """Estimated GGUF size. With the model's config.json the output matrix and llama-quantize's
     fallback for rows not divisible by 256 are costed; without it, the whole-model average."""
     bpw = _BY_TYPE[t].bpw
-    if not config or bpw >= _EMBED_BPW:
+    if not config or bpw >= _OUTPUT_BPW:
         return int(params * bpw / 8)
-    embed = embedding_params(config)
-    if embed >= params:
-        embed = 0
-    core = _core_bpw(t) if embed else bpw
+    vocab, hidden, _ = _vocab_hidden_tied(config)
+    out = vocab * hidden if vocab and hidden and vocab * hidden < params else 0
+    core = _core_bpw(t) if out else bpw
+    out_bpw = _OUTPUT_BPW
+    if hidden and hidden % 256:
+        out_bpw = 8.5  # Q6_K -> Q8_0 fallback
+        if t in _FALLBACK_BPW:
+            core = max(core, _FALLBACK_BPW[t])
+    total = (params - out) * core + out * out_bpw
+    # ffn_down's rows are intermediate_size long: when that is not a multiple of 256 (Qwen2.5-72B:
+    # 29568) those tensors fall back too, even with a regular hidden size. The *_M types also give
+    # half of the ffn_down layers Q6_K (-> Q8_0 here), hence the average with 8.5 for them.
     cfg = {**config, **config["text_config"]} if isinstance(config.get("text_config"), dict) else config
-    hidden = _cfg_int(cfg, "hidden_size", "n_embd", "d_model")
-    if hidden and hidden % 256 and t in _FALLBACK_BPW:
-        core = max(core, _FALLBACK_BPW[t])
-    return int(((params - embed) * core + embed * _EMBED_BPW) / 8)
+    inter = _cfg_int(cfg, "intermediate_size", "ffn_hidden_size", "n_inner")
+    layers = _cfg_int(cfg, "num_hidden_layers", "n_layer", "num_layers")
+    if inter and layers and hidden and inter % 256 and not hidden % 256 and t in _FALLBACK_BPW:
+        down = layers * hidden * inter
+        if down < params - out:
+            fb = _FALLBACK_BPW[t]
+            down_bpw = (fb + 8.5) / 2 if t.endswith("_M") else fb
+            total += down * max(0.0, down_bpw - core)
+    return int(total / 8)
 
 
 def _cfg_int(config: dict, *keys: str) -> int | None:

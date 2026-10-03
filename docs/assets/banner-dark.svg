@@ -19,18 +19,18 @@
   <text x="262" y="190" font-size="22" fill="#8b93a7">Pool scattered GPU memory into one</text>
   <text x="262" y="220" font-size="22" fill="#a9b2ff" font-weight="600">OpenAI-compatible endpoint.</text>
   <path d="M700 70v160" stroke="#2a2f3c" stroke-width="2"/>
-  <text x="790" y="95" font-size="13" fill="#8b93a7">server A</text>
+  <text x="790" y="95" font-size="13" fill="#8b93a7">RTX 4090</text>
   <rect x="870" y="82" width="200" height="16" rx="8" fill="#232836"/>
-  <rect x="870" y="82" width="60" height="16" rx="8" fill="url(#g)"/>
-  <text x="1082" y="95" font-size="13" font-weight="600" fill="#e8eaf0">3 GB</text>
-  <text x="790" y="139" font-size="13" fill="#8b93a7">server B</text>
+  <rect x="870" y="82" width="150" height="16" rx="8" fill="url(#g)"/>
+  <text x="1082" y="95" font-size="13" font-weight="600" fill="#e8eaf0">24 GB</text>
+  <text x="790" y="139" font-size="13" fill="#8b93a7">RTX 5090</text>
   <rect x="870" y="126" width="200" height="16" rx="8" fill="#232836"/>
-  <rect x="870" y="126" width="100" height="16" rx="8" fill="url(#g)"/>
-  <text x="1082" y="139" font-size="13" font-weight="600" fill="#e8eaf0">5 GB</text>
-  <text x="790" y="183" font-size="13" fill="#8b93a7">server C</text>
+  <rect x="870" y="126" width="200" height="16" rx="8" fill="url(#g)"/>
+  <text x="1082" y="139" font-size="13" font-weight="600" fill="#e8eaf0">32 GB</text>
+  <text x="790" y="183" font-size="13" fill="#8b93a7">RTX 5090</text>
   <rect x="870" y="170" width="200" height="16" rx="8" fill="#232836"/>
   <rect x="870" y="170" width="200" height="16" rx="8" fill="url(#g)"/>
-  <text x="1082" y="183" font-size="13" font-weight="600" fill="#e8eaf0">10 GB</text>
-  <text x="790" y="226" font-size="13" fill="#8b93a7">3 + 5 + 10 = 18 GB, one model, one URL</text>
+  <text x="1082" y="183" font-size="13" font-weight="600" fill="#e8eaf0">32 GB</text>
+  <text x="790" y="226" font-size="13" fill="#8b93a7">24 + 32 + 32 = 88 GB: a 70B model at Q8_0, one URL</text>
   </g>
 </svg>

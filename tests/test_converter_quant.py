@@ -184,3 +184,24 @@ def test_iq_estimates_match_real_imatrix_quantized_files():
                                  (134_515_008, smol, "Q8_0", 144_810_912)):
         est = estimate_bytes(params, t, cfg)
         assert abs(est - real) / real < 0.08, (t, est, real)
+
+
+def test_estimates_hold_from_135m_to_72b():
+    # Real Q4_K_M files: bartowski's Hugging Face builds (sizes from the HF API) and our own runs.
+    def cfg(vocab, hidden, tied, inter=None, layers=None):
+        c = {"vocab_size": vocab, "hidden_size": hidden, "tie_word_embeddings": tied}
+        if inter:
+            c.update(intermediate_size=inter, num_hidden_layers=layers)
+        return c
+    cases = [
+        (134_515_008, cfg(49152, 576, True), 105_453_984),                      # SmolLM2-135M (ours)
+        (494_032_768, cfg(151936, 896, True), 397_807_488),                     # Qwen2.5-0.5B (ours)
+        (7_615_616_512, cfg(152064, 3584, False, 18944, 28), 4_683_074_240),    # Qwen2.5-7B
+        (8_030_261_248, cfg(128256, 4096, False, 14336, 32), 4_920_000_000),    # Llama-3-8B (llama.cpp's table)
+        (32_763_876_352, cfg(152064, 5120, False, 27648, 64), 19_851_336_576),  # Qwen2.5-32B
+        (70_553_706_496, cfg(128256, 8192, False, 28672, 80), 42_520_398_816),  # Llama-3.3-70B
+        (72_706_203_648, cfg(152064, 8192, False, 29568, 80), 47_415_715_488),  # Qwen2.5-72B (ffn fallback)
+    ]
+    for params, c, real in cases:
+        est = estimate_bytes(params, "Q4_K_M", c)
+        assert abs(est - real) / real < 0.05, (params, est, real)
