@@ -109,6 +109,8 @@ def make_cfg(tmp_path=None, **kw) -> CoordinatorConfig:
     kw.setdefault("launch_timeout_s", 5.0)
     if tmp_path is not None:
         kw.setdefault("models_dir", tmp_path / "models")
+        # Never the default .gpupool/ in the working directory: CI checkouts do not have it.
+        kw.setdefault("db_path", tmp_path / "coordinator.db")
     return CoordinatorConfig(**kw)
 
 

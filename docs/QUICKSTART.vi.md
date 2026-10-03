@@ -50,11 +50,27 @@ docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 
 1. **Models → Add model**: nhập repo Hugging Face (ví dụ `Qwen/Qwen2.5-7B-Instruct-GGUF`), chọn file
    `.gguf`, bấm **Download**. Hoặc tab **Path** cho file đã có sẵn trên máy coordinator.
-2. **New model**: đặt tên (đây là giá trị `model` mà client sẽ dùng), chọn file. GPU: để **Auto**, hoặc
-   tick các GPU muốn dùng.
+2. **New model**: đặt tên (đây là giá trị `model` mà client sẽ dùng), chọn file. Server và GPU: để
+   **All servers and GPUs**, hoặc chọn **Only selected ones** (xem bên dưới).
 3. **Start**. Trạng thái chuyển *starting → running*. **Stop** để trả GPU.
 
 Nếu model lớn hơn mọi GPU đơn lẻ, nó được tự chia qua nhiều GPU và nhiều server.
+
+### Giới hạn model trong một số server hoặc GPU
+
+Mặc định model được dùng mọi server và GPU trong pool. Chọn **Only selected ones** trong form model để giới hạn: một
+cây gồm các server và GPU của chúng hiện ra (kèm bộ nhớ trống), tick những gì model được phép dùng. Tick cả một
+server nghĩa là cho phép mọi GPU của server đó, **kể cả GPU được thêm vào sau này** (lưu dưới dạng `"<node>/*"`);
+tick từng GPU thì chỉ cho phép các GPU đó (`"<node>/<device>"`). Đây là **giới hạn chứ không phải đặt thủ công**:
+gpupool vẫn tự chọn cách đặt tốt nhất, nhưng chỉ trong các thiết bị được phép. Tab Servers không bị ảnh hưởng: GPU
+bạn không chọn ở đây vẫn được bật trong pool cho các model khác. Lưu với *Only selected ones* mà chưa tick gì sẽ bị
+từ chối (danh sách rỗng nghĩa là "tất cả"). Thẻ model hiện nhãn *Limited to ...*. Qua HTTP đây là `pin_devices`, xem
+[API.vi.md](API.vi.md#3-model-apimodels).
+
+### Sao chép những gì client cần
+
+Mỗi thẻ model có nút sao chép cho **endpoint** (URL gốc), **tên model** (giá trị của `"model"` trong request) và một
+lệnh **curl** dựng sẵn cho model này (kèm chỗ giữ cho header `Authorization` khi có đặt API key).
 
 ## 4. Kết nối ứng dụng
 
@@ -112,7 +128,8 @@ kê các bản GGUF đã được phát hành của model (`gguf_alternatives`, 
    chỉ vừa pool, và loại nào được đề xuất kèm lý do.
 4. Kiểm tra **tên file đầu ra** (mặc định `<model>-<LOẠI>.gguf`; phải kết thúc bằng `.gguf`), tuỳ chọn **Keep downloaded
    source**, tuỳ chọn **Advanced**. Rồi bấm **Start conversion**.
-5. Theo dõi bảng **Conversions** ngay trên trang đó: các giai đoạn *Download → Convert → Quantize → Validate*, thanh
+5. Theo dõi bảng **Conversions** ngay trên trang đó: các giai đoạn *Download → Convert → Calibrate (chỉ khi có tính
+   importance matrix) → Quantize → Validate*, thanh
    tiến độ, log và chi tiết kiểm tra. Các job chạy lần lượt từng cái, ở mức ưu tiên CPU thấp để việc inference trên
    máy coordinator không bị chậm. Có sẵn **Cancel**, **Retry** (job lỗi hoặc đã huỷ) và xoá.
 6. Khi job ở trạng thái *done*, file đã nằm trong thư viện (nguồn `convert`). **Deploy this model** mở form model
@@ -139,11 +156,19 @@ trọng số, tính trung bình cả model.
 | `Q4_0` | 4.64 | +0.4685 | định dạng cũ; thường `Q4_K_S` tốt hơn |
 | `Q3_K_L` | 4.31 | +0.5562, mất chất lượng thấy rõ | bộ nhớ eo hẹp |
 | `Q3_K_M` | 4.00 | +0.6569, mất chất lượng rõ | chỉ khi bộ nhớ eo hẹp |
+| `IQ3_M` | 3.76 | chưa có số công bố; thường tốt hơn `Q3_K_M` ở dung lượng nhỏ hơn | bộ nhớ eo hẹp, tốt hơn các loại `Q3_K` |
+| `IQ3_S` | 3.67 | chưa có số công bố; tốt hơn `Q3_K_S` ở dung lượng tương đương | bộ nhớ eo hẹp |
 | `Q3_K_S` | 3.65 | +1.6321, mất nhiều | phương án cuối cùng |
+| `IQ3_XS`, `IQ3_XXS` | 3.50, 3.26 | mất rõ đến mất nhiều | bộ nhớ rất eo hẹp (**bắt buộc** có importance matrix) |
 | `Q2_K` | 3.17 | +3.5199, mất rất nhiều | phương án cuối cùng |
+| `IQ2_M`, `IQ2_S`, `IQ2_XS`, `IQ2_XXS` | 2.94, 2.75, 2.60, 2.39 | mất nhiều | khi không có loại nào lớn hơn vừa (**bắt buộc** có importance matrix) |
+| `IQ1_M`, `IQ1_S` | 2.15, 2.01 | mất cực nhiều | chỉ cho model rất lớn buộc phải vừa bộ nhớ (**bắt buộc** có importance matrix) |
 
-Các loại IQ1 và IQ2 không được cung cấp: llama-quantize từ chối chúng nếu không có importance matrix, mà gpupool
-không tính ma trận này.
+Các loại `IQ` nén model xuống dưới 4 bit trên mỗi trọng số. Với các loại IQ1, IQ2, `IQ3_XXS` và `IQ3_XS`,
+llama-quantize từ chối chạy nếu không có **importance matrix** (ma trận tầm quan trọng); các loại còn lại sẽ tốt hơn
+khi có nó. gpupool tự tính giúp bạn, xem mục kế tiếp. bpw của các dòng IQ là trung bình cả file (lớp đầu ra và các
+tensor nhạy nhất giữ độ chính xác cao hơn), nên cao hơn số bit danh nghĩa của định dạng. Sai số của ước lượng dung
+lượng so với file thật: `IQ2_XS` +6 %, `IQ3_M` -4 %, `Q8_0` -1 %.
 
 Loại được đề xuất theo các quy tắc sau:
 
@@ -165,6 +190,40 @@ các nguồn `fp8`, `gptq`, `bitnet`, `compressed-tensors`, `modelopt` và `mxfp
 bitsandbytes không được hỗ trợ**: yêu cầu bị từ chối với HTTP 422. Hãy chuyển model gốc (base model) của nó; hộp
 thoại gợi ý model đó khi model card có ghi.
 
+### Importance matrix (loại IQ và file rất nhỏ)
+
+**Importance matrix** ghi lại những trọng số nào quan trọng nhất khi model đọc văn bản điển hình. Bộ lượng tử hoá
+nhờ đó giữ các trọng số ấy chính xác hơn và nén phần còn lại mạnh tay hơn; càng ít bit thì càng có ích. gpupool tính
+nó trong một giai đoạn riêng, **Calibrate**: chạy `llama-imatrix` trên file trung gian 16 bit, với một văn bản hiệu
+chỉnh, trên CPU, trước bước Quantize.
+
+Tuỳ chọn **Importance matrix** có ba giá trị:
+
+| Giá trị | Chuyện gì xảy ra |
+| --- | --- |
+| **Auto** (mặc định) | tính ma trận khi loại đó bắt buộc phải có (các loại IQ1, IQ2, `IQ3_XXS`, `IQ3_XS`) hoặc dưới 4 bit trên mỗi trọng số (các loại `IQ3` còn lại, `Q3_K_S`, `Q2_K`), nơi nó có ích nhất. Các loại từ 4 bit trở lên (`Q4_K_M`, `Q5_K_M`...) thì không tính |
+| **On** | luôn tính, cho mọi loại do llama-quantize ghi. Chậm hơn, và cải thiện chất lượng ở mọi kích cỡ, kể cả `Q4_K_M` |
+| **Off** | không bao giờ tính. Bị từ chối (HTTP 422) với các loại bắt buộc phải có, nên chỉ dùng cho các loại khác để tiết kiệm thời gian |
+
+`F16`, `BF16` và `Q8_0` không bao giờ dùng ma trận (không có bước llama-quantize). Khi image coordinator không có
+`llama-imatrix` (cài ngoài Docker mà thiếu), loại bắt buộc có ma trận, hoặc **On**, bị từ chối với HTTP 503; với
+**Auto** trên loại chỉ hưởng lợi từ ma trận thì job cứ chạy không có nó. UI làm mờ các loại bắt buộc có ma trận khi
+`imatrix_available` là false (`GET /api/convert/options`).
+
+**Chi phí thời gian.** Calibrate là phần chậm nhất trên CPU, vì nó cho cả model chạy qua văn bản. Đo trên CPU laptop
+trong WSL, với mặc định 100 chunk (mỗi chunk 512 token): Qwen2.5-1.5B sang `IQ3_M` mất tổng cộng **28 phút**, trong
+đó calibrate khoảng **19 đến 20 phút**. Để so sánh, Qwen2.5-0.5B sang `Q4_K_M` (không có ma trận) mất khoảng 2,5 phút
+gồm cả 107 giây tải. Thời gian tăng theo kích thước model và số chunk, nên **ít chunk hơn = nhanh hơn** nhưng ma trận
+thô hơn: đặt *Calibration chunks* thấp (ví dụ 20 đến 30) để thử nhanh, giữ mặc định cho model bạn sẽ dùng lâu. CPU
+mạnh hơn hoặc model nhỏ hơn thì rút ngắn tương ứng.
+
+**Văn bản hiệu chỉnh.** Mặc định gpupool dùng văn bản đi kèm: văn bản gốc đa ngôn ngữ (văn xuôi tiếng Anh và tiếng
+Việt, nhiều ngôn ngữ khác, code, toán, JSON, lượt chat), viết riêng cho gpupool nên không vướng giấy phép và không bị
+lệch do văn bản hẹp (xem `src/gpupool/converter/data/README.md`). Muốn hiệu chỉnh theo lĩnh vực của bạn, hãy đưa
+**Calibration text**: đường dẫn tuyệt đối của một tệp `.txt` trên server (tối đa 20 MB; đường dẫn trên máy chủ được
+dịch giống đường dẫn thư viện). Tệp được sao chép khi job bắt đầu, nên sửa tệp về sau không ảnh hưởng job đang chạy.
+Ma trận tính trên văn bản hẹp (ví dụ chỉ tiếng Anh) làm model tốt hơn trên loại văn bản đó và kém đi ở phần còn lại.
+
 ### Các tuỳ chọn nâng cao nói đơn giản
 
 | Tuỳ chọn | Tác dụng |
@@ -173,6 +232,9 @@ thoại gợi ý model đó khi model card có ghi.
 | Output tensor type, Token embedding type | Độ chính xác của lớp đầu ra và của bảng embedding từ. Giữ cao hơn (ví dụ `q8_0`) tốn thêm ít dung lượng và có thể giúp chất lượng ở các loại nhỏ. Mặc định để llama-quantize tự quyết |
 | Leave output tensor | Không lượng tử hoá lớp đầu ra: file lớn hơn một chút, chất lượng nhỉnh hơn một chút |
 | Pure | Dùng loại đã chọn cho mọi tensor thay vì hỗn hợp thông thường. Thường làm giảm chất lượng ở cùng dung lượng; để thử nghiệm |
+| Importance matrix | *Auto* / *On* / *Off*, xem mục trước |
+| Calibration text | Đường dẫn tuyệt đối của tệp `.txt` (tối đa 20 MB) để hiệu chỉnh, thay cho văn bản gpupool đi kèm |
+| Calibration chunks | Số đoạn 512 token của văn bản được xử lý; `0` = mặc định (100). Ít hơn thì nhanh hơn |
 | Validate generation | Nạp file trên CPU và sinh vài token (bật mặc định). Kiểm tra header và tokenizer luôn chạy |
 | Allow remote code | Tải các file `*.py` của chính repo và chạy chúng trong coordinator. Xem mục Bảo mật bên dưới |
 | Threads | Số luồng CPU khi lượng tử hoá (`0` = `GPUPOOL_CONVERT_THREADS`; nếu biến đó cũng `0` = mọi CPU) |
@@ -201,12 +263,21 @@ vào thư viện; xoá job thì bỏ file. Một bước kiểm tra không chạ
 
 - **Đĩa.** Đỉnh khoảng *nguồn + bản trung gian 16 bit + đầu ra*. Ước chừng, model 7 tỷ cần khoảng 14 GB tải về,
   14 GB bản trung gian và khoảng 4 GB đầu ra ở `Q4_K_M`. gpupool kiểm tra dung lượng trống trước khi tải và trước mỗi
-  giai đoạn nặng (cộng biên 512 MB); nếu không đủ, job lỗi kèm thông báo cần bao nhiêu và đang trống bao nhiêu. Bản
+  giai đoạn nặng (cộng biên 512 MB); nếu không đủ, job lỗi kèm thông báo cần bao nhiêu và đang trống bao nhiêu. Lúc
+  gửi yêu cầu cũng có một **lần kiểm tra đầu**: khi đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản
+  trung gian 16 bit + đầu ra*, yêu cầu bị từ chối ngay với HTTP 507 (UI hiện thông báo) thay vì lỗi sau vài phút. Bản
   trung gian bị xoá ngay khi có file đã lượng tử hoá. `F16`, `BF16` và `Q8_0` không có bản trung gian riêng.
-- **RAM.** Bộ chuyển đổi nạp trọng số qua PyTorch, nên hãy chuẩn bị RAM trống cỡ dung lượng model 16 bit (chưa đo).
-  Bước thử sinh văn bản cần RAM trống bằng 1.2 lần file đầu ra, nếu không sẽ bị bỏ qua.
-- **Thời gian.** Đo trên CPU trong CI, đã gồm thời gian tải: SmolLM2-135M-Instruct sang `Q4_K_M` mất 64 giây từ đầu
-  đến cuối; Qwen2.5-0.5B-Instruct khoảng 1 phút. Model lớn hơn tăng gần tỉ lệ với kích thước và tốc độ tải.
+- **RAM.** Bộ chuyển đổi nạp trọng số qua PyTorch, nên hãy chuẩn bị RAM trống cỡ dung lượng model 16 bit. Đo được,
+  đỉnh bộ nhớ resident của cả một job: khoảng **1,0 GB** (1045 MiB) với Qwen2.5-0.5B và khoảng **1,7 GB** (1697 MiB)
+  với Qwen2.5-1.5B; con số tăng theo kích thước model, nên model 7 tỷ cần gấp nhiều lần. Đỉnh cgroup của container
+  cao hơn vì tính cả page cache (3,0 và 3,4 GB trong các lần chạy đó); phần đó thu hồi được. Bước thử sinh văn bản cần RAM trống bằng 1.2 lần file đầu ra, nếu không sẽ bị bỏ qua.
+- **Thời gian.** Đo trên CPU, đã gồm thời gian tải: SmolLM2-135M-Instruct sang `Q4_K_M` mất khoảng 70 giây từ đầu
+  đến cuối trong CI; Qwen2.5-0.5B-Instruct sang `Q4_K_M` mất 143 giây (tải 107 giây, convert 12 giây, quantize
+  4 giây, validate 20 giây). Khi có importance matrix thì calibrate chiếm phần lớn: Qwen2.5-1.5B sang `IQ3_M` mất
+  1687 giây (tải 314 giây, convert 55 giây, calibrate 1175 giây, quantize 123 giây, validate 21 giây), xem mục
+  *Importance matrix*. Model lớn hơn tăng gần tỉ lệ với kích thước và tốc độ tải.
+- **Khi job lỗi.** Job ghi lại `failed_stage`, giai đoạn đang chạy lúc nó lỗi hoặc bị huỷ (ví dụ `calibrating`), nên
+  bạn phân biệt ngay được lỗi tải với lỗi đĩa hay lượng tử hoá; UI đánh dấu bước đó trên thanh các bước.
 
 ### File nằm ở đâu
 
@@ -235,7 +306,8 @@ inspect và tải về bị từ chối với HTTP 403.
 ### Build image không kèm bộ công cụ, hoặc sau mirror
 
 Image coordinator mặc định có sẵn bộ công cụ chuyển đổi (`WITH_CONVERT=1`): bộ chuyển đổi của llama.cpp, một venv
-PyTorch chỉ dùng CPU, và bản build CPU tĩnh của `llama-quantize`, `llama-tokenize` và `llama-simple`. Đo được:
+PyTorch chỉ dùng CPU, và bản build CPU tĩnh của `llama-quantize`, `llama-tokenize`, `llama-simple` và
+`llama-imatrix`. Đo được (trước khi thêm `llama-imatrix`):
 **1.77 GB** có bộ công cụ so với **560 MB** không có. Coordinator không bao giờ chuyển đổi có thể dùng image gọn:
 
 ```bash
@@ -244,7 +316,8 @@ docker build --build-arg WITH_CONVERT=0 -f docker/coordinator.Dockerfile -t gpup
 ```
 
 Không có bộ công cụ thì mọi thứ khác vẫn chạy; inspect vẫn mô tả được model nhưng không biết kiến trúc có được hỗ
-trợ không, và bắt đầu job trả về HTTP 503 kèm lời giải thích (UI hiện thành một thông báo). Nơi `download.pytorch.org`
+trợ không, và bắt đầu job trả về HTTP 503 kèm lời giải thích (UI hiện thành một thông báo).
+Riêng `llama-imatrix` là tuỳ chọn: coordinator thiếu nó vẫn chuyển đổi bình thường mọi loại không cần ma trận. Nơi `download.pytorch.org`
 bị chặn, hãy build với mirror của chỉ mục wheel PyTorch CPU (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`;
 `docker-compose.coordinator.yml` đọc `TORCH_INDEX_URL` từ môi trường). Mã nguồn llama.cpp lấy từ
 `vendor/llama.cpp-b11342.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
@@ -281,10 +354,12 @@ server bằng RPC của llama.cpp. Cần Docker, Python 3 (chỉ thư viện chu
 python scripts/ci_e2e.py                       # tuỳ chọn: --project gpupool-ci --port 8080 --keep --skip-convert
 ```
 
-Nó kiểm tra: ba agent tự join, thư viện model, các API, start đến *running*, một chat completion, `/metrics`, và
-stop (không còn engine nào trên mọi agent). Giai đoạn cuối chạy một lần chuyển đổi
-(`HuggingFaceTB/SmolLM2-135M-Instruct` sang `Q4_K_M`, khoảng 100 MB, ngay trong coordinator), phục vụ file đã chuyển,
-chia qua RPC, rồi gửi một chat; nó cần image coordinator có bộ công cụ (`WITH_CONVERT=1`, mặc định) và truy cập được
+Nó thực hiện 33 phép kiểm tra: ba agent tự join, thư viện model, các API, start đến *running*, một chat completion,
+`/metrics`, và stop (không còn engine nào trên mọi agent). Các giai đoạn cuối chạy ba lần chuyển đổi ngay trong
+coordinator: `HuggingFaceTB/SmolLM2-135M-Instruct` sang `Q4_K_M` (khoảng 100 MB; file đã chuyển sau đó được phục vụ,
+chia qua RPC, và trả lời một chat), một nguồn là **thư mục** (các file của model được tải vào một thư mục, chuyển
+sang `Q8_0`, thư mục nguồn không bị đổi) và `IQ2_XS`, loại cần **importance matrix** (4 chunk hiệu chỉnh để chạy
+ngắn; job đi qua *converting*, *calibrating*, *quantizing*, *validating*). Chúng cần image coordinator có bộ công cụ (`WITH_CONVERT=1`, mặc định) và truy cập được
 huggingface.co (đặt `HF_TOKEN` để tránh giới hạn tốc độ cho người dùng ẩn danh). `--skip-convert` bỏ giai đoạn này.
 Mã thoát 0 nghĩa là qua hết; khi lỗi nó in `docker compose logs` và
 thoát với mã 1. Cụm được xoá sau khi chạy, trừ khi có `--keep`. Model được cache trong `GPUPOOL_CI_MODELS_DIR`
@@ -589,7 +664,11 @@ arg ở trên. API HTTP: [API.vi.md](API.vi.md). Thiết kế bên trong: [DESIG
 | Log agent báo server đã bị xoá | server đã bị xoá trên UI; thêm lại ở đó (Servers → Add Server → agent URL `http://<ip-server>:7070`) |
 | Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by llama.cpp b11342's converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
 | Chuyển đổi: HTTP 503 "conversion is not set up ..." | image được build với `WITH_CONVERT=0`, hoặc ngoài Docker thì `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` thiếu hoặc sai. Dùng image đầy đủ hoặc sửa đường dẫn; thông báo nêu rõ thiếu gì |
-| Chuyển đổi: job *failed* với "not enough free disk space ..." | job cần khoảng nguồn + bản trung gian 16 bit + đầu ra (xem *Đĩa, RAM và thời gian*). Giải phóng dung lượng, hoặc trỏ `GPUPOOL_MODELS_DIR` sang đĩa lớn hơn, rồi **Retry** (bản tải đã xong được dùng lại) |
+| Chuyển đổi: HTTP 507 "not enough free disk space ..." ngay khi gửi job | đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản trung gian 16 bit + đầu ra* (xem *Đĩa, RAM và thời gian*). Chưa có gì được xếp hàng. Giải phóng dung lượng, hoặc trỏ `GPUPOOL_MODELS_DIR` sang đĩa lớn hơn, rồi gửi lại |
+| Chuyển đổi: job *failed* với "not enough free disk space ..." | lần kiểm tra đầu qua được nhưng một giai đoạn sau thấy ít chỗ hơn (job hoặc tiến trình khác đã dùng đĩa). `failed_stage` của job cho biết ở đâu. Giải phóng dung lượng, rồi **Retry** (bản tải đã xong được dùng lại) |
+| Chuyển đổi: HTTP 422 "`<loại>` needs an importance matrix ..." | loại đó thuộc nhóm IQ1, IQ2, `IQ3_XXS`, `IQ3_XS` mà tuỳ chọn đang là *Off*. Đặt *Auto* hoặc *On*, hoặc chọn loại lớn hơn |
+| Chuyển đổi: HTTP 503 nhắc tới `llama-imatrix` hoặc văn bản hiệu chỉnh có sẵn | bản cài không có `llama-imatrix` (dùng image coordinator đầy đủ), hoặc thiếu văn bản đi kèm (cài lại, hoặc đưa vào một văn bản hiệu chỉnh). Chọn loại không cần ma trận, hoặc *Off* / *Auto* với loại chỉ hưởng lợi từ ma trận |
+| Chuyển đổi: job có importance matrix như đứng yên ở *calibrating* | nó đang chạy: calibrate lâu nhất trên CPU (khoảng 20 phút cho model 1,5 tỷ, xem *Importance matrix*). Thanh tiến độ chỉ là ước lượng. Nếu quá chậm, huỷ rồi thử lại với ít *Calibration chunks* hơn |
 | Chuyển đổi: job ở *needs_review* ("the tokenizer differs from Hugging Face on N of 8 test texts") | GGUF tách token một số đoạn văn khác với bản gốc, nên model có thể chạy sai ở các đoạn đó. Mở bảng kiểm tra để xem đoạn nào. Chỉ chấp nhận nếu chịu được rủi ro; nếu không, xoá job và dùng bản GGUF có sẵn |
 | Chuyển đổi: HTTP 403 "repo is gated or private" | đặt `HF_TOKEN` trên coordinator và chấp nhận giấy phép trên trang model, rồi thử lại |
 | Model kẹt ở *failed*: "not enough VRAM" | giải phóng GPU, bật thêm GPU, thêm server, hoặc dùng bản quantize nhỏ hơn |

@@ -934,3 +934,12 @@ async def test_failed_stage_and_imatrix_survive_a_restart(env, calib, monkeypatc
     assert got.failed_stage == "calibrating" and got.imatrix_used is True
     await again.shutdown()
     env.mgr = ConvertManager(env.db, env.models, env.tc, env.lib, env.hf)  # teardown closes it
+
+
+async def test_db_folder_of_a_fresh_install_is_created(tmp_path):
+    # Regression: the manager opened <data>/coordinator.db without creating <data>/, so a fresh
+    # install (and CI, which has no .gpupool/ in its checkout) failed at coordinator start-up.
+    db = tmp_path / "not" / "yet" / "there" / "coordinator.db"
+    mgr = ConvertManager(db, tmp_path / "models", make_toolkit(tmp_path / "kit"), FakeLibrary(), FakeHf())
+    assert db.is_file()
+    await mgr.shutdown()

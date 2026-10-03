@@ -287,6 +287,12 @@ async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
             assert (await c.get("/engines/zzz/memory", headers=H)).status_code == 404
             assert (await c.post("/engines", json=spec, headers=H)).status_code == 200
             log = cfg.log_dir / "m1.log"
+            # The child writes its own 100 lines after binding; appending before it is done lets
+            # its later writes land over ours (flaky under a loaded CI machine). Wait for them.
+            for _ in range(200):
+                if log.is_file() and "line 99" in log.read_text(encoding="utf-8", errors="replace"):
+                    break
+                await asyncio.sleep(0.05)
             # the child owns the log; append the lines llama-server would print at load
             with open(log, "a", encoding="utf-8") as f:
                 f.write("0.00.847.109 I load_tensors:        CUDA0 model buffer size =   373.73 MiB\n"

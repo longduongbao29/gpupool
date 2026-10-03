@@ -111,7 +111,7 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `ctx_size` | int, 4096 | tổng context (token), chia đều cho `parallel` slot (llama.cpp `-c`); qua `/api` phải `>= 1` |
 | `parallel` | int, 1 | số slot chạy đồng thời (llama.cpp `-np`); qua `/api` phải `>= 1`. Mức bận của autoscale là `processing / parallel` |
 | `replicas` | int, 1 | số lượng mong muốn; **`0` = dừng**. Đây là công tắc bật/tắt: khi autoscale thì giữ `> 0` và `min/max` giới hạn số lượng |
-| `pin_devices` | danh sách `"node_id/device_id"`, rỗng | giới hạn replica vào các GPU này; rỗng = scheduler tự chọn. `/api` từ chối mục không đúng dạng `node/device` hoặc trỏ tới server chưa đăng ký (422) |
+| `pin_devices` | danh sách `"node_id/device_id"` hoặc `"node_id/*"`, rỗng | **tập thiết bị được phép**: replica chỉ được dùng các thiết bị này; rỗng = mọi server và GPU. `"node_id/*"` cho phép mọi thiết bị của server đó, **kể cả GPU được thêm vào sau này**. Đây là giới hạn chứ không phải chỉ định chỗ đặt: scheduler vẫn chọn cách đặt tốt nhất trong các thiết bị được phép (cả khi preempt và rebalance), và tab Servers (GPU bật/tắt trong pool) không bị ảnh hưởng. `/api` từ chối mục không đúng dạng `node/device` (hoặc `node/*`) hoặc trỏ tới server chưa đăng ký (422). UI hiển thị thành "All servers and GPUs / Only selected ones" |
 | `priority` | int 0..100, 50 | càng cao càng được xếp trước mỗi tick và có thể giành chỗ của mức thấp hơn |
 | `preemptible` | bool, true | `false`: model ưu tiên cao hơn không bao giờ dừng replica của model này |
 | `spread` | `"gpu"` / `"node"` / `"none"`, `"gpu"` | mềm: các replica của model tránh dùng chung GPU / server (vẫn dùng chung GPU khi không còn chỗ nào khác) |
@@ -157,7 +157,7 @@ mới lấy giá trị mặc định.
 | `file` | string, bắt buộc | tên mục thư viện; phải `ready` (nếu không là 422). Lưu thành `source = coordinator://<file>` |
 | `ctx_size` | int `>= 1` | 4096 (luôn ghi đè) |
 | `parallel` | int `>= 1` | 1 (luôn ghi đè) |
-| `pin_devices` | danh sách string | rỗng (luôn ghi đè, bỏ trùng) |
+| `pin_devices` | danh sách string | rỗng (luôn ghi đè, bỏ trùng); cho phép `"node_id/*"`, xem mục 2 |
 | `priority` | int 0..100 hoặc null | giữ, nếu không có thì 50 |
 | `spread` | `gpu`/`node`/`none` hoặc null | giữ, nếu không có thì `gpu` |
 | `min_replicas`, `max_replicas` | int hoặc null | giữ, nếu không có thì để trống |
@@ -673,10 +673,10 @@ Các mã trạng thái mà những route này dùng (body luôn là `{"detail": 
 | 403 | repo Hugging Face là gated hoặc riêng tư: đặt `HF_TOKEN` và chấp nhận giấy phép |
 | 404 | không tìm thấy repo hoặc revision trên Hugging Face, hoặc job id không tồn tại |
 | 409 | tên đầu ra đã bị dùng (thư viện, một file trong `models_dir`, hoặc job khác chưa xong); job không ở trạng thái cho phép thao tác đó |
-| 422 | nguồn không chuyển đổi được: kiến trúc không được bộ chuyển đổi được ghim (llama.cpp b11342) hỗ trợ, đã lượng tử hoá sẵn theo định dạng bộ chuyển đổi không đọc được (AWQ, bitsandbytes...), không có `config.json`, không có trọng số safetensors / PyTorch; cũng là body sai cấu trúc (ví dụ đưa cả `hf_repo` và `path`) |
+| 422 | nguồn không chuyển đổi được: kiến trúc không được bộ chuyển đổi được ghim (llama.cpp b11342) hỗ trợ, đã lượng tử hoá sẵn theo định dạng bộ chuyển đổi không đọc được (AWQ, bitsandbytes...), không có `config.json`, không có trọng số safetensors / PyTorch; cũng là body sai cấu trúc (ví dụ đưa cả `hf_repo` và `path`); loại cần importance matrix mà `advanced.imatrix: "off"`; `advanced.calibration_path` không dùng được (không phải `.txt`, rỗng, lớn hơn 20 MB) |
 | 502 | không tới được Hugging Face hoặc nó trả lỗi bất ngờ |
-| 503 | bộ công cụ chuyển đổi chưa được cài đặt (`problem` của `/api/convert/options`) |
-| 507 | không đủ dung lượng đĩa trống. Mã này do worker phát ra, nên nó xuất hiện trong `error` của job *failed*, không phải làm phản hồi của một route |
+| 503 | bộ công cụ chuyển đổi chưa được cài đặt (`problem` của `/api/convert/options`); thiếu `llama-imatrix` trong khi job cần importance matrix (loại bắt buộc phải có, hoặc `advanced.imatrix: "on"`); văn bản hiệu chỉnh có sẵn bị thiếu trong bản cài và không có `calibration_path` |
+| 507 | không đủ dung lượng đĩa trống. `POST /api/convert` trả 507 ngay lúc gửi khi đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản trung gian 16 bit + đầu ra* (không có gì được xếp hàng). Worker kiểm tra lại trước mỗi giai đoạn nặng, vì dung lượng có thể giảm khi job chờ; mã 507 đó xuất hiện trong `error` của job *failed* (kèm `failed_stage`) |
 
 ### Kiểu dữ liệu
 
@@ -684,11 +684,12 @@ Các mã trạng thái mà những route này dùng (body luôn là `{"detail": 
 
 | Trường | Kiểu | Ý nghĩa |
 | --- | --- | --- |
-| `type` | string | một trong `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `Q3_K_S`, `Q2_K` |
+| `type` | string | một trong `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `IQ3_M`, `IQ3_S`, `Q3_K_S`, `IQ3_XS`, `IQ3_XXS`, `Q2_K`, `IQ2_M`, `IQ2_S`, `IQ2_XS`, `IQ2_XXS`, `IQ1_M`, `IQ1_S` |
 | `bpw` | float | số bit trên trọng số dùng để ước lượng |
 | `tier` | string | `lossless`, `near_lossless`, `balanced`, `small` hoặc `tiny` |
 | `note` | string | ghi chú chất lượng, ví dụ mức thay đổi perplexity so với F16 |
 | `via` | `"convert"` / `"quantize"` | `F16`, `BF16` và `Q8_0` do bộ chuyển đổi ghi trực tiếp, các loại còn lại do llama-quantize |
+| `needs_imatrix` | bool | llama-quantize từ chối loại này nếu không có importance matrix: `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ2_M`, `IQ3_XXS`, `IQ3_XS` |
 | `est_bytes` | int hoặc null | dung lượng file ước lượng; chỉ inspect mới điền |
 | `est_vram_mb` | int hoặc null | file + KV cache ở ngữ cảnh 4096 + phần overhead của runtime |
 | `fits_single_gpu`, `fits_pool` | bool hoặc null | so với GPU đơn lớn nhất / cả pool; null khi chưa có server GPU hoặc chưa biết số tham số |
@@ -716,6 +717,7 @@ dịch qua `path_map` giống đường dẫn thư viện); `revision` (mặc đ
 | `gguf_alternatives` | `[string]` | các repo Hugging Face đã có bản GGUF |
 | `options` | `[QuantOption]` | mọi loại kèm ước lượng |
 | `recommended`, `recommend_reasons` | `QuantType`, `[string]` | loại được đề xuất và lý do |
+| `name_stem` | string | phần cuối của tên repo hoặc thư mục đã làm sạch: tên file đầu ra mặc định là `<name_stem>-<QUANT>.gguf` (client không cần lặp lại quy tắc đặt tên) |
 | `warnings` | `[string]` | |
 
 **`ConvertRequest`** (body của `POST /api/convert`):
@@ -731,10 +733,23 @@ dịch qua `path_map` giống đường dẫn thư viện); `revision` (mặc đ
 | `advanced.leave_output_tensor` | bool | `false` | `llama-quantize --leave-output-tensor` |
 | `advanced.pure` | bool | `false` | `llama-quantize --pure` |
 | `advanced.allow_remote_code` | bool | `false` | tải và chạy các file `*.py` của repo bên trong coordinator (nguy hiểm) |
+| `advanced.imatrix` | `auto` / `on` / `off` | `auto` | chế độ importance matrix. `auto` tính ma trận khi loại đó có `needs_imatrix` hoặc `bpw` dưới 4.0; `on` luôn tính (với loại do llama-quantize ghi); `off` không bao giờ. Chi tiết bên dưới |
+| `advanced.calibration_path` | string hoặc null | null | đường dẫn tuyệt đối của tệp `.txt` trên máy coordinator (tối đa 20 MB, không rỗng; đường dẫn trên máy chủ được dịch giống đường dẫn thư viện) để hiệu chỉnh; null = văn bản đa ngôn ngữ đi kèm gpupool. Tệp được sao chép khi job bắt đầu |
+| `advanced.imatrix_chunks` | int >= 0 | `0` | số chunk 512 token mà `llama-imatrix` xử lý; `0` = 100. Ít hơn thì nhanh hơn nhưng thô hơn |
 | `advanced.validate_generation` | bool | `true` | sinh vài token trên CPU sau khi chuyển đổi |
 | `advanced.threads` | int >= 0 | `0` | `0` = `GPUPOOL_CONVERT_THREADS` |
 
-Các tuỳ chọn lượng tử hoá trong `advanced` bị bỏ qua với `F16`, `BF16` và `Q8_0`.
+Các tuỳ chọn lượng tử hoá trong `advanced` (kể cả các tuỳ chọn importance matrix) bị bỏ qua với `F16`, `BF16` và
+`Q8_0`.
+
+**Chính sách importance matrix (quyết định lúc gửi).** Job tính ma trận khi `quant` không phải `F16`/`BF16`/`Q8_0` và
+`imatrix` là `on`, hoặc `auto` với `needs_imatrix` true hay `bpw` < 4.0 (nên từ `Q4_K_M` trở lên không tính khi
+`auto`). `off` với loại có `needs_imatrix` bị từ chối (422). Nếu chưa cài `llama-imatrix`: `on`, hoặc loại có
+`needs_imatrix`, bị từ chối (503); `auto` với loại chỉ hưởng lợi từ ma trận thì lặng lẽ chạy không có nó
+(`imatrix_used: false`). Văn bản hiệu chỉnh được kiểm tra lúc gửi (`.txt`, không rỗng, tối đa 20 MB, nếu không thì
+422). Ma trận được tính bằng `llama-imatrix -c 512 --no-ppl -ngl 0 --chunks <N>` trên bản trung gian 16 bit, trên CPU,
+trong giai đoạn `calibrating`, chiếm phần lớn thời gian (đo được: khoảng 20 trên 28 phút cho Qwen2.5-1.5B sang
+`IQ3_M` trên CPU laptop).
 
 **`ConvertJob`**:
 
@@ -742,19 +757,22 @@ Các tuỳ chọn lượng tử hoá trong `advanced` bị bỏ qua với `F16`,
 | --- | --- | --- |
 | `id` | string | 12 ký tự hex |
 | `request` | `ConvertRequest` | đúng như đã gửi |
-| `state` | string | `queued`, `downloading`, `converting`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
+| `state` | string | `queued`, `downloading`, `converting`, `calibrating`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
 | `stage_progress` | float hoặc null | 0..1 trong giai đoạn hiện tại, null khi chưa biết |
 | `bytes_done`, `bytes_total` | int, int hoặc null | giai đoạn tải |
 | `output_name` | string | tên file trong thư viện |
+| `imatrix_used` | bool | importance matrix được (hoặc đã) tính cho job này: job đi qua `calibrating`. Quyết định lúc gửi theo chính sách ở trên |
+| `failed_stage` | trạng thái hoặc null | giai đoạn đang chạy lúc job lỗi hoặc bị huỷ (ví dụ `calibrating`); null trong các trường hợp khác và sau khi retry. Cơ sở dữ liệu của bản phát hành đầu được nâng cấp tại chỗ |
 | `output_bytes`, `est_output_bytes` | int hoặc null | dung lượng thật và ước lượng |
 | `validation` | `Validation` hoặc null | xem bên dưới |
 | `error` | string hoặc null | vì sao lỗi, hoặc ghi chú *needs review* |
 | `log_tail` | `[string]` | các dòng cuối của công cụ hiện tại hoặc gần nhất |
 | `created_at`, `started_at`, `finished_at` | float hoặc null | thời gian unix |
 
-Các trạng thái đang hoạt động là `queued`, `downloading`, `converting`, `quantizing`, `validating`; `done`, `failed` và
-`cancelled` là trạng thái cuối; `needs_review` chờ `accept` hoặc xoá. Job lấy từ thư mục cũng đi qua `downloading` (nó
-chỉ tạo liên kết tới các file). `F16`, `BF16` và `Q8_0` bỏ qua `quantizing`.
+Các trạng thái đang hoạt động là `queued`, `downloading`, `converting`, `calibrating`, `quantizing`, `validating`;
+`done`, `failed` và `cancelled` là trạng thái cuối; `needs_review` chờ `accept` hoặc xoá. Job lấy từ thư mục cũng đi
+qua `downloading` (nó chỉ tạo liên kết tới các file). `calibrating` chỉ xuất hiện khi `imatrix_used` là true. `F16`,
+`BF16` và `Q8_0` bỏ qua `calibrating` và `quantizing`.
 
 **`Validation`**: `header_ok` (bool hoặc null), `architecture`, `n_layers`, `vocab_size`, `chat_template` (bool),
 `tokenizer_ok` (bool, null = không chạy được), `tokenizer_cases` (`[{text, hf, gguf, match}]`: id token của 8 đoạn
@@ -764,8 +782,10 @@ vào `needs_review`; giá trị null không phải là lỗi.
 
 ### `GET /api/convert/options`
 
-Trả `{"available": bool, "problem": string hoặc null, "quant_options": [QuantOption], "cluster": {"largest_gpu_mb",
-"pool_mb"}}`. `problem` nói thiếu gì khi bộ công cụ chưa được cài đặt (UI hiển thị nó). Các ước lượng trong
+Trả `{"available": bool, "problem": string hoặc null, "quant_options": [QuantOption], "imatrix_available": bool,
+"cluster": {"largest_gpu_mb", "pool_mb"}}`. `problem` nói thiếu gì khi bộ công cụ chưa được cài đặt (UI hiển thị nó).
+`imatrix_available` cho biết `llama-imatrix` đã được cài chưa: khi false, các loại có `needs_imatrix` không chuyển đổi
+được (UI làm mờ chúng) và không dùng được importance matrix. Các ước lượng trong
 `quant_options` để trống ở đây; hãy dùng inspect cho một model cụ thể.
 
 ### `POST /api/convert/inspect`
@@ -777,7 +797,7 @@ khi thiếu bộ công cụ, khi đó `supported` là null. Lỗi: `400`, `403`,
 ### `POST /api/convert`
 
 Body: một `ConvertRequest`. Kiểm tra bộ công cụ, inspect nguồn, từ chối những gì không thể chạy, rồi xếp job vào hàng
-đợi. Trả `ConvertJob` (trạng thái `queued`). Lỗi: `400`, `403`, `404`, `409`, `422`, `502`, `503` như bảng trên. Các
+đợi. Trả `ConvertJob` (trạng thái `queued`). Lỗi: `400`, `403`, `404`, `409`, `422`, `502`, `503`, `507` như bảng trên (`507` là lần kiểm tra đĩa đầu tiên). Các
 job chạy lần lượt từng cái, theo thứ tự gửi.
 
 ### `GET /api/convert`, `GET /api/convert/{job_id}`
@@ -815,6 +835,11 @@ curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content
 
 # 3. theo dõi, rồi deploy file từ thư viện
 curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id> | jq '{state, stage_progress, error}'
+
+# loại cần importance matrix: được hiệu chỉnh tự động (trạng thái đi qua "calibrating");
+# ít chunk hơn = nhanh hơn. "imatrix": "off" sẽ bị từ chối với IQ2_XS (422)
+curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"source": {"hf_repo": "Qwen/Qwen2.5-1.5B-Instruct"}, "quant": "IQ3_M", "advanced": {"imatrix": "auto", "imatrix_chunks": 30}}' | jq '{id, imatrix_used}'
 
 # needs_review: chấp nhận (hoặc DELETE job)
 curl -s -X POST -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id>/accept | jq .state

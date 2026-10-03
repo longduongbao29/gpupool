@@ -2,6 +2,53 @@
 
 > English version. Vietnamese version: [TEST_REPORT.vi.md](TEST_REPORT.vi.md). Keep both in sync.
 
+## 2026-10-03 (conversion, round 2: importance matrices, IQ types, early disk check)
+
+Features: IQ1/IQ2/IQ3 quantization types with importance matrices (the *calibrating* stage), the disk check at
+submit, `failed_stage` / `imatrix_used` on jobs, per-model allowed servers and GPUs (`"<node>/*"`), copy buttons on
+model cards (commit 002d42e, with f3bf76b; design in [DESIGN.en.md](DESIGN.en.md#178-importance-matrices-and-the-calibrate-stage)).
+Machine: the same Windows 11 laptop (CPU only for conversion), Docker in WSL2, llama.cpp b11342, coordinator image
+built with the toolchain including `llama-imatrix`.
+
+### Results
+
+| Test | Result |
+| --- | --- |
+| Unit suite (`uv run pytest`) | 809 passed |
+| CI end-to-end (`scripts/ci_e2e.py`) | 33/33 checks passed in 249 s |
+| E2E: `HuggingFaceTB/SmolLM2-135M-Instruct` to `Q4_K_M` | 71 s, 105,453,984 bytes; served split over RPC, answered a chat |
+| E2E: a **folder** source to `Q8_0` | 25 s, 144,810,912 bytes; no importance matrix (`imatrix_used` false), the file is in the library, the source folder untouched |
+| E2E: Hugging Face to `IQ2_XS` **with an importance matrix** (4 chunks) | 76 s, 84,573,088 bytes; stages *converting*, *calibrating*, *quantizing*, *validating*; `imatrix_used` true, GGUF header validated, file in the library |
+
+### Real conversions (measured, one job at a time, laptop CPU, WSL Docker)
+
+| Model, type | Download | Convert | Calibrate | Quantize | Validate | Total | Output | Peak RSS |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B-Instruct, `Q4_K_M` | 107 s | 12 s | none | 4 s | 20 s | 143 s | 397,807,488 B | 1045 MiB |
+| Qwen2.5-1.5B-Instruct, `IQ3_M` (100 chunks) | 314 s | 55 s | 1175 s | 123 s | 21 s | 1687 s (28 min) | 776,663,904 B | 1697 MiB |
+
+The cgroup peaks, which include the page cache, were 3.0 GB and 3.4 GB. Calibration is about 70 % of the second job:
+on a CPU the importance matrix is the cost of the IQ types, which is why the UI states it and why *Calibration chunks*
+exists (fewer = faster).
+
+### Size estimate for the new types
+
+The estimate shown in the dialog against the real files: `IQ2_XS` +6 %, `IQ3_M` -4 %, `Q8_0` -1 %. The IQ rows use
+whole-file bits per weight (the output and the most sensitive tensors stay at higher precision), not the format's
+nominal figure.
+
+### Defects found by review and real runs (all fixed)
+
+| Defect | Effect | Fix |
+| --- | --- | --- |
+| `.gitignore` had the rule `data/` (meant for runtime data folders), which also matched `src/gpupool/converter/data/` | the built-in calibration text and its README were silently left out of the commit; a fresh checkout or the CI image would have no calibration text and every importance-matrix job without a `calibration_path` would be refused with 503. Local tests passed because the file existed on disk | the package data folder is excepted from the rule (commit f3bf76b) |
+| The model form said "Auto placement / choose GPUs yourself" | it read as manual placement, although pins were always an *allowed set* the scheduler chooses within | now "All servers and GPUs / Only selected ones" with a server and GPU tree; `"<node>/*"` allows a whole server including later GPUs; the Servers tab is untouched |
+| Only the endpoint could be copied from a model card | users had to type the model name and a curl by hand | the card copies the endpoint, the model name and a ready `curl` separately |
+
+Not covered by these runs: a model of several GB or more (the largest was 1.5 B parameters), an importance matrix on a
+GPU (calibration always runs on the CPU), a custom `calibration_path` end to end (unit tests only), the
+`needs_review` path from a real model, and a real multi-server LAN.
+
 ## 2026-10-03 (Hugging Face to GGUF conversion)
 
 Feature: the coordinator converts Hugging Face models to GGUF with a selectable quantization type

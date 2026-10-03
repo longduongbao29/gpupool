@@ -151,6 +151,9 @@ class ConvertManager:
         self._worker_task: asyncio.Task | None = None
         self._wake: asyncio.Event | None = None
         self.models_dir.mkdir(parents=True, exist_ok=True)
+        if str(db_path) != ":memory:":
+            # Like Store: a fresh install's data folder may not exist yet (sqlite will not create it).
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
         self._db.row_factory = sqlite3.Row
         with self._lock:

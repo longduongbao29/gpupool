@@ -32,17 +32,23 @@ use too.
 - **Deployment.** Docker images on GHCR (`ghcr.io/longduongbao29/gpupool-coordinator`, `ghcr.io/longduongbao29/gpupool-agent`),
   images that build without GitHub access, HTTP proxy support, model files taken from host paths.
 - **Convert Hugging Face models to GGUF.** A model published only as safetensors / PyTorch weights can be
-  converted inside the coordinator (UI or `/api/convert`) with a selectable quantization type (Q8_0 ... Q2_K),
-  size and VRAM estimates per type, and validation (GGUF header, tokenizer ids vs Hugging Face, a short CPU
-  generation) before it enters the model library. The Docker image ships the toolchain
+  converted inside the coordinator (UI or `/api/convert`) with a selectable quantization type (Q8_0 ... Q2_K and
+  the low-bit IQ1/IQ2/IQ3 types), size and VRAM estimates per type, and validation (GGUF header, tokenizer ids vs
+  Hugging Face, a short CPU generation) before it enters the model library. The Docker image ships the toolchain
   (`WITH_CONVERT=0` builds the lean image without it).
+- **IQ types with importance matrices.** The IQ types below 4 bits per weight need an importance matrix; the
+  converter computes one (`llama-imatrix`, a "calibrating" stage) from a built-in original multilingual text or
+  your own `.txt`. `auto` mode does it where it matters, and a disk that cannot hold the job is refused at submit.
+- **Per-model server and GPU limits.** A model can be limited to some servers or GPUs (a whole server, including
+  GPUs added later, or single GPUs); the scheduler still chooses the placement among the allowed ones. Model cards
+  copy the endpoint, the model name and a ready `curl`.
 - **Web UI** for servers, GPUs, models, deployments, recommendations and events.
 
 ## Status
 
 Tested on one Windows laptop (GTX 1650 Ti, 4 GB): natively with emulated nodes against real llama.cpp,
 and as a simulated 3-server Docker cluster in WSL2 (`docker-compose.sim.yml`). A CPU-only 3-server
-end-to-end test also runs in CI, including a Hugging Face to GGUF conversion. Not yet run on a real multi-server LAN. See
+end-to-end test also runs in CI, including Hugging Face and folder conversions and an importance-matrix quantization. Not yet run on a real multi-server LAN. See
 [docs/TEST_REPORT.en.md](docs/TEST_REPORT.en.md).
 
 ## How it works
@@ -86,15 +92,16 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
 ## Tests
 
 ```bash
-uv run pytest                 # unit tests (about 768)
+uv run pytest                 # unit tests (about 809)
 uv run pytest -m real         # needs llama.cpp in .cache/llama/b11342-cuda12.4 and a GGUF in .cache/models
 uv run python scripts/e2e_local.py   # 3 emulated nodes on one machine, real llama.cpp
 
 # simulated 3-server cluster on one machine (needs Docker + NVIDIA Container Toolkit)
 docker compose -f docker-compose.sim.yml up -d
 
-# CI end-to-end: coordinator + 3 CPU-only agents (docker-compose.ci.yml), tiny model split over RPC,
-# then a Hugging Face model is converted to GGUF in the coordinator and served
+# CI end-to-end (33 checks): coordinator + 3 CPU-only agents (docker-compose.ci.yml), tiny model split over RPC,
+# then three conversions in the coordinator: Hugging Face -> Q4_K_M (served), a folder source -> Q8_0, and
+# IQ2_XS with an importance matrix
 uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
 ```
 

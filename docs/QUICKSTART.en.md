@@ -53,10 +53,27 @@ docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 1. **Models → Add model**: type a Hugging Face repo (e.g. `Qwen/Qwen2.5-7B-Instruct-GGUF`), pick a
    `.gguf` file, **Download**. Or the **Path** tab for a file already on the coordinator machine.
 2. **New model**: give it a name (this is the `model` your clients will use), pick the file.
-   GPUs: leave **Auto**, or tick the GPUs to use.
+   Servers and GPUs: leave **All servers and GPUs**, or choose **Only selected ones** (see below).
 3. **Start**. The status goes *starting → running*. **Stop** frees the GPUs.
 
 If the model is bigger than any single GPU, it is split across GPUs and servers automatically.
+
+### Limiting a model to some servers or GPUs
+
+By default a model may use any server and GPU in the pool. Choose **Only selected ones** in the model form to
+limit it: a tree of servers and their GPUs appears (with free memory), tick what the model may use. Ticking a whole
+server allows every GPU of that server, **including GPUs added to it later** (stored as `"<node>/*"`); ticking single
+GPUs allows just those (`"<node>/<device>"`). This is a **limit, not a manual placement**: gpupool still chooses
+the best placement, but only among the allowed devices. The Servers tab is not affected: a GPU you leave out here
+stays enabled in the pool for other models. Saving with *Only selected ones* and nothing ticked is refused (an empty
+list would mean "everything"). The model card shows a *Limited to ...* chip. Over HTTP this is `pin_devices`, see
+[API.en.md](API.en.md#3-models-apimodels).
+
+### Copying what a client needs
+
+Each model card has copy buttons for the **endpoint** (the base URL), the **model name** (the value of `"model"` in
+requests) and a ready-made **curl** command for this model (with an `Authorization` header placeholder when API keys
+are set).
 
 ## 4. Connect your application
 
@@ -114,7 +131,8 @@ weights are already on the server's disk.
    one GPU or only the pool, and which type is recommended, with the reasons.
 4. Check the **output file name** (default `<model>-<TYPE>.gguf`; must end in `.gguf`), optionally **Keep downloaded
    source**, optionally **Advanced**. Then **Start conversion**.
-5. Watch the **Conversions** panel on the same page: stages *Download → Convert → Quantize → Validate*, a progress
+5. Watch the **Conversions** panel on the same page: stages *Download → Convert → Calibrate (only when an
+   importance matrix is computed) → Quantize → Validate*, a progress
    bar, the log and the validation details. Jobs run one at a time, at low CPU priority so inference on the
    coordinator host stays responsive. **Cancel**, **Retry** (failed or cancelled jobs) and delete are there too.
 6. When the job is *done* the file is in the library (source `convert`). **Deploy this model** opens the new-model
@@ -141,11 +159,19 @@ weight for the whole model.
 | `Q4_0` | 4.64 | +0.4685 | legacy; `Q4_K_S` is usually better |
 | `Q3_K_L` | 4.31 | +0.5562, noticeable loss | tight memory |
 | `Q3_K_M` | 4.00 | +0.6569, clear loss | only when memory is tight |
+| `IQ3_M` | 3.76 | no published figure; usually better than `Q3_K_M` at a smaller size | tight memory, better than the `Q3_K` types |
+| `IQ3_S` | 3.67 | no published figure; better than `Q3_K_S` at a similar size | tight memory |
 | `Q3_K_S` | 3.65 | +1.6321, large loss | last resort |
+| `IQ3_XS`, `IQ3_XXS` | 3.50, 3.26 | clear to large loss | very tight memory (**need** an importance matrix) |
 | `Q2_K` | 3.17 | +3.5199, severe loss | last resort |
+| `IQ2_M`, `IQ2_S`, `IQ2_XS`, `IQ2_XXS` | 2.94, 2.75, 2.60, 2.39 | heavy loss | when nothing larger fits (**need** an importance matrix) |
+| `IQ1_M`, `IQ1_S` | 2.15, 2.01 | extreme loss | only for very large models that must fit (**need** an importance matrix) |
 
-IQ1 and IQ2 types are not offered: llama-quantize refuses them without an importance matrix, which gpupool does
-not compute.
+The `IQ` types squeeze a model below 4 bits per weight. For the IQ1, IQ2, `IQ3_XXS` and `IQ3_XS` types,
+llama-quantize refuses to run without an **importance matrix**; the others are better with one. gpupool computes it
+for you, see the next section. The bpw of the IQ rows is a whole-file average (the output and the most sensitive
+tensors stay at higher precision), which is why it is above the nominal bits of the format. Measured size estimate
+error against real files: `IQ2_XS` +6 %, `IQ3_M` -4 %, `Q8_0` -1 %.
 
 The recommended type follows these rules:
 
@@ -167,6 +193,41 @@ sizes shown in the dialog already account for that and for the embedding matrice
 bitsandbytes models are not supported**: the request is refused with HTTP 422. Convert the model's original (base)
 model instead; the dialog offers it when the model card names one.
 
+### Importance matrix (IQ types and very small files)
+
+An **importance matrix** records which weights matter most when the model reads typical text. The quantizer then keeps
+those weights more precise and squeezes the rest harder, which matters more the fewer bits there are. gpupool
+computes it in an extra **Calibrate** stage: it runs `llama-imatrix` on the 16-bit intermediate file, over a
+calibration text, on the CPU, before Quantize.
+
+The **Importance matrix** option has three settings:
+
+| Setting | What happens |
+| --- | --- |
+| **Auto** (default) | computes one when the type needs it (the IQ1, IQ2, `IQ3_XXS`, `IQ3_XS` types) or is below 4 bits per weight (the other `IQ3` types, `Q3_K_S`, `Q2_K`), where it helps most. Types of 4 bits and above (`Q4_K_M`, `Q5_K_M`...) go without |
+| **On** | always computes one, for any type written by llama-quantize. Slower, and it improves quality at every size, including `Q4_K_M` |
+| **Off** | never. Refused (HTTP 422) for the types that need one, so use it only for the others, to save the time |
+
+`F16`, `BF16` and `Q8_0` never use one (there is no llama-quantize step). When the coordinator image has no
+`llama-imatrix` (an install outside Docker without it), a type that needs a matrix, or **On**, is refused with
+HTTP 503; with **Auto** on a type that merely benefits from one the job simply runs without it. The UI greys out the
+types that need a matrix when `imatrix_available` is false (`GET /api/convert/options`).
+
+**Time cost.** Calibration is the slow part on a CPU, because it runs the whole model over the text. Measured on a
+laptop CPU in WSL, with the default of 100 chunks (512 tokens each): Qwen2.5-1.5B to `IQ3_M` took **28 minutes** in
+total, of which calibration was about **19 to 20 minutes**. For comparison Qwen2.5-0.5B to `Q4_K_M` (no matrix) took
+about 2.5 minutes including a 107 s download. The time grows with the model size and with the number of chunks, so
+**fewer chunks = faster** and a rougher matrix: set *Calibration chunks* lower (for example 20 to 30) to try
+something quickly, keep the default for a model you will keep. A powerful CPU, or a smaller model, cuts the time
+accordingly.
+
+**Calibration text.** By default gpupool uses a text it ships: original multilingual text (English and Vietnamese
+prose, many other languages, code, math, JSON, chat turns), written for gpupool so there is no licence question and
+no narrow bias (see `src/gpupool/converter/data/README.md`). To calibrate on your own domain, give **Calibration
+text**: the absolute path of a `.txt` file on the server (at most 20 MB; host paths are translated like library
+paths). It is copied when the job starts, so changing the file later does not affect the running job. A matrix
+computed on narrow text (say English only) makes the model better on that text and worse on the rest.
+
 ### Advanced options in plain words
 
 | Option | What it does |
@@ -175,6 +236,9 @@ model instead; the dialog offers it when the model card names one.
 | Output tensor type, Token embedding type | Precision of the output layer and of the word-embedding table. Keeping them higher (for example `q8_0`) costs a little size and can help quality on small types. Default lets llama-quantize decide |
 | Leave output tensor | Do not quantize the output layer at all: a slightly bigger file, slightly better quality |
 | Pure | Use the chosen type for every tensor instead of the usual mix. Usually lowers quality for the same size; for experiments |
+| Importance matrix | *Auto* / *On* / *Off*, see the previous section |
+| Calibration text | Absolute path of a `.txt` file (at most 20 MB) to calibrate on, instead of the text gpupool ships |
+| Calibration chunks | How many 512-token pieces of the text to process; `0` = default (100). Fewer is faster |
 | Validate generation | Load the file on the CPU and generate a few tokens (on by default). The header and tokenizer checks always run |
 | Allow remote code | Download the repository's own `*.py` files and run them inside the coordinator. See Security below |
 | Threads | CPU threads for quantizing (`0` = `GPUPOOL_CONVERT_THREADS`; that one at `0` = all CPUs) |
@@ -204,12 +268,23 @@ at all (for example the Hugging Face tokenizer failed to load) is only a warning
 - **Disk.** The peak is about *source + 16-bit intermediate + output*. Roughly, a 7 B model needs about 14 GB of
   download, 14 GB of intermediate and about 4 GB of output at `Q4_K_M`. gpupool checks the free space before the
   download and before each heavy stage (with a 512 MB margin); if there is not enough the job fails with a message
-  saying how much is needed and how much is free. The intermediate is deleted as soon as the quantized file
+  saying how much is needed and how much is free. Submitting also does a **first check**: when the disk obviously
+  cannot hold *uncached download + 16-bit intermediate + output*, the request is refused at once with HTTP 507
+  (the UI shows the message) instead of failing minutes later. The intermediate is deleted as soon as the quantized file
   exists. `F16`, `BF16` and `Q8_0` have no separate intermediate.
-- **RAM.** The converter loads the weights through PyTorch, so plan free RAM of the order of the 16-bit model size
-  (not measured). The generation check needs free RAM of 1.2 times the output file, else it is skipped.
-- **Time.** Measured on CPU in CI, download included: SmolLM2-135M-Instruct to `Q4_K_M` in 64 s end to end;
-  Qwen2.5-0.5B-Instruct about 1 min. Bigger models scale roughly with their size and with the download speed.
+- **RAM.** The converter loads the weights through PyTorch, so plan free RAM of the order of the 16-bit model size.
+  Measured peak resident memory of a whole job: about **1.0 GB** (1045 MiB) for Qwen2.5-0.5B and about **1.7 GB**
+  (1697 MiB) for Qwen2.5-1.5B; it scales with model size, so expect several times the figure for a 7 B model. The
+  container's cgroup peak is higher because it counts the page cache (3.0 and 3.4 GB in those runs); that part is
+  reclaimable. The generation check needs free RAM of 1.2 times the output file, else it is skipped.
+- **Time.** Measured on CPU, download included: SmolLM2-135M-Instruct to `Q4_K_M` in about 70 s end to end in CI;
+  Qwen2.5-0.5B-Instruct to `Q4_K_M` in 143 s (download 107 s, convert 12 s, quantize 4 s, validate 20 s). With an
+  importance matrix, calibration dominates: Qwen2.5-1.5B to `IQ3_M` took 1687 s (download 314 s, convert 55 s,
+  calibrate 1175 s, quantize 123 s, validate 21 s), see *Importance matrix*. Bigger models scale roughly with their
+  size and with the download speed.
+- **When a job fails.** The job records `failed_stage`, the stage that was running when it failed or was cancelled
+  (for example `calibrating`), so you can tell a download problem from a disk or quantization problem at a glance;
+  the UI marks that step of the stepper.
 
 ### Where files go
 
@@ -238,7 +313,8 @@ otherwise inspect and download are refused with HTTP 403.
 ### Building the image without the toolchain, or behind a mirror
 
 The coordinator image ships the conversion toolchain by default (`WITH_CONVERT=1`): llama.cpp's converter, a
-CPU-only PyTorch venv, and static CPU builds of `llama-quantize`, `llama-tokenize` and `llama-simple`. Measured:
+CPU-only PyTorch venv, and static CPU builds of `llama-quantize`, `llama-tokenize`, `llama-simple` and
+`llama-imatrix`. Measured (before `llama-imatrix` was added):
 **1.77 GB** with the toolchain against **560 MB** without. A coordinator that never converts can use the lean image:
 
 ```bash
@@ -248,6 +324,7 @@ docker build --build-arg WITH_CONVERT=0 -f docker/coordinator.Dockerfile -t gpup
 
 Without the toolchain everything else works; inspect still describes the model but cannot tell whether its
 architecture is supported, and starting a job returns HTTP 503 with an explanation (the UI shows it as a notice).
+`llama-imatrix` alone is optional: a coordinator without it converts every type that needs no matrix as usual.
 Where `download.pytorch.org` is blocked, build with a mirror of the PyTorch CPU wheel index
 (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`; `docker-compose.coordinator.yml` reads
 `TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11342.tar.gz` when it is
@@ -285,10 +362,12 @@ for the first model download (verified by SHA-256, then cached). Build the image
 python scripts/ci_e2e.py                       # options: --project gpupool-ci --port 8080 --keep --skip-convert
 ```
 
-It checks: the three agents self-join, the model library, the API surface, start to *running*, a chat
-completion, `/metrics`, and stop (no engine left on any agent). The last stage runs a conversion
-(`HuggingFaceTB/SmolLM2-135M-Instruct` to `Q4_K_M`, about 100 MB, inside the coordinator), serves the converted
-file split over RPC and sends a chat; it needs a coordinator image with the toolchain (`WITH_CONVERT=1`, the
+It makes 33 checks: the three agents self-join, the model library, the API surface, start to *running*, a chat
+completion, `/metrics`, and stop (no engine left on any agent). The last stages run three conversions inside the
+coordinator: `HuggingFaceTB/SmolLM2-135M-Instruct` to `Q4_K_M` (about 100 MB; the converted file is then served
+split over RPC and answers a chat), a **folder** source (the model's files downloaded into a folder, converted to
+`Q8_0`, source left untouched) and `IQ2_XS`, which needs an **importance matrix** (4 calibration chunks keep it short;
+the job goes through *converting*, *calibrating*, *quantizing*, *validating*). They need a coordinator image with the toolchain (`WITH_CONVERT=1`, the
 default) and internet access to huggingface.co (set `HF_TOKEN` to avoid anonymous rate limits). `--skip-convert`
 leaves it out. Exit code 0 means all passed; on failure
 it prints `docker compose logs` and exits 1. The cluster is removed afterwards unless `--keep` is given.
@@ -595,7 +674,11 @@ described above. HTTP API: [API.en.md](API.en.md). Internals: [DESIGN.en.md](DES
 | Agent log says the server was removed | it was deleted in the UI; add it again there (Servers → Add Server → agent URL `http://<server-ip>:7070`) |
 | Convert: inspect or the job says the architecture is not supported ("not supported by llama.cpp b11342's converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
 | Convert: HTTP 503 "conversion is not set up ..." | the image was built with `WITH_CONVERT=0`, or `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` are missing or wrong outside Docker. Use the full image or fix the paths; the message names what is missing |
-| Convert: a job *failed* with "not enough free disk space ..." | the job needs about source + 16-bit intermediate + output (see *Disk, RAM and time*). Free space, or point `GPUPOOL_MODELS_DIR` at a bigger disk, then **Retry** (finished downloads are reused) |
+| Convert: HTTP 507 "not enough free disk space ..." when starting the job | the disk obviously cannot hold *uncached download + 16-bit intermediate + output* (see *Disk, RAM and time*). Nothing was queued. Free space, or point `GPUPOOL_MODELS_DIR` at a bigger disk, and start again |
+| Convert: a job *failed* with "not enough free disk space ..." | the first check passed but a later stage found less room (another job or process used the disk). The job's `failed_stage` says where. Free space, then **Retry** (finished downloads are reused) |
+| Convert: HTTP 422 "`<type>` needs an importance matrix ..." | the type is one of the IQ1, IQ2, `IQ3_XXS`, `IQ3_XS` types and the option is *Off*. Set it to *Auto* or *On*, or pick a larger type |
+| Convert: HTTP 503 about `llama-imatrix` or the built-in calibration text | the install has no `llama-imatrix` (use the full coordinator image), or the shipped text is missing (reinstall, or give a calibration text). Choose a type that needs no matrix, or *Off* / *Auto* on a type that only benefits from one |
+| Convert: the job with an importance matrix seems stuck at *calibrating* | it is working: calibration takes the longest on a CPU (about 20 minutes for a 1.5 B model, see *Importance matrix*). The progress bar estimates it. Cancel and retry with fewer *Calibration chunks* if it is too slow |
 | Convert: the job is in *needs_review* ("the tokenizer differs from Hugging Face on N of 8 test texts") | the GGUF tokenizes some texts differently from the original, so the model may misbehave on them. Open the validation panel to see which texts. Accept only if you can live with it; otherwise delete the job and use a ready-made GGUF |
 | Convert: HTTP 403 "repo is gated or private" | set `HF_TOKEN` on the coordinator and accept the licence on the model page, then try again |
 | Model stuck in *failed*: "not enough VRAM" | free GPUs, enable more GPUs, add a server, or use a smaller quantization |

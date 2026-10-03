@@ -187,7 +187,12 @@ display, simulation and rebalancing.
 
 Pins (`pin_devices`), GPUs switched off in the pool, and VRAM reserved by launching replicas are
 applied by the reconciler before planning by setting `usable_mb` to 0 or lowering it, so the
-planner itself stays unaware of them.
+planner itself stays unaware of them. A pin list is an **allowed set**, not a placement: every device
+outside it gets `usable_mb = 0` (`Reconciler._apply_pins`), and the planner then picks the best
+placement among what remains. An entry is `"<node>/<device>"` or `"<node>/*"`; the wildcard allows every
+device of that server, including GPUs that register later, so a "this whole server" choice does not go
+stale when the server grows. Pins and the pool's enable/disable switch are independent: a GPU left out of a
+model's set stays enabled for other models.
 
 ### 6.3 Scoring (`scoring.py`, `placement.py`)
 
@@ -244,7 +249,7 @@ is the behaviour implemented.
 | `autoscale` | unset = defaults | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300. |
 | `idle_unload_s` | unset | Only with `min_replicas = 0`: unload after this long without a request. |
 | `preemptible` | true | False: a higher-priority model may never stop this model's replicas. |
-| `pin_devices` | empty | `node/device` entries the replicas may use; every other GPU is treated as unusable for this model, including during preemption and rebalancing. |
+| `pin_devices` | empty | The allowed set: `node/device` or `node/*` (every device of that server, GPUs added later included) entries the replicas may use; every other GPU is treated as unusable for this model, including during preemption and rebalancing. Empty = all. It limits, the scheduler still chooses. |
 
 ### 7.1 Autoscaler (`coordinator/autoscaler.py`)
 
@@ -575,8 +580,10 @@ Real-engine runs (results in [TEST_REPORT.en.md](TEST_REPORT.en.md)):
   a `CPU` device running a real `ggml-rpc-server -d CPU`, so RPC is real over TCP.
 - `scripts/ci_e2e.py` with `docker-compose.ci.yml`: a real coordinator and 3 real agents (Docker images, CPU
   only) serve a tiny model split over several servers; catches Dockerfile errors and wrong Python in images.
-  Its last stage converts a Hugging Face model (SmolLM2-135M-Instruct) to GGUF inside the coordinator, serves the
-  result split over RPC and sends a chat (`--skip-convert` leaves it out).
+  Its last stages run three conversions inside the coordinator (33 checks in all): a Hugging Face model
+  (SmolLM2-135M-Instruct) to `Q4_K_M`, served split over RPC with a chat; a folder source to `Q8_0` (the source
+  folder must stay untouched); and `IQ2_XS`, which needs an importance matrix, checking the stages and the
+  matrix flag (`--skip-convert` leaves them out).
 - `docker-compose.sim.yml`: simulated 3-server cluster for demos; `GPUPOOL_FAKE_DEVICES` makes agents
   report different GPUs while sharing the one real card.
 - `scripts/ui_mock_server.py`: in-memory coordinator API for working on the UI without a cluster.
@@ -608,6 +615,8 @@ llama.cpp's `convert_hf_to_gguf.py` → `llama-quantize` → validation → the 
 The toolchain is optional. `Toolchain.problem()` returns what is missing (`GPUPOOL_CONVERT_DIR`,
 `GPUPOOL_CONVERT_PYTHON`, `GPUPOOL_LLAMA_TOOLS_DIR`); without it everything else works and `POST /api/convert`
 answers 503 with that explanation. `convert_api.py` imports the converter lazily so the router loads either way.
+`llama-imatrix` is the one optional part inside the toolchain (`Toolchain.has_imatrix()`, reported as
+`imatrix_available` by `GET /api/convert/options`), see 17.8.
 
 | Module | Job |
 | --- | --- |
@@ -616,6 +625,7 @@ answers 503 with that explanation. `convert_api.py` imports the converter lazily
 | `converter/source.py` | `HfClient` (listing, model info, `config.json`, download), `select_files`, `local_files`, `inspect_source` |
 | `converter/jobs.py` | `ConvertManager`: job table in SQLite, the single worker, the pipeline, cleanup |
 | `converter/toolchain.py` | where the tools are, command builders, `run_tool` (low priority, process-tree kill), supported architectures |
+| `converter/data/calibration.txt` | the built-in calibration text for importance matrices (package data, with a README explaining its origin) |
 | `converter/validate.py` | header, tokenizer and generation checks |
 | `converter/hf_tokenize.py` | runs *under the converter's Python*: token ids of the probe texts from Hugging Face (gpupool is not installed there) |
 | `coordinator/convert_api.py` | the 9 routes, mapping `ConvertError.status` to HTTP |
@@ -623,11 +633,14 @@ answers 503 with that explanation. `convert_api.py` imports the converter lazily
 ### 17.1 Pipeline
 
 ```
-queued → downloading → converting → quantizing → validating → done
-                                                          └→ needs_review → (accept) → done
+queued → downloading → converting → [calibrating →] quantizing → validating → done
+                                                                  └→ needs_review → (accept) → done
 (any active state) → failed | cancelled
 ```
 
+`calibrating` only exists for jobs that compute an importance matrix (17.8). When a job fails or is cancelled, the
+stage it was in is stored as `failed_stage`, so the UI can mark the step and a reader of the API can tell a download
+failure from a disk or calibration failure without parsing the error text.
 1. **Source files.** For Hugging Face the tree listing gives names and sizes; `select_files` keeps `config.json`,
    tokenizer files and the weights, and drops everything else. Safetensors win over `pytorch_model*.bin` when both
    exist; `consolidated.*` (the Mistral-native duplicate of the weights, which doubled the download) is skipped;
@@ -641,10 +654,12 @@ queued → downloading → converting → quantizing → validating → done
 4. **Convert.** `convert_hf_to_gguf.py src --outfile <outtype>.gguf --outtype <t>` with `plan_steps`: `F16`, `BF16`
    and `Q8_0` are written by the converter directly; every other type first writes a 16-bit intermediate (`auto` =
    bf16 for bf16 weights, otherwise f16).
-5. **Quantize.** `llama-quantize [flags] intermediate out.gguf TYPE [threads]`; the intermediate is deleted at once.
+5. **Calibrate** (only with an importance matrix, 17.8). `llama-imatrix` over the 16-bit intermediate writes
+   `imatrix.gguf` into the job's scratch folder.
+6. **Quantize.** `llama-quantize [--imatrix imatrix.gguf] [flags] intermediate out.gguf TYPE [threads]`; the intermediate is deleted at once.
    The advanced flags are checked against a whitelist of ggml type names so a user value can never become an extra
    command-line argument.
-6. **Validate** (17.4). **Publish**: move the file to `models_dir/<name>` and register it (`LibraryItem.source`
+7. **Validate** (17.4). **Publish**: move the file to `models_dir/<name>` and register it (`LibraryItem.source`
    `"convert"`), then clean up, and only then report `done`.
 
 Progress comes from the tools' own output: tqdm percentages for download and conversion, `[ i/ n]` lines of
@@ -671,7 +686,11 @@ and revision (several quantization types queued together, or later ones when `ke
 already there is not downloaded again. The cache is dropped when the job ends unless `keep_source` is set or another active job needs it; a failed or cancelled job keeps it for the retry, and
 deleting that job releases it. The scratch folder of a job is `models_dir/.convert/<job>/`.
 
-Free disk space is checked before each heavy stage with a 512 MB margin: before the download
+Free disk space is checked twice. First **at submit** (`_early_disk_check`): from the uncached part of the download
+(files already in the cache do not count), the intermediate and the estimated output plus the margin, and when the
+disk obviously cannot hold the job `POST /api/convert` answers 507 and queues nothing. Without it the same job would
+be accepted, wait in the queue, download for minutes and only then fail in the worker. Second, **before each heavy
+stage** in the worker, with a 512 MB margin, because free space can shrink while jobs wait: before the download
 (`remaining download + intermediate + output`), before converting (`intermediate + output`) and before quantizing
 (`output`). The intermediate is estimated as `params × 2` bytes (×4 for f32), or the source size when the count is
 unknown. Failing early with the numbers beats a half-written multi-GB file; the check raises `ConvertError` with
@@ -718,7 +737,14 @@ The recommendation (`quant.recommend`) walks the ladder `Q8_0`, `Q6_K`, `Q5_K_M`
 fits one GPU, then the first that fits the pool (split over RPC is slower, and the reason says so). Models under
 3 B parameters use only `Q8_0`, `Q6_K`, `Q5_K_M`, because small models lose quality fastest. Without GPUs there is
 no fit information and a size-based default applies (`Q8_0` below 3 B, `Q5_K_M` below 15 B, else `Q4_K_M`).
-`IQ1`/`IQ2` types are not offered (llama-quantize needs an importance matrix for them).
+The `IQ` types (`IQ1_*`, `IQ2_*`, `IQ3_*`) are listed as options but never the default; the
+recommendation only mentions them when even `Q4_K_M` does not fit, with the note that they need an importance matrix.
+
+The IQ rows were checked against real files, because their bpw is not the format's nominal figure (llama-quantize
+keeps the output matrix and the most sensitive tensors at higher types, so whole files are bigger). The table uses
+whole-file averages and the dialog's estimate came out within +6 % (`IQ2_XS`), -4 % (`IQ3_M`) and -1 % (`Q8_0`) of
+the real files. The 256-block IQ types also fall back to `IQ4_NL` (4.5 bpw) for rows that are not a multiple of 256,
+like the K-quants.
 
 ### 17.6 Persistence, restart and cleanup boundaries
 
@@ -747,4 +773,63 @@ the weights. A repository's Python code would therefore run inside the coordinat
 and sees only the staging folder, and the UI marks the option as dangerous. The same flag is passed to the Hugging
 Face tokenizer of the validation step. The image runs
 the toolchain from `/opt` (llama.cpp's converter and a CPU-only PyTorch venv, plus static CPU builds of
-`llama-quantize`, `llama-tokenize`, `llama-simple`); `WITH_CONVERT=0` leaves all of it out.
+`llama-quantize`, `llama-tokenize`, `llama-simple`, `llama-imatrix`); `WITH_CONVERT=0` leaves all of it out.
+
+### 17.8 Importance matrices and the calibrate stage
+
+**What and why.** Low-bit quantization has few levels per weight, so which weights get the precise ones matters. An
+importance matrix is a per-weight estimate of how much each weight affects the output on typical text, measured by
+running the model (`llama-imatrix`) over a calibration text; `llama-quantize --imatrix` then spends its precision where
+it counts. llama-quantize b11342 even refuses the IQ1, IQ2, `IQ3_XXS` and `IQ3_XS` types without one (`IQ2_M` and
+`IQ3_XS` files contain `IQ2_XS` / `IQ3_XXS` tensors), which is `QuantOption.needs_imatrix`. The matrix is computed from
+the **16-bit intermediate**, not from the quantized file, so it sees the model's real activations; the CPU runs it
+(`-ngl 0`, GPUs stay for inference, like the rest of the toolchain) at low priority.
+
+**Policy** (`quant.imatrix_wanted`, `ConvertManager._decide_imatrix`, decided at submit and stored as
+`imatrix_used`):
+
+| `imatrix` | Types written by the converter (`F16`, `BF16`, `Q8_0`) | A type that needs a matrix | Other types |
+| --- | --- | --- | --- |
+| `auto` | none | yes | yes when `bpw` < 4.0, else no |
+| `on` | none | yes | yes |
+| `off` | none | **422**, the quantizer would fail | no |
+
+Why `auto` is "needs it or under 4 bits per weight": the benefit grows as bits shrink (the fewer levels there are, the more the choice of
+which weights stay precise matters), while at 4 bits and above the quality gain is small and the cost
+is large: calibration is by far the slowest stage on a CPU (measured, Qwen2.5-1.5B to `IQ3_M`: 1175 s of 1687 s).
+So `Q4_K_M` and up are not slowed down by default, and `on` stays available for anyone who wants it. `Q8_0`, `F16`
+and `BF16` have no llama-quantize step to feed.
+
+**The tool is optional, and the failure is where it can be explained.** `llama-imatrix` is the one part of the
+toolchain a coordinator can lack while the rest works (a hand-built install; `imatrix_available` is false and the UI
+disables the types that need it). A job that cannot work without it, a type that needs a matrix or `on`, is refused at
+submit with 503 and a clear message, not minutes later inside `llama-quantize`. A job that merely would have
+benefited (`auto` on a type like `Q3_K_S`) runs without it, silently, because failing a conversion for lack of an
+optional improvement would be worse than the missing improvement. The same reasoning refuses bad calibration text at
+submit (422: not a `.txt`, empty, over 20 MB) and a missing built-in text with 503.
+
+**The calibration text and why it is original.** The usual public calibration sets are an English encyclopedia
+dump (`wikitext`) or community collections (such as `calibration_datav3`) whose licences are unclear or
+share-alike, which a project that ships and redistributes the file should not take on. The text is also a design
+choice: a matrix computed on narrow text (one language, no code) makes the quantizer protect the weights that text
+uses and be careless with the rest, so a model calibrated on English prose can get worse in Vietnamese or code. So gpupool
+ships `converter/data/calibration.txt` (about 115 KB, written for gpupool, no real personal data): English prose in
+many registers, Vietnamese with full diacritics, other languages, code in many languages, math and structured
+data, chat-formatted dialogue, and edge content (emoji, odd whitespace, mixed scripts). Its README gives the
+composition and the licence (the project's). A different `.txt` of at most 20 MB can be given as
+`advanced.calibration_path` (translated like library paths); either way the file is **copied into the job's scratch
+folder** when the stage starts, so one stable text is read even if the original changes or disappears meanwhile.
+(The text sits under `data/`, which `.gitignore` also uses for runtime data folders; the first commit missed it for
+exactly that reason, and a fresh checkout would have refused every matrix job with 503. The ignore rule now has an
+exception for the package folder; see TEST_REPORT.)
+
+**The run.** `llama-imatrix -m intermediate -f calibration.txt -o imatrix.gguf --chunks N -c 512 --no-ppl -ngl 0
+[-t threads]`. `N` is `advanced.imatrix_chunks`, default 100; the context is 512 tokens because short sequences keep
+a CPU run feasible; `--no-ppl` skips the perplexity pass, which only costs time. With `--no-ppl` the tool prints no
+per-chunk lines (in b11342 they are inside the perplexity branch), so progress is estimated from the time of the first
+pass and the ETA it prints, advanced once a second (never reaching 100 % from the clock alone: the file is written
+after the last chunk); per-chunk lines, if a future version prints them, take over. The result must exist and
+be non-empty, else the job fails.
+
+**Memory and time (measured).** One job's peak resident memory was 1045 MiB (Qwen2.5-0.5B, `Q4_K_M`) and 1697 MiB
+(Qwen2.5-1.5B, `IQ3_M`, with calibration); the cgroup peaks of 3.0 and 3.4 GB include page cache. See TEST_REPORT.

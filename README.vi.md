@@ -33,16 +33,22 @@ VRAM có người khác cùng dùng.
   build image không cần truy cập GitHub, hỗ trợ HTTP proxy, lấy file model từ đường dẫn trên host.
 - **Chuyển model Hugging Face sang GGUF.** Model chỉ được phát hành dưới dạng trọng số safetensors / PyTorch
   có thể được chuyển ngay trong coordinator (UI hoặc `/api/convert`) với loại lượng tử hoá tuỳ chọn
-  (Q8_0 ... Q2_K), ước lượng dung lượng file và VRAM cho từng loại, và bước kiểm tra (header GGUF, id token
-  so với Hugging Face, một lượt sinh văn bản ngắn trên CPU) trước khi vào thư viện model. Image Docker đã kèm
-  sẵn bộ công cụ (`WITH_CONVERT=0` build image gọn, không có bộ công cụ).
+  (Q8_0 ... Q2_K và các loại IQ1/IQ2/IQ3 ít bit), ước lượng dung lượng file và VRAM cho từng loại, và bước kiểm tra
+  (header GGUF, id token so với Hugging Face, một lượt sinh văn bản ngắn trên CPU) trước khi vào thư viện model. Image
+  Docker đã kèm sẵn bộ công cụ (`WITH_CONVERT=0` build image gọn, không có bộ công cụ).
+- **Loại IQ với importance matrix.** Các loại IQ dưới 4 bit trên mỗi trọng số cần importance matrix; bộ chuyển đổi
+  tự tính (`llama-imatrix`, giai đoạn "calibrating") từ một văn bản gốc đa ngôn ngữ đi kèm hoặc tệp `.txt` của bạn.
+  Chế độ `auto` làm việc đó ở nơi nó có ích, và đĩa không chứa nổi job sẽ bị từ chối ngay lúc gửi.
+- **Giới hạn server và GPU theo từng model.** Một model có thể bị giới hạn trong một số server hoặc GPU (cả một
+  server, kể cả GPU thêm sau, hoặc từng GPU); scheduler vẫn chọn cách đặt trong số được phép. Thẻ model sao chép
+  endpoint, tên model và một lệnh `curl` dựng sẵn.
 - **Web UI** cho server, GPU, model, deployment, gợi ý và sự kiện.
 
 ## Trạng thái
 
 Đã test trên một laptop Windows (GTX 1650 Ti, 4 GB): chạy trực tiếp với các node giả lập và llama.cpp thật,
 và dưới dạng cụm 3 server mô phỏng bằng Docker trong WSL2 (`docker-compose.sim.yml`). Một bài test
-end-to-end 3 server chỉ dùng CPU cũng chạy trong CI, gồm cả một lần chuyển Hugging Face sang GGUF. Chưa chạy trên LAN nhiều server thật. Xem
+end-to-end 3 server chỉ dùng CPU cũng chạy trong CI, gồm các lần chuyển đổi từ Hugging Face và từ thư mục, cùng một lần lượng tử hoá có importance matrix. Chưa chạy trên LAN nhiều server thật. Xem
 [docs/TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md).
 
 ## Cách hoạt động
@@ -86,15 +92,16 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
 ## Test
 
 ```bash
-uv run pytest                 # unit test (khoảng 768)
+uv run pytest                 # unit test (khoảng 809)
 uv run pytest -m real         # cần llama.cpp ở .cache/llama/b11342-cuda12.4 và GGUF ở .cache/models
 uv run python scripts/e2e_local.py   # 3 node giả lập trên một máy, llama.cpp thật
 
 # cụm 3 server mô phỏng trên một máy (cần Docker + NVIDIA Container Toolkit)
 docker compose -f docker-compose.sim.yml up -d
 
-# end-to-end trong CI: coordinator + 3 agent chỉ dùng CPU (docker-compose.ci.yml), model nhỏ chia qua RPC,
-# sau đó một model Hugging Face được chuyển sang GGUF trong coordinator và phục vụ
+# end-to-end trong CI (33 phép kiểm tra): coordinator + 3 agent chỉ dùng CPU (docker-compose.ci.yml), model nhỏ chia
+# qua RPC, sau đó ba lần chuyển đổi trong coordinator: Hugging Face -> Q4_K_M (được phục vụ), nguồn là thư mục -> Q8_0,
+# và IQ2_XS với importance matrix
 uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
 ```
 

@@ -111,7 +111,7 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `ctx_size` | int, 4096 | total context in tokens, divided across `parallel` slots (llama.cpp `-c`); `>= 1` through `/api` |
 | `parallel` | int, 1 | concurrent slots (llama.cpp `-np`); `>= 1` through `/api`. Autoscaling busyness is `processing / parallel` |
 | `replicas` | int, 1 | desired count; **`0` = stopped**. It is the on/off switch: with autoscaling it stays `> 0` and `min/max` bound the count |
-| `pin_devices` | list of `"node_id/device_id"`, empty | restrict replicas to these GPUs; empty = the scheduler chooses. `/api` rejects entries that do not match `node/device` or name an unregistered server (422) |
+| `pin_devices` | list of `"node_id/device_id"` or `"node_id/*"`, empty | the **allowed set** of devices: replicas may only use these; empty = every server and GPU. `"node_id/*"` allows every device of that server, **including GPUs added to it later**. It is a limit, not a placement: the scheduler still chooses the best placement among the allowed devices (it applies during preemption and rebalancing too), and the Servers tab (GPUs enabled or disabled in the pool) is unaffected. `/api` rejects entries that do not match `node/device` (or `node/*`) or name an unregistered server (422). The UI shows this as "All servers and GPUs / Only selected ones" |
 | `priority` | int 0..100, 50 | higher places first each tick and may preempt lower priorities |
 | `preemptible` | bool, true | `false`: a higher-priority model never stops this model's replicas |
 | `spread` | `"gpu"` / `"node"` / `"none"`, `"gpu"` | soft: replicas of this model avoid sharing a GPU / a server (a shared GPU is still used when nothing else fits) |
@@ -157,7 +157,7 @@ model; a new model gets the default.
 | `file` | string, required | library item name; must be `ready` (422 otherwise). Stored as `source = coordinator://<file>` |
 | `ctx_size` | int `>= 1` | 4096 (always overwritten) |
 | `parallel` | int `>= 1` | 1 (always overwritten) |
-| `pin_devices` | list of string | empty (always overwritten, duplicates removed) |
+| `pin_devices` | list of string | empty (always overwritten, duplicates removed); `"node_id/*"` is allowed, see section 2 |
 | `priority` | int 0..100 or null | keep, else 50 |
 | `spread` | `gpu`/`node`/`none` or null | keep, else `gpu` |
 | `min_replicas`, `max_replicas` | int or null | keep, else unset |
@@ -675,10 +675,10 @@ Status codes used by these routes (the body is always `{"detail": "<message>"}`)
 | 403 | the Hugging Face repo is gated or private: set `HF_TOKEN` and accept the licence |
 | 404 | repo or revision not found on Hugging Face, or unknown job id |
 | 409 | the output name is taken (library, a file in `models_dir`, or another unfinished job); the job is not in a state that allows the action |
-| 422 | the source cannot be converted: architecture not supported by the pinned converter (llama.cpp b11342), pre-quantized in a format the converter cannot read (AWQ, bitsandbytes...), no `config.json`, no safetensors / PyTorch weights; also a malformed body (for example both `hf_repo` and `path`) |
+| 422 | the source cannot be converted: architecture not supported by the pinned converter (llama.cpp b11342), pre-quantized in a format the converter cannot read (AWQ, bitsandbytes...), no `config.json`, no safetensors / PyTorch weights; also a malformed body (for example both `hf_repo` and `path`); a type that needs an importance matrix with `advanced.imatrix: "off"`; an unusable `advanced.calibration_path` (not a `.txt`, empty, larger than 20 MB) |
 | 502 | Hugging Face unreachable or answered with an unexpected error |
-| 503 | the conversion toolchain is not set up (`problem` of `/api/convert/options`) |
-| 507 | not enough free disk space. It is raised by the worker, so it appears as the `error` of a *failed* job, not as the response of a route |
+| 503 | the conversion toolchain is not set up (`problem` of `/api/convert/options`); `llama-imatrix` is missing while the job needs an importance matrix (a type that needs one, or `advanced.imatrix: "on"`); the built-in calibration text is missing from the install and no `calibration_path` was given |
+| 507 | not enough free disk space. `POST /api/convert` answers 507 at submit when the disk obviously cannot hold *uncached download + 16-bit intermediate + output* (nothing is queued). The worker repeats the check before each heavy stage, because space can shrink while a job waits; that 507 appears as the `error` of a *failed* job (with `failed_stage` set) |
 
 ### Types
 
@@ -686,11 +686,12 @@ Status codes used by these routes (the body is always `{"detail": "<message>"}`)
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `type` | string | one of `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `Q3_K_S`, `Q2_K` |
+| `type` | string | one of `F16`, `BF16`, `Q8_0`, `Q6_K`, `Q5_K_M`, `Q5_K_S`, `Q4_K_M`, `Q4_K_S`, `IQ4_XS`, `Q4_0`, `Q3_K_L`, `Q3_K_M`, `IQ3_M`, `IQ3_S`, `Q3_K_S`, `IQ3_XS`, `IQ3_XXS`, `Q2_K`, `IQ2_M`, `IQ2_S`, `IQ2_XS`, `IQ2_XXS`, `IQ1_M`, `IQ1_S` |
 | `bpw` | float | bits per weight used for the estimate |
 | `tier` | string | `lossless`, `near_lossless`, `balanced`, `small` or `tiny` |
 | `note` | string | quality note, e.g. the perplexity change against F16 |
 | `via` | `"convert"` / `"quantize"` | `F16`, `BF16` and `Q8_0` are written by the converter directly, the rest by llama-quantize |
+| `needs_imatrix` | bool | llama-quantize refuses this type without an importance matrix: `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ2_M`, `IQ3_XXS`, `IQ3_XS` |
 | `est_bytes` | int or null | estimated file size; only filled by inspect |
 | `est_vram_mb` | int or null | file + KV cache at context 4096 + runtime overhead |
 | `fits_single_gpu`, `fits_pool` | bool or null | against the largest single GPU / the whole pool; null when there is no GPU server or the parameter count is unknown |
@@ -718,6 +719,7 @@ translated through `path_map` like library paths); `revision` (default `"main"`)
 | `gguf_alternatives` | `[string]` | Hugging Face repos with ready GGUF builds |
 | `options` | `[QuantOption]` | every type with estimates |
 | `recommended`, `recommend_reasons` | `QuantType`, `[string]` | the recommended type and why |
+| `name_stem` | string | the sanitized last part of the repo or folder name: the default output name is `<name_stem>-<QUANT>.gguf` (so clients need not repeat the naming rule) |
 | `warnings` | `[string]` | |
 
 **`ConvertRequest`** (body of `POST /api/convert`):
@@ -733,10 +735,22 @@ translated through `path_map` like library paths); `revision` (default `"main"`)
 | `advanced.leave_output_tensor` | bool | `false` | `llama-quantize --leave-output-tensor` |
 | `advanced.pure` | bool | `false` | `llama-quantize --pure` |
 | `advanced.allow_remote_code` | bool | `false` | download and run the repo's own `*.py` inside the coordinator (dangerous) |
+| `advanced.imatrix` | `auto` / `on` / `off` | `auto` | importance matrix mode. `auto` computes one when the type needs it (`needs_imatrix`) or has `bpw` below 4.0; `on` always (for types written by llama-quantize); `off` never. Details below |
+| `advanced.calibration_path` | string or null | null | absolute path of a `.txt` file on the coordinator machine (at most 20 MB, not empty; host paths are translated like library paths) to calibrate on; null = the multilingual text shipped with gpupool. The file is copied when the job starts |
+| `advanced.imatrix_chunks` | int >= 0 | `0` | number of 512-token chunks `llama-imatrix` processes; `0` = 100. Fewer is faster and rougher |
 | `advanced.validate_generation` | bool | `true` | generate a few tokens on the CPU after converting |
 | `advanced.threads` | int >= 0 | `0` | `0` = `GPUPOOL_CONVERT_THREADS` |
 
-The `advanced` quantize options are ignored for `F16`, `BF16` and `Q8_0`.
+The `advanced` quantize options (including the importance matrix ones) are ignored for `F16`, `BF16` and `Q8_0`.
+
+**Importance matrix policy (decided at submit).** The job computes a matrix when `quant` is not `F16`/`BF16`/`Q8_0` and
+`imatrix` is `on`, or `auto` with `needs_imatrix` true or `bpw` < 4.0 (so `Q4_K_M` and up go without under `auto`).
+`off` on a type with `needs_imatrix` is refused (422). If `llama-imatrix` is not installed: `on`, or a type with
+`needs_imatrix`, is refused (503); `auto` on a type that only benefits from a matrix quietly runs without one
+(`imatrix_used: false`). The calibration text is checked at submit (`.txt`, not empty, at most 20 MB, else 422).
+The matrix is computed by `llama-imatrix -c 512 --no-ppl -ngl 0 --chunks <N>` on the 16-bit intermediate, on the CPU,
+in the `calibrating` stage, which takes most of the time (measured: about 20 of 28 minutes for Qwen2.5-1.5B to
+`IQ3_M` on a laptop CPU).
 
 **`ConvertJob`**:
 
@@ -744,19 +758,22 @@ The `advanced` quantize options are ignored for `F16`, `BF16` and `Q8_0`.
 | --- | --- | --- |
 | `id` | string | 12 hex characters |
 | `request` | `ConvertRequest` | as submitted |
-| `state` | string | `queued`, `downloading`, `converting`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
+| `state` | string | `queued`, `downloading`, `converting`, `calibrating`, `quantizing`, `validating`, `needs_review`, `done`, `failed`, `cancelled` |
 | `stage_progress` | float or null | 0..1 inside the current stage, null when unknown |
 | `bytes_done`, `bytes_total` | int, int or null | download stage |
 | `output_name` | string | file name in the library |
+| `imatrix_used` | bool | an importance matrix is (or was) computed for this job: the job goes through `calibrating`. Decided at submit by the policy above |
+| `failed_stage` | state or null | the stage that was running when the job failed or was cancelled (for example `calibrating`); null otherwise and after a retry. Databases from the first release are migrated in place |
 | `output_bytes`, `est_output_bytes` | int or null | real and estimated size |
 | `validation` | `Validation` or null | see below |
 | `error` | string or null | why it failed, or the *needs review* note |
 | `log_tail` | `[string]` | last lines of the current or last tool |
 | `created_at`, `started_at`, `finished_at` | float or null | unix time |
 
-Active states are `queued`, `downloading`, `converting`, `quantizing`, `validating`; `done`, `failed` and `cancelled`
-are final; `needs_review` waits for `accept` or delete. A job from a folder passes through `downloading` too (it
-only links the files). `F16`, `BF16` and `Q8_0` skip `quantizing`.
+Active states are `queued`, `downloading`, `converting`, `calibrating`, `quantizing`, `validating`; `done`, `failed`
+and `cancelled` are final; `needs_review` waits for `accept` or delete. A job from a folder passes through
+`downloading` too (it only links the files). `calibrating` only occurs when `imatrix_used` is true. `F16`, `BF16` and
+`Q8_0` skip `calibrating` and `quantizing`.
 
 **`Validation`**: `header_ok` (bool or null), `architecture`, `n_layers`, `vocab_size`, `chat_template` (bool),
 `tokenizer_ok` (bool, null = could not run), `tokenizer_cases` (`[{text, hf, gguf, match}]`: the token ids of 8 probe
@@ -766,8 +783,10 @@ make it `needs_review`; null values are not failures.
 
 ### `GET /api/convert/options`
 
-Returns `{"available": bool, "problem": string or null, "quant_options": [QuantOption], "cluster": {"largest_gpu_mb",
-"pool_mb"}}`. `problem` says what is missing when the toolchain is not set up (the UI shows it). The estimates in
+Returns `{"available": bool, "problem": string or null, "quant_options": [QuantOption], "imatrix_available": bool,
+"cluster": {"largest_gpu_mb", "pool_mb"}}`. `problem` says what is missing when the toolchain is not set up (the UI
+shows it). `imatrix_available` is whether `llama-imatrix` is installed: when false, types with `needs_imatrix` cannot
+be converted (the UI greys them out) and the importance matrix is unavailable. The estimates in
 `quant_options` are empty here; use inspect for a concrete model.
 
 ### `POST /api/convert/inspect`
@@ -779,8 +798,8 @@ without the toolchain, then `supported` is null. Errors: `400`, `403`, `404`, `4
 ### `POST /api/convert`
 
 Body: a `ConvertRequest`. Checks the toolchain, inspects the source, refuses what cannot work, and queues the job.
-Returns the `ConvertJob` (state `queued`). Errors: `400`, `403`, `404`, `409`, `422`, `502`, `503` as in the table
-above. Jobs run one at a time, in submission order.
+Returns the `ConvertJob` (state `queued`). Errors: `400`, `403`, `404`, `409`, `422`, `502`, `503`, `507` as in the
+table above (`507` is the early disk check). Jobs run one at a time, in submission order.
 
 ### `GET /api/convert`, `GET /api/convert/{job_id}`
 
@@ -817,6 +836,11 @@ curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content
 
 # 3. follow it, then deploy the file from the library
 curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id> | jq '{state, stage_progress, error}'
+
+# a type that needs an importance matrix: calibrated automatically (state goes through "calibrating");
+# fewer chunks = faster. "imatrix": "off" would be refused for IQ2_XS with 422
+curl -s -X POST $COORD/api/convert -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"source": {"hf_repo": "Qwen/Qwen2.5-1.5B-Instruct"}, "quant": "IQ3_M", "advanced": {"imatrix": "auto", "imatrix_chunks": 30}}' | jq '{id, imatrix_used}'
 
 # needs_review: accept it (or DELETE the job)
 curl -s -X POST -H "Authorization: Bearer $ADMIN" $COORD/api/convert/<job id>/accept | jq .state

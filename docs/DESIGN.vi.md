@@ -182,7 +182,11 @@ mô phỏng và rebalancing.
 
 Pin (`pin_devices`), GPU bị tắt trong pool và VRAM đang được các replica đang launch giữ chỗ đều do
 reconciler áp dụng trước khi plan, bằng cách đặt `usable_mb` về 0 hoặc giảm nó, nên bản thân planner không
-biết về chúng.
+biết về chúng. Danh sách pin là một **tập được phép**, không phải chỗ đặt: mọi thiết bị nằm ngoài nó bị đặt
+`usable_mb = 0` (`Reconciler._apply_pins`), rồi planner chọn cách đặt tốt nhất trong phần còn lại. Mỗi mục là
+`"<node>/<device>"` hoặc `"<node>/*"`; ký tự đại diện cho phép mọi thiết bị của server đó, kể cả GPU đăng ký sau, nên
+lựa chọn "cả server này" không lỗi thời khi server có thêm GPU. Pin và công tắc bật/tắt GPU của pool độc lập với
+nhau: GPU bị bỏ ngoài tập của một model vẫn được bật cho các model khác.
 
 ### 6.3 Chấm điểm (`scoring.py`, `placement.py`)
 
@@ -237,7 +241,7 @@ Lý do và thuật toán cấp phát nằm trong [PLATFORM_DESIGN.vi.md](PLATFOR
 | `autoscale` | chưa đặt = mặc định | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300. |
 | `idle_unload_s` | chưa đặt | Chỉ với `min_replicas = 0`: gỡ model sau chừng này giây không có request. |
 | `preemptible` | true | False: model priority cao hơn không bao giờ được dừng replica của model này. |
-| `pin_devices` | rỗng | Các mục `node/device` mà replica được phép dùng; mọi GPU khác coi như không dùng được cho model này, kể cả khi preemption và rebalancing. |
+| `pin_devices` | rỗng | Tập được phép: các mục `node/device` hoặc `node/*` (mọi thiết bị của server đó, kể cả GPU thêm sau) mà replica được phép dùng; mọi GPU khác coi như không dùng được cho model này, kể cả khi preemption và rebalancing. Rỗng = tất cả. Nó giới hạn, scheduler vẫn tự chọn. |
 
 ### 7.1 Autoscaler (`coordinator/autoscaler.py`)
 
@@ -555,8 +559,10 @@ Các lần chạy với engine thật (kết quả trong [TEST_REPORT.vi.md](TES
   device `CPU` chạy `ggml-rpc-server -d CPU` thật, nên RPC là thật qua TCP.
 - `scripts/ci_e2e.py` với `docker-compose.ci.yml`: một coordinator thật và 3 agent thật (image Docker, chỉ CPU)
   phục vụ một model nhỏ chia trên nhiều server; bắt lỗi Dockerfile và Python sai trong image.
-  Giai đoạn cuối của nó chuyển một model Hugging Face (SmolLM2-135M-Instruct) sang GGUF ngay trong coordinator, phục
-  vụ kết quả chia qua RPC rồi gửi một chat (`--skip-convert` bỏ giai đoạn này).
+  Các giai đoạn cuối chạy ba lần chuyển đổi ngay trong coordinator (tổng cộng 33 phép kiểm tra): một model Hugging
+  Face (SmolLM2-135M-Instruct) sang `Q4_K_M`, phục vụ chia qua RPC kèm một chat; một nguồn là thư mục sang `Q8_0`
+  (thư mục nguồn phải không bị đổi); và `IQ2_XS`, loại cần importance matrix, kiểm tra các giai đoạn và cờ ma trận
+  (`--skip-convert` bỏ các giai đoạn này).
 - `docker-compose.sim.yml`: cluster 3 server giả lập cho demo; `GPUPOOL_FAKE_DEVICES` làm agent báo các GPU
   khác nhau trong khi dùng chung một card thật.
 - `scripts/ui_mock_server.py`: API coordinator trong bộ nhớ để làm việc với UI mà không cần cluster.
@@ -588,7 +594,8 @@ coordinator chạy các **job chuyển đổi**: file nguồn (một repo Huggin
 Bộ công cụ là tuỳ chọn. `Toolchain.problem()` trả về những gì còn thiếu (`GPUPOOL_CONVERT_DIR`,
 `GPUPOOL_CONVERT_PYTHON`, `GPUPOOL_LLAMA_TOOLS_DIR`); khi thiếu thì mọi thứ khác vẫn chạy và `POST /api/convert`
 trả 503 kèm lời giải thích đó. `convert_api.py` import converter một cách lười (lazy) nên router vẫn nạp được trong
-cả hai trường hợp.
+cả hai trường hợp. `llama-imatrix` là phần tuỳ chọn duy nhất trong bộ công cụ (`Toolchain.has_imatrix()`, được báo
+là `imatrix_available` bởi `GET /api/convert/options`), xem 17.8.
 
 | Module | Việc |
 | --- | --- |
@@ -597,6 +604,7 @@ cả hai trường hợp.
 | `converter/source.py` | `HfClient` (danh sách file, thông tin model, `config.json`, tải về), `select_files`, `local_files`, `inspect_source` |
 | `converter/jobs.py` | `ConvertManager`: bảng job trong SQLite, worker duy nhất, pipeline, dọn dẹp |
 | `converter/toolchain.py` | vị trí các công cụ, hàm dựng câu lệnh, `run_tool` (ưu tiên thấp, kill cả cây tiến trình), danh sách kiến trúc được hỗ trợ |
+| `converter/data/calibration.txt` | văn bản hiệu chỉnh có sẵn cho importance matrix (dữ liệu của package, kèm README giải thích nguồn gốc) |
 | `converter/validate.py` | các bước kiểm tra header, tokenizer và sinh văn bản |
 | `converter/hf_tokenize.py` | chạy *dưới Python của bộ chuyển đổi*: id token của các đoạn văn thử theo Hugging Face (gpupool không được cài ở đó) |
 | `coordinator/convert_api.py` | 9 route, ánh xạ `ConvertError.status` sang HTTP |
@@ -604,11 +612,14 @@ cả hai trường hợp.
 ### 17.1 Pipeline
 
 ```
-queued → downloading → converting → quantizing → validating → done
-                                                          └→ needs_review → (accept) → done
+queued → downloading → converting → [calibrating →] quantizing → validating → done
+                                                                  └→ needs_review → (accept) → done
 (mọi trạng thái đang hoạt động) → failed | cancelled
 ```
 
+`calibrating` chỉ có ở job tính importance matrix (17.8). Khi job lỗi hoặc bị huỷ, giai đoạn nó đang ở được lưu thành
+`failed_stage`, để UI đánh dấu được bước đó và người đọc API phân biệt được lỗi tải với lỗi đĩa hay lỗi hiệu chỉnh mà
+không phải phân tích câu thông báo.
 1. **File nguồn.** Với Hugging Face, danh sách cây thư mục cho tên và dung lượng; `select_files` giữ `config.json`, các
    file tokenizer và trọng số, bỏ mọi thứ khác. Safetensors được ưu tiên hơn `pytorch_model*.bin` khi có cả hai;
    `consolidated.*` (bản trọng số gốc của Mistral, trùng với bản kia và từng làm gấp đôi lượng tải) bị bỏ qua; `*.py`
@@ -622,10 +633,12 @@ queued → downloading → converting → quantizing → validating → done
 4. **Chuyển đổi.** `convert_hf_to_gguf.py src --outfile <outtype>.gguf --outtype <t>` theo `plan_steps`: `F16`, `BF16` và
    `Q8_0` do bộ chuyển đổi ghi trực tiếp; mọi loại khác trước hết ghi một bản trung gian 16 bit (`auto` = bf16 nếu
    trọng số là bf16, còn lại f16).
-5. **Lượng tử hoá.** `llama-quantize [cờ] bản-trung-gian out.gguf LOẠI [luồng]`; bản trung gian bị xoá ngay. Các cờ
+5. **Hiệu chỉnh** (chỉ khi có importance matrix, 17.8). `llama-imatrix` chạy trên bản trung gian 16 bit và ghi
+   `imatrix.gguf` vào thư mục tạm của job.
+6. **Lượng tử hoá.** `llama-quantize [--imatrix imatrix.gguf] [cờ] bản-trung-gian out.gguf LOẠI [luồng]`; bản trung gian bị xoá ngay. Các cờ
    nâng cao được đối chiếu với danh sách tên kiểu ggml cho phép, nên giá trị người dùng nhập không thể trở thành một
    đối số dòng lệnh thừa.
-6. **Kiểm tra** (17.4). **Xuất bản**: chuyển file tới `models_dir/<name>` và đăng ký (`LibraryItem.source`
+7. **Kiểm tra** (17.4). **Xuất bản**: chuyển file tới `models_dir/<name>` và đăng ký (`LibraryItem.source`
    `"convert"`), rồi dọn dẹp, và chỉ sau đó mới báo `done`.
 
 Tiến độ lấy từ chính output của các công cụ: phần trăm tqdm cho bước tải và chuyển đổi, các dòng `[ i/ n]` của
@@ -652,7 +665,11 @@ có ở đó thì không tải lại. Cache bị bỏ khi job kết thúc, trừ
 cần nó; job lỗi hoặc đã huỷ giữ nó cho lần retry, và xoá job đó sẽ giải phóng nó. Thư mục tạm của một job là
 `models_dir/.convert/<job>/`.
 
-Dung lượng đĩa trống được kiểm tra trước mỗi giai đoạn nặng, với biên 512 MB: trước khi tải
+Dung lượng đĩa trống được kiểm tra hai lần. Trước hết **lúc gửi** (`_early_disk_check`): từ phần chưa có trong cache
+của lượt tải (file đã có trong cache không tính), bản trung gian và đầu ra ước lượng cộng biên; khi đĩa rõ ràng không
+chứa nổi job thì `POST /api/convert` trả 507 và không xếp gì vào hàng đợi. Nếu không có bước này, cùng job đó sẽ
+được nhận, chờ trong hàng đợi, tải vài phút rồi mới lỗi trong worker. Lần hai là **trước mỗi giai đoạn nặng** trong
+worker, với biên 512 MB, vì dung lượng trống có thể giảm khi các job chờ: trước khi tải
 (`phần còn phải tải + bản trung gian + đầu ra`), trước khi chuyển đổi (`bản trung gian + đầu ra`) và trước khi lượng
 tử hoá (`đầu ra`). Bản trung gian được ước lượng là `params × 2` byte (×4 với f32), hoặc bằng dung lượng nguồn khi chưa
 biết số tham số. Lỗi sớm kèm con số còn hơn một file nhiều GB ghi dở; bước kiểm tra phát `ConvertError` với mã 507,
@@ -699,8 +716,14 @@ các bước kiểm tra đĩa.
 Phần đề xuất (`quant.recommend`) đi theo bậc thang `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M` và lấy loại đầu tiên vừa một GPU,
 rồi loại đầu tiên vừa pool (chia qua RPC chậm hơn, và lý do có nói rõ). Model dưới 3 tỷ tham số chỉ dùng `Q8_0`, `Q6_K`,
 `Q5_K_M`, vì model nhỏ mất chất lượng nhanh nhất. Khi không có GPU thì không có thông tin vừa/không vừa và áp dụng giá
-trị mặc định theo kích thước (`Q8_0` dưới 3 tỷ, `Q5_K_M` dưới 15 tỷ, còn lại `Q4_K_M`). Các loại `IQ1`/`IQ2` không được
-cung cấp (llama-quantize cần importance matrix cho chúng).
+trị mặc định theo kích thước (`Q8_0` dưới 3 tỷ, `Q5_K_M` dưới 15 tỷ, còn lại `Q4_K_M`). Các loại `IQ` (`IQ1_*`, `IQ2_*`,
+`IQ3_*`) có trong danh sách lựa chọn nhưng không bao giờ là mặc định; phần đề xuất chỉ nhắc tới chúng khi ngay cả
+`Q4_K_M` cũng không vừa, kèm ghi chú rằng chúng cần importance matrix.
+
+Các dòng IQ đã được đối chiếu với file thật, vì bpw của chúng không phải số danh nghĩa của định dạng (llama-quantize
+giữ ma trận đầu ra và các tensor nhạy nhất ở loại cao hơn, nên cả file lớn hơn). Bảng dùng trung bình cả file và ước
+lượng trong hộp thoại lệch +6 % (`IQ2_XS`), -4 % (`IQ3_M`) và -1 % (`Q8_0`) so với file thật. Các loại IQ khối 256 cũng
+lùi về `IQ4_NL` (4.5 bpw) cho các hàng không chia hết cho 256, giống K-quant.
 
 ### 17.6 Lưu trạng thái, khởi động lại và ranh giới dọn dẹp
 
@@ -728,4 +751,61 @@ số. Mã Python của một repo vì thế sẽ chạy bên trong coordinator, 
 không bao giờ được tải hay đưa vào staging trừ khi yêu cầu đặt `allow_remote_code`, bộ chuyển đổi chạy ngoại tuyến và
 chỉ thấy thư mục staging, và UI đánh dấu tuỳ chọn này là nguy hiểm. Cùng cờ đó được truyền cho tokenizer Hugging Face
 của bước kiểm tra. Image chạy bộ công cụ từ `/opt` (bộ chuyển đổi của llama.cpp và một venv PyTorch chỉ dùng CPU, cùng
-các bản build CPU tĩnh của `llama-quantize`, `llama-tokenize`, `llama-simple`); `WITH_CONVERT=0` bỏ toàn bộ chúng.
+các bản build CPU tĩnh của `llama-quantize`, `llama-tokenize`, `llama-simple`, `llama-imatrix`); `WITH_CONVERT=0` bỏ toàn bộ chúng.
+
+### 17.8 Importance matrix và giai đoạn hiệu chỉnh
+
+**Là gì và vì sao.** Lượng tử hoá ít bit chỉ có vài mức cho mỗi trọng số, nên việc trọng số nào được mức chính xác là
+quan trọng. Importance matrix là ước lượng theo từng trọng số về mức ảnh hưởng của nó tới đầu ra trên văn bản điển hình,
+đo bằng cách cho model chạy (`llama-imatrix`) qua một văn bản hiệu chỉnh; `llama-quantize --imatrix` sau đó dồn độ
+chính xác vào chỗ quan trọng. llama-quantize b11342 thậm chí từ chối các loại IQ1, IQ2, `IQ3_XXS` và `IQ3_XS` nếu thiếu
+nó (file `IQ2_M` và `IQ3_XS` chứa tensor `IQ2_XS` / `IQ3_XXS`), đó là `QuantOption.needs_imatrix`. Ma trận được tính từ
+**bản trung gian 16 bit**, không phải từ file đã lượng tử hoá, nên nó thấy các kích hoạt thật của model; CPU chạy nó
+(`-ngl 0`, để GPU cho inference, giống phần còn lại của bộ công cụ) ở ưu tiên thấp.
+
+**Chính sách** (`quant.imatrix_wanted`, `ConvertManager._decide_imatrix`, quyết định lúc gửi và lưu thành
+`imatrix_used`):
+
+| `imatrix` | Loại do bộ chuyển đổi ghi (`F16`, `BF16`, `Q8_0`) | Loại bắt buộc có ma trận | Các loại khác |
+| --- | --- | --- | --- |
+| `auto` | không | có | có khi `bpw` < 4.0, không thì không |
+| `on` | không | có | có |
+| `off` | không | **422**, bộ lượng tử hoá sẽ lỗi | không |
+
+Vì sao `auto` là "bắt buộc hoặc dưới 4 bit trên mỗi trọng số": lợi ích tăng khi số bit giảm (càng ít mức thì việc chọn
+trọng số nào giữ chính xác càng quan trọng), còn từ 4 bit trở lên mức cải thiện chất lượng nhỏ mà cái giá lớn:
+hiệu chỉnh là giai đoạn chậm nhất trên CPU với khoảng cách xa (đo được, Qwen2.5-1.5B sang `IQ3_M`: 1175 giây trên
+1687 giây). Vì vậy từ `Q4_K_M` trở lên không bị làm chậm theo mặc định, và `on` vẫn dành cho ai muốn. `Q8_0`, `F16` và
+`BF16` không có bước llama-quantize để đưa ma trận vào.
+
+**Công cụ là tuỳ chọn, và lỗi được báo ở chỗ giải thích được.** `llama-imatrix` là phần duy nhất của bộ công cụ mà một
+coordinator có thể thiếu trong khi phần còn lại vẫn chạy (bản cài tự build; `imatrix_available` là false và UI vô hiệu
+hoá các loại cần nó). Job không thể chạy nếu thiếu nó, tức loại bắt buộc có ma trận hoặc `on`, bị từ chối ngay lúc gửi
+với 503 và thông báo rõ ràng, không phải vài phút sau bên trong `llama-quantize`. Job chỉ hưởng lợi từ nó (`auto` với
+loại như `Q3_K_S`) thì chạy không có nó, lặng lẽ, vì làm hỏng một lần chuyển đổi chỉ vì thiếu một cải tiến không bắt
+buộc còn tệ hơn việc thiếu cải tiến đó. Cùng lập luận đó khiến văn bản hiệu chỉnh sai bị từ chối lúc gửi (422: không phải
+`.txt`, rỗng, quá 20 MB) và văn bản có sẵn bị thiếu bị từ chối với 503.
+
+**Văn bản hiệu chỉnh và vì sao nó là văn bản gốc.** Các bộ hiệu chỉnh công khai thông dụng là bản trích bách khoa tiếng
+Anh (`wikitext`) hoặc các tập cộng đồng (như `calibration_datav3`) có giấy phép không rõ hoặc share-alike, điều mà một
+dự án phát hành và phân phối lại tệp không nên gánh. Văn bản còn là một quyết định thiết kế: ma trận tính trên văn bản
+hẹp (một ngôn ngữ, không có code) khiến bộ lượng tử hoá bảo vệ các trọng số mà văn bản đó dùng và cẩu thả với phần còn
+lại, nên model hiệu chỉnh trên văn xuôi tiếng Anh có thể kém đi khi dùng tiếng Việt hay code. Vì vậy gpupool đi kèm
+`converter/data/calibration.txt` (khoảng 115 KB, viết riêng cho gpupool, không có dữ liệu cá nhân thật): văn xuôi tiếng
+Anh nhiều thể loại, tiếng Việt có dấu đầy đủ, các ngôn ngữ khác, code nhiều ngôn ngữ, toán và dữ liệu có cấu trúc, hội
+thoại dạng chat, và nội dung biên (emoji, khoảng trắng lạ, nhiều hệ chữ). README đi kèm nêu thành phần và giấy phép (của
+dự án). Có thể đưa một tệp `.txt` khác tối đa 20 MB qua `advanced.calibration_path` (dịch như đường dẫn thư viện); dù
+cách nào tệp cũng được **sao chép vào thư mục tạm của job** khi giai đoạn bắt đầu, nên một văn bản ổn định được đọc dù
+bản gốc đổi hay biến mất trong lúc đó. (Văn bản nằm dưới `data/`, tên mà `.gitignore` cũng dùng cho thư mục dữ liệu
+lúc chạy; lần commit đầu đã bỏ sót nó vì đúng lý do này, và một bản checkout mới sẽ từ chối mọi job ma trận với 503. Quy
+tắc ignore nay có ngoại lệ cho thư mục của package; xem TEST_REPORT.)
+
+**Lần chạy.** `llama-imatrix -m bản-trung-gian -f calibration.txt -o imatrix.gguf --chunks N -c 512 --no-ppl -ngl 0
+[-t luồng]`. `N` là `advanced.imatrix_chunks`, mặc định 100; ngữ cảnh 512 token vì chuỗi ngắn giúp lần chạy trên CPU
+khả thi; `--no-ppl` bỏ lượt tính perplexity, vốn chỉ tốn thời gian. Với `--no-ppl` công cụ không in dòng nào theo từng
+chunk (ở b11342 các dòng đó nằm trong nhánh tính perplexity), nên tiến độ được ước lượng từ thời gian của lượt đầu và
+ETA mà nó in ra, cập nhật mỗi giây (không bao giờ chạm 100 % chỉ nhờ đồng hồ: tệp được ghi sau chunk cuối); nếu phiên
+bản sau có in dòng theo từng chunk thì các dòng đó được dùng thay. Kết quả phải tồn tại và không rỗng, nếu không job lỗi.
+
+**Bộ nhớ và thời gian (đo được).** Đỉnh bộ nhớ resident của một job là 1045 MiB (Qwen2.5-0.5B, `Q4_K_M`) và 1697 MiB
+(Qwen2.5-1.5B, `IQ3_M`, có hiệu chỉnh); đỉnh cgroup 3,0 và 3,4 GB gồm cả page cache. Xem TEST_REPORT.

@@ -2,6 +2,52 @@
 
 > Bản tiếng Việt. Bản tiếng Anh: [TEST_REPORT.en.md](TEST_REPORT.en.md). Hai bản phải được cập nhật cùng nhau.
 
+## 2026-10-03 (chuyển đổi, đợt 2: importance matrix, loại IQ, kiểm tra đĩa sớm)
+
+Tính năng: các loại lượng tử hoá IQ1/IQ2/IQ3 với importance matrix (giai đoạn *calibrating*), kiểm tra đĩa lúc gửi,
+`failed_stage` / `imatrix_used` trên job, server và GPU được phép theo từng model (`"<node>/*"`), nút sao chép trên
+thẻ model (commit 002d42e, kèm f3bf76b; thiết kế ở [DESIGN.vi.md](DESIGN.vi.md#178-importance-matrix-và-giai-đoạn-hiệu-chỉnh)).
+Máy: cùng laptop Windows 11 (chuyển đổi chỉ dùng CPU), Docker trong WSL2, llama.cpp b11342, image coordinator build
+kèm bộ công cụ gồm cả `llama-imatrix`.
+
+### Kết quả
+
+| Test | Kết quả |
+| --- | --- |
+| Unit test (`uv run pytest`) | 809 pass |
+| End-to-end trong CI (`scripts/ci_e2e.py`) | qua 33/33 phép kiểm tra trong 249 giây |
+| E2E: `HuggingFaceTB/SmolLM2-135M-Instruct` sang `Q4_K_M` | 71 giây, 105,453,984 byte; được phục vụ chia qua RPC, trả lời một chat |
+| E2E: nguồn là **thư mục** sang `Q8_0` | 25 giây, 144,810,912 byte; không có importance matrix (`imatrix_used` false), file nằm trong thư viện, thư mục nguồn không bị đổi |
+| E2E: Hugging Face sang `IQ2_XS` **có importance matrix** (4 chunk) | 76 giây, 84,573,088 byte; các giai đoạn *converting*, *calibrating*, *quantizing*, *validating*; `imatrix_used` true, header GGUF hợp lệ, file nằm trong thư viện |
+
+### Chuyển đổi thật (đo được, mỗi lần một job, CPU laptop, Docker trong WSL)
+
+| Model, loại | Tải | Convert | Calibrate | Quantize | Validate | Tổng | Đầu ra | RSS đỉnh |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B-Instruct, `Q4_K_M` | 107 s | 12 s | không | 4 s | 20 s | 143 s | 397,807,488 B | 1045 MiB |
+| Qwen2.5-1.5B-Instruct, `IQ3_M` (100 chunk) | 314 s | 55 s | 1175 s | 123 s | 21 s | 1687 s (28 phút) | 776,663,904 B | 1697 MiB |
+
+Đỉnh cgroup, gồm cả page cache, là 3,0 GB và 3,4 GB. Calibrate chiếm khoảng 70 % job thứ hai: trên CPU, importance
+matrix chính là cái giá của các loại IQ, nên UI nói rõ điều đó và có tuỳ chọn *Calibration chunks* (ít hơn = nhanh hơn).
+
+### Ước lượng dung lượng cho các loại mới
+
+Ước lượng hiển thị trong hộp thoại so với file thật: `IQ2_XS` +6 %, `IQ3_M` -4 %, `Q8_0` -1 %. Các dòng IQ dùng
+số bit trên trọng số tính cả file (lớp đầu ra và các tensor nhạy nhất giữ độ chính xác cao hơn), không phải số danh
+nghĩa của định dạng.
+
+### Lỗi phát hiện khi review và chạy thật (đã sửa hết)
+
+| Lỗi | Hậu quả | Cách sửa |
+| --- | --- | --- |
+| `.gitignore` có quy tắc `data/` (dành cho thư mục dữ liệu lúc chạy), quy tắc này cũng khớp `src/gpupool/converter/data/` | văn bản hiệu chỉnh có sẵn và README của nó lặng lẽ bị bỏ khỏi commit; một bản checkout mới hay image CI sẽ không có văn bản hiệu chỉnh và mọi job importance matrix không có `calibration_path` sẽ bị từ chối với 503. Test cục bộ vẫn qua vì file có trên đĩa | thư mục dữ liệu của package được loại khỏi quy tắc (commit f3bf76b) |
+| Form model ghi "Auto placement / choose GPUs yourself" | nghe như đặt thủ công, trong khi pin luôn là một *tập được phép* mà scheduler chọn bên trong | nay là "All servers and GPUs / Only selected ones" với cây server và GPU; `"<node>/*"` cho phép cả server kể cả GPU thêm sau; tab Servers không đổi |
+| Trên thẻ model chỉ sao chép được endpoint | người dùng phải tự gõ tên model và lệnh curl | thẻ sao chép riêng endpoint, tên model và một lệnh `curl` dựng sẵn |
+
+Chưa được các lần chạy này bao phủ: model vài GB trở lên (lớn nhất là 1,5 tỷ tham số), importance matrix trên GPU
+(hiệu chỉnh luôn chạy trên CPU), `calibration_path` tuỳ chỉnh từ đầu đến cuối (chỉ có unit test), đường `needs_review`
+từ một model thật, và LAN nhiều server thật.
+
 ## 2026-10-03 (chuyển Hugging Face sang GGUF)
 
 Tính năng: coordinator chuyển model Hugging Face sang GGUF với loại lượng tử hoá tuỳ chọn
