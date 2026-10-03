@@ -13,6 +13,7 @@ wheels/
 *.db
 .env
 data/
+!src/gpupool/converter/data/
 models/
 
 # Offline build inputs (llama.cpp / Python archives): never commit them
