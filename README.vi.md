@@ -1,120 +1,393 @@
-# gpupool
+<div align="center">
 
-> Tiếng Việt. English: [README.md](README.md)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.svg">
+  <img alt="gpupool: gom VRAM trống rải rác thành một endpoint tương thích OpenAI" src="docs/assets/banner.svg" width="100%">
+</picture>
 
-Gom VRAM trống rải rác trên nhiều server (ví dụ 3 GB + 5 GB + 10 GB ở ba máy) thành một pool và
-serve LLM qua một endpoint OpenAI-compatible duy nhất. Engine là
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` + `ggml-rpc-server`, model GGUF);
-gpupool là control plane bên trên: đo VRAM trống từng node, quyết định model đặt ở đâu và chia layer
-thế nào, khởi chạy và giám sát engine, định tuyến request, và đặt lại replica khi một node chết.
+[English](README.md) | **Tiếng Việt**
 
-Dành cho server dùng chung: chạy hoàn toàn ở user space (không sudo), CUDA khác nhau giữa các máy,
-VRAM có người khác cùng dùng.
+[![docker workflow](https://github.com/longduongbao29/multi-gpu-inference/actions/workflows/docker.yml/badge.svg)](https://github.com/longduongbao29/multi-gpu-inference/actions/workflows/docker.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=multi-gpu-inference)
+[![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
+[![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
+
+[Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [Số đo thực tế](#số-đo-thực-tế-không-hứa-suông) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
+
+</div>
+
+---
+
+Bạn có ba server với 3 GB, 5 GB và 10 GB VRAM trống, và một model không vừa với server nào trong số đó.
+**gpupool** đo VRAM trống trên từng máy, quyết định mỗi model đặt ở đâu và chia các layer ra sao, khởi chạy và giám sát
+các engine, rồi đưa cho bạn **một URL tương thích OpenAI**. Engine là
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` và `ggml-rpc-server`, model GGUF); gpupool là lớp
+điều khiển nằm phía trên.
+
+## Vì sao chọn gpupool
+
+- **Vấn đề.** VRAM trống nằm rải rác: vài GB chỗ này, vài GB chỗ kia, trên các server dùng chung nơi người khác cũng
+  chạy tác vụ. Không có card nào đủ chỗ cho model bạn muốn.
+- **Cách tiếp cận.** Coi cả cụm là một pool. Model được chia theo layer qua nhiều GPU và nhiều server bằng llama.cpp
+  RPC; scheduler chọn vị trí đặt, reconciler giữ cho nó chạy.
+- **Dành cho server dùng chung.** Chỉ cần user space (không cần sudo), chịu được nhiều phiên bản CUDA khác nhau, và
+  VRAM mà người khác cũng đang dùng.
+- **Vận hành đơn giản.** Một lệnh `docker run` cho coordinator, một lệnh cho mỗi server GPU, rồi trỏ client OpenAI bất kỳ vào.
 
 ## Tính năng
 
-- **Nhiều model, nhiều server, nhiều GPU.** Nhiều model chạy cùng lúc; mỗi model được đặt trên một GPU,
-  một server, hoặc chia qua nhiều server bằng llama.cpp RPC.
-- **Các bậc placement và chấm điểm.** Các phương án được xếp hạng theo tốc độ decode ước lượng (băng thông
-  bộ nhớ, số bước nhảy mạng, việc dùng chung GPU); placement thắng được lưu kèm lý do và hiện trên UI.
-- **Gợi ý, dung lượng và what-if.** `/api/recommend` xếp hạng các phương án GPU/server cho một model,
-  `/api/capacity` cho biết còn vừa gì, `/api/simulate` trả lời "nếu... thì sao" mà không thay đổi gì.
-- **Ưu tiên và preemption.** Model ưu tiên cao hơn có thể lấy chỗ của model ưu tiên thấp hơn.
-- **Autoscaling, gồm cả scale-to-zero.** Số replica theo tải; model rảnh có thể về 0 và cold start
-  khi có request kế tiếp.
-- **Rebalance make-before-break.** Khi có placement tốt hơn, replica mới sẵn sàng trước rồi replica cũ mới dừng.
-- **Lượng tử hoá KV cache** (`f16`, `q8_0`, `q4_0`) để model vừa ít GPU hơn.
-- **Speculative decoding** (`ngram`, hoặc model `draft`) để giảm số vòng RPC khi model bị chia.
-- **RPC firewall.** Mỗi agent giới hạn cổng `ggml-rpc-server` (iptables) chỉ cho head và chính nó.
-- **Tự hiệu chỉnh VRAM.** Bộ đệm engine đo được sẽ hiệu chỉnh ước lượng bộ nhớ; hệ số được lưu lại.
-- **Trạng thái điều khiển được giữ qua lần khởi động lại coordinator** (SQLite), gồm cả việc xử lý các lần
-  launch bị crash làm dở.
-- **Triển khai.** Image Docker trên GHCR (`ghcr.io/longduongbao29/gpupool-coordinator`, `ghcr.io/longduongbao29/gpupool-agent`),
-  build image không cần truy cập GitHub, hỗ trợ HTTP proxy, lấy file model từ đường dẫn trên host.
-- **Chuyển model Hugging Face sang GGUF.** Model chỉ được phát hành dưới dạng trọng số safetensors / PyTorch
-  có thể được chuyển ngay trong coordinator (UI hoặc `/api/convert`) với loại lượng tử hoá tuỳ chọn
-  (Q8_0 ... Q2_K và các loại IQ1/IQ2/IQ3 ít bit), ước lượng dung lượng file và VRAM cho từng loại, và bước kiểm tra
-  (header GGUF, id token so với Hugging Face, một lượt sinh văn bản ngắn trên CPU) trước khi vào thư viện model. Image
-  Docker đã kèm sẵn bộ công cụ (`WITH_CONVERT=0` build image gọn, không có bộ công cụ).
-- **Loại IQ với importance matrix.** Các loại IQ dưới 4 bit trên mỗi trọng số cần importance matrix; bộ chuyển đổi
-  tự tính (`llama-imatrix`, giai đoạn "calibrating") từ một văn bản gốc đa ngôn ngữ đi kèm hoặc tệp `.txt` của bạn.
-  Chế độ `auto` làm việc đó ở nơi nó có ích, và đĩa không chứa nổi job sẽ bị từ chối ngay lúc gửi.
-- **Giới hạn server và GPU theo từng model.** Một model có thể bị giới hạn trong một số server hoặc GPU (cả một
-  server, kể cả GPU thêm sau, hoặc từng GPU); scheduler vẫn chọn cách đặt trong số được phép. Thẻ model sao chép
-  endpoint, tên model và một lệnh `curl` dựng sẵn.
-- **Web UI** cho server, GPU, model, deployment, gợi ý và sự kiện.
+<table>
+<tr>
+<td width="33%" valign="top">
 
-## Trạng thái
+**Đặt model và chấm điểm**<br>
+Các phương án (một GPU, một server, tập con các server) được xếp hạng theo tốc độ decode ước tính. Phương án thắng
+được lưu cùng lý do và hiển thị trên UI.
 
-Đã test trên một laptop Windows (GTX 1650 Ti, 4 GB): chạy trực tiếp với các node giả lập và llama.cpp thật,
-và dưới dạng cụm 3 server mô phỏng bằng Docker trong WSL2 (`docker-compose.sim.yml`). Một bài test
-end-to-end 3 server chỉ dùng CPU cũng chạy trong CI, gồm các lần chuyển đổi từ Hugging Face và từ thư mục, cùng một lần lượng tử hoá có importance matrix. Chưa chạy trên LAN nhiều server thật. Xem
-[docs/TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md).
+</td>
+<td width="33%" valign="top">
 
-## Cách hoạt động
+**Nhiều model cùng lúc**<br>
+Độ ưu tiên và preemption, autoscaling kể cả về 0 replica (cold start ở request kế tiếp).
 
+</td>
+<td width="33%" valign="top">
+
+**Rebalance make-before-break**<br>
+Khi có phương án đặt tốt hơn, replica mới sẵn sàng rồi replica cũ mới dừng.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Lượng tử hóa KV cache**<br>
+`f16`, `q8_0`, `q4_0` để model vừa với ít GPU hơn.
+
+</td>
+<td valign="top">
+
+**Speculative decoding**<br>
+`ngram` hoặc model `draft`, giảm số vòng RPC khi model bị chia ra nhiều server.
+
+</td>
+<td valign="top">
+
+**Đề xuất, dung lượng, giả lập**<br>
+`/api/recommend`, `/api/capacity`, `/api/simulate` trả lời "cái gì còn vừa" và "nếu làm vậy thì sao" mà không đổi gì.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Hugging Face sang GGUF**<br>
+Chuyển model safetensors / PyTorch ngay trong coordinator: chọn kiểu lượng tử (Q8_0 đến Q2_K và IQ1/IQ2/IQ3),
+importance matrix, ước tính dung lượng file và VRAM, kiểm tra hợp lệ trước khi file vào thư viện.
+
+</td>
+<td valign="top">
+
+**Giới hạn theo model**<br>
+Chỉ cho một model chạy trên một số server hoặc GPU (cả server, kể cả GPU thêm sau này, hoặc từng GPU); scheduler vẫn
+chọn vị trí trong tập được phép.
+
+</td>
+<td valign="top">
+
+**Firewall cho RPC**<br>
+Mỗi agent giới hạn cổng `ggml-rpc-server` (iptables) chỉ cho head và chính nó.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**Tự hiệu chỉnh VRAM**<br>
+Buffer engine đo được dùng để sửa ước tính bộ nhớ; hệ số được lưu bền.
+
+</td>
+<td valign="top">
+
+**Phục hồi sau sự cố**<br>
+Trạng thái điều khiển nằm trong SQLite, còn nguyên khi coordinator khởi động lại, kể cả các lần khởi chạy bị gián đoạn.
+
+</td>
+<td valign="top">
+
+**Giao diện web và image Docker**<br>
+Server, GPU, model, deployment, đề xuất, sự kiện. Image build được khi không có GitHub và sau HTTP proxy.
+
+</td>
+</tr>
+</table>
+
+## Kiến trúc
+
+```mermaid
+flowchart LR
+  client["Client OpenAI"] -->|"/v1"| coord
+  subgraph coord["Coordinator"]
+    router["router"]
+    sched["scheduler"]
+    recon["reconciler"]
+    lib["library"]
+    conv["converter"]
+  end
+  coord -->|"start / stop engine"| agentA
+  coord --> agentB
+  coord --> agentC
+  subgraph A["Server A"]
+    agentA["agent"] --> head["llama-server (head)"]
+  end
+  subgraph B["Server B"]
+    agentB["agent"] --> rpcB["ggml-rpc-server"]
+  end
+  subgraph C["Server C"]
+    agentC["agent"] --> rpcC["ggml-rpc-server"]
+  end
+  head -->|RPC| rpcB
+  head -->|RPC| rpcC
 ```
-client ──OpenAI API──► coordinator (router + scheduler + reconciler, SQLite)
-                            ▲ heartbeat             │ start/stop engine
-   server A: agent ─ llama-server (head) ──RPC──► server B: agent ─ ggml-rpc-server
-                                         └─RPC──► server C: agent ─ ggml-rpc-server
-```
 
-- **agent** (mỗi server một cái): báo GPU qua NVML, chạy/dừng tiến trình llama.cpp, cache file GGUF, áp dụng RPC firewall.
-- **scheduler**: đọc header GGUF (không tải cả file), ước lượng bộ nhớ theo layer, sinh các placement ứng viên
-  (1 GPU, 1 server, tập con các server; GPU trước RAM CPU) và chấm điểm theo tốc độ decode ước lượng.
-- **router**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming, cân bằng tải theo
-  prefix (system prompt giống nhau vào replica đã cache), retry trước byte đầu tiên.
-- **reconciler**: giữ đủ số replica mong muốn, rollback khi launch lỗi, failover khi node chết, drain,
+Model được chia **theo layer**: head (`llama-server`) chạy một số layer tại chỗ và đẩy các layer còn lại sang các tiến
+trình `ggml-rpc-server` trên server khác. Chỉ head cần file GGUF; các RPC server chỉ giữ một cache tensor.
+
+<details>
+<summary><b>Từng thành phần làm gì</b></summary>
+
+- **agent** (một cái trên mỗi server): báo cáo GPU qua NVML, khởi động và dừng các tiến trình llama.cpp, cache file GGUF, áp dụng firewall RPC.
+- **scheduler**: đọc header GGUF (không cần tải cả file), ước tính bộ nhớ theo từng layer, dựng các phương án đặt
+  (một GPU, một server, tập con các server; GPU trước RAM CPU) và chấm điểm theo tốc độ decode ước tính.
+- **router**: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming, cân bằng tải theo prefix (system
+  prompt dùng chung sẽ vào replica đã cache nó), thử lại trước byte đầu tiên.
+- **reconciler**: giữ đúng số replica mong muốn, rollback các lần khởi chạy lỗi, failover khi node chết, drain,
   autoscale, preempt và rebalance.
 
-Thiết kế: [docs/DESIGN.vi.md](docs/DESIGN.vi.md), [docs/PLATFORM_DESIGN.vi.md](docs/PLATFORM_DESIGN.vi.md).
+Thiết kế: [DESIGN](docs/DESIGN.vi.md), [PLATFORM_DESIGN](docs/PLATFORM_DESIGN.vi.md).
+
+</details>
 
 ## Bắt đầu nhanh
 
-Một lệnh cho coordinator, mỗi server GPU một lệnh, rồi trỏ client OpenAI bất kỳ vào.
 Hướng dẫn đầy đủ: [docs/QUICKSTART.vi.md](docs/QUICKSTART.vi.md).
 
 ```bash
-# 1. coordinator (máy bất kỳ): log in ra admin key; mở http://<IP máy đó>:8080
-docker run -d --name gpupool -p 8080:8080 -v gpupool:/data ghcr.io/longduongbao29/gpupool-coordinator
+# 1. Coordinator (máy bất kỳ, không cần GPU). Log in ra admin key; mở http://<IP máy này>:8080
+docker run -d --name gpupool --restart unless-stopped -p 8080:8080 -v gpupool:/data \
+  ghcr.io/longduongbao29/gpupool-coordinator
 docker logs gpupool
 
-# 2. mỗi server GPU: chạy lệnh join hiện trên UI (Servers -> Add Server)
-docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data \
-  -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" ghcr.io/longduongbao29/gpupool-agent
+# 2. Mỗi server GPU: chạy lệnh join hiển thị trên UI (Servers -> Add Server)
+docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network host --pid host \
+  -v gpupool-agent:/data -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" \
+  ghcr.io/longduongbao29/gpupool-agent
 
-# 3. trên UI: Models -> Add model (Hugging Face hoặc đường dẫn) -> New model -> Start, rồi:
+# 3. Trên UI: Models -> Add model (Hugging Face hoặc đường dẫn) -> New model -> Start. Sau đó:
 curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
   -d '{"model": "qwen7b", "messages": [{"role": "user", "content": "Xin chào"}]}'
 ```
 
-## Test
+Server GPU cần driver NVIDIA 525 trở lên, Docker và NVIDIA Container Toolkit.
+
+<details>
+<summary><b>Thử trên một máy (cụm 3 server giả lập)</b></summary>
+
+`docker-compose.sim.yml` chạy một coordinator và ba "server" tham gia đúng như bản cài thật, nên bạn có thể thử UI,
+việc đặt model trên nhiều server và chia RPC chỉ với một GPU. Build cả hai image trước (xem hướng dẫn bắt đầu nhanh), rồi:
 
 ```bash
-uv run pytest                 # unit test (khoảng 809)
-uv run pytest -m real         # cần llama.cpp ở .cache/llama/b11342-cuda12.4 và GGUF ở .cache/models
-uv run python scripts/e2e_local.py   # 3 node giả lập trên một máy, llama.cpp thật
-
-# cụm 3 server mô phỏng trên một máy (cần Docker + NVIDIA Container Toolkit)
-docker compose -f docker-compose.sim.yml up -d
-
-# end-to-end trong CI (33 phép kiểm tra): coordinator + 3 agent chỉ dùng CPU (docker-compose.ci.yml), model nhỏ chia
-# qua RPC, sau đó ba lần chuyển đổi trong coordinator: Hugging Face -> Q4_K_M (được phục vụ), nguồn là thư mục -> Q8_0,
-# và IQ2_XS với importance matrix
-uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
+GPUPOOL_HOST_MODELS_DIR=/srv/gguf docker compose -f docker-compose.sim.yml up -d
 ```
 
-`scripts/ci_e2e.py` cần image `gpupool-agent` và `gpupool-coordinator` (đổi bằng
-`GPUPOOL_AGENT_IMAGE` / `GPUPOOL_COORDINATOR_IMAGE`); trong GitHub Actions đó là job `e2e`. Bước chuyển đổi
-cần image coordinator được build kèm bộ công cụ (mặc định) và truy cập được huggingface.co;
-`--skip-convert` bỏ bước đó.
+UI ở `http://<docker host>:8080`, admin key `sim-admin`. Dừng và xóa sạch bằng
+`docker compose -f docker-compose.sim.yml down -v`.
+
+</details>
+
+<details>
+<summary><b>Serve model chưa có GGUF (4 bước)</b></summary>
+
+1. **Models -> Convert a model**, chọn repo Hugging Face (`owner/name`) hoặc một thư mục trên server.
+2. **Inspect**: chưa tải gì cả; bạn thấy kiến trúc, converter đã ghim có hỗ trợ không, và ước tính dung lượng cùng
+   VRAM cho từng kiểu lượng tử.
+3. Chọn **kiểu lượng tử** rồi **Start conversion**. Các giai đoạn: tải, chuyển đổi, calibrate (chỉ khi tính importance
+   matrix), lượng tử hóa, kiểm tra.
+4. Khi job xong, file nằm trong thư viện: **Deploy this model**.
+
+Nếu đã có sẵn bản GGUF thì nên dùng nó: nhanh hơn và không cần chuyển đổi. Chi tiết và cách gọi qua HTTP:
+[QUICKSTART](docs/QUICKSTART.vi.md#serve-model-chưa-có-gguf-chuyển-đổi), [API](docs/API.vi.md).
+
+</details>
+
+## Số đo thực tế, không hứa suông
+
+Mọi con số dưới đây lấy từ [docs/TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md). Phần cứng: một laptop Windows 11 với
+GTX 1650 Ti Max-Q (4 GB), Docker trong WSL2, llama.cpp b11342. Các server ngoài server đầu tiên là giả lập; xem
+[Hiện trạng](#hiện-trạng).
+
+| Hạng mục | Kết quả |
+| --- | --- |
+| Overhead của router (Qwen2.5-0.5B, một GPU) | decode 185 tok/s qua gpupool so với 182 tok/s của `llama-bench` |
+| Lượng tử hóa KV cache (Qwen2.5-3B, ctx 8192) | tiết kiệm 132 MB (`q8_0`) và 204 MB (`q4_0`); decode 51,9 / 51,2 / 50,8 tok/s với f16 / q8_0 / q4_0 |
+| Speculative decoding (Qwen2.5-3B chia trên 2 server giả lập) | 48,9 tok/s khi tắt, 53,6 với ngram, 53,9 với model draft 0.5B |
+| Chuyển đổi Qwen2.5-0.5B-Instruct sang `Q4_K_M` (CPU laptop) | tổng 143 s gồm cả tải, 397.807.488 byte |
+| Chuyển đổi Qwen2.5-1.5B-Instruct sang `IQ3_M` có importance matrix (100 chunk) | 28 phút, khoảng 70 % là calibrate |
+| Ước tính dung lượng trước khi chuyển đổi | lệch khoảng 2 % so với file thật (ước tính 390,7 MB, thật 397,8 MB) |
+| Ước tính VRAM (Qwen2.5-0.5B, ctx 4096) | +38 % trước khi hiệu chỉnh, +12 % sau, so với 525 MB đo được |
+| Phục hồi sự cố (kill coordinator giữa lúc khởi chạy) | lần khởi chạy mồ côi bị đánh dấu lỗi sau khoảng 5 s, replica mới sẵn sàng sau khoảng 30 s, không sót engine |
+| Kiểm thử | 809 unit test; end-to-end trên CI 33/33 kiểm tra trong 249 s (coordinator + 3 agent chỉ CPU, chia qua RPC, ba lần chuyển đổi) |
+| Dung lượng image coordinator | 1,77 GB có toolchain chuyển đổi, 560 MB nếu không (`WITH_CONVERT=0`) |
+
+> Model 3B chia trên một GPU cộng hai "server" CPU chạy 11,6 tok/s trong lần giả lập đầu. Lần chạy đó chỉ kiểm chứng
+> đường RPC chứ không đo tốc độ: 23 trên 36 layer chạy trên CPU.
+
+### Hiện trạng
+
+Đã kiểm thử trên một laptop Windows: chạy native với các node giả lập trên llama.cpp thật, và cụm Docker 3 server giả
+lập trong WSL2. Một bài end-to-end 3 server chỉ dùng CPU chạy trong CI. **Chưa chạy trên một mạng LAN nhiều server thật**,
+nên tốc độ qua mạng thật (kể cả speculative decoding qua mạng thật) và các model từ 7B trở lên chưa được kiểm thử.
+Cũng chưa kiểm thử: importance matrix trên GPU, repo Hugging Face bị gated, và model chuyển đổi dung lượng vài GB.
+
+## Dùng API
+
+Mọi client tương thích OpenAI đều dùng được; chỉ đổi base URL và tên model.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://10.0.0.1:8080/v1", api_key="none")
+r = client.chat.completions.create(model="qwen7b", messages=[{"role": "user", "content": "Xin chào"}])
+print(r.choices[0].message.content)
+```
+
+Hỗ trợ streaming (`stream: true`). Muốn bắt buộc client gửi key, chạy coordinator với `-e GPUPOOL_API_KEYS=key1,key2`.
+API quản trị (models, servers, recommend, capacity, simulate, convert, state, events) được mô tả trong
+[docs/API.vi.md](docs/API.vi.md).
 
 ## Tài liệu
 
-- [Bắt đầu nhanh và triển khai](docs/QUICKSTART.vi.md)
-- [HTTP API](docs/API.vi.md)
-- [Thiết kế](docs/DESIGN.vi.md)
-- [Thiết kế nền tảng (scheduling nhiều model)](docs/PLATFORM_DESIGN.vi.md)
-- [Thiết kế UI](docs/UI_DESIGN.vi.md)
-- [Báo cáo test](docs/TEST_REPORT.vi.md)
+| Tài liệu | English | Tiếng Việt |
+| --- | --- | --- |
+| Bắt đầu nhanh và triển khai | [QUICKSTART.en.md](docs/QUICKSTART.en.md) | [QUICKSTART.vi.md](docs/QUICKSTART.vi.md) |
+| Tham chiếu HTTP API | [API.en.md](docs/API.en.md) | [API.vi.md](docs/API.vi.md) |
+| Thiết kế | [DESIGN.en.md](docs/DESIGN.en.md) | [DESIGN.vi.md](docs/DESIGN.vi.md) |
+| Thiết kế nền tảng (lập lịch nhiều model) | [PLATFORM_DESIGN.en.md](docs/PLATFORM_DESIGN.en.md) | [PLATFORM_DESIGN.vi.md](docs/PLATFORM_DESIGN.vi.md) |
+| Thiết kế UI | [UI_DESIGN.en.md](docs/UI_DESIGN.en.md) | [UI_DESIGN.vi.md](docs/UI_DESIGN.vi.md) |
+| Báo cáo kiểm thử | [TEST_REPORT.en.md](docs/TEST_REPORT.en.md) | [TEST_REPORT.vi.md](docs/TEST_REPORT.vi.md) |
+
+<details>
+<summary><b>Chạy test</b></summary>
+
+```bash
+uv run pytest                 # unit test
+uv run pytest -m real         # cần llama.cpp trong .cache/llama/b11342-cuda12.4 và một file GGUF trong .cache/models
+uv run python scripts/e2e_local.py   # 3 node giả lập trên một máy, llama.cpp thật
+
+# End-to-end cho CI: coordinator + 3 agent chỉ CPU (docker-compose.ci.yml)
+uv run python scripts/ci_e2e.py [--project gpupool-ci] [--port 8080] [--keep] [--skip-convert]
+```
+
+`scripts/ci_e2e.py` cần hai image `gpupool-agent` và `gpupool-coordinator` (ghi đè bằng `GPUPOOL_AGENT_IMAGE` /
+`GPUPOOL_COORDINATOR_IMAGE`); trên GitHub Actions đó là job `e2e`. Giai đoạn chuyển đổi cần truy cập internet tới
+huggingface.co; `--skip-convert` bỏ qua giai đoạn này.
+
+</details>
+
+## Lộ trình
+
+Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo cáo kiểm thử](docs/TEST_REPORT.vi.md) và
+[thiết kế nền tảng](docs/PLATFORM_DESIGN.vi.md#10-câu-hỏi-mở-và-các-quyết-định).
+
+- [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding qua mạng thật
+- [ ] Model từ 7B trở lên (cần GPU lớn hơn laptop dùng để test)
+- [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
+- [ ] Đổi model không gián đoạn (zero-downtime)
+- [ ] Nâng cấp llama.cpp
+- [ ] Mô hình tốc độ decode theo từng kiến trúc GPU (hiện là hiệu suất cố định 0,5, đo trên một GTX 1650) và điểm prefill riêng
+- [ ] Importance matrix trên server GPU; phân tán các job chuyển đổi sang nhiều máy
+- [ ] LoRA adapter và vision projector (`mmproj`) khi chuyển đổi
+
+## Hỏi đáp
+
+<details>
+<summary><b>Mọi server đều cần file model không?</b></summary>
+
+Không. Chỉ head (`llama-server`) giữ file GGUF. Trong cụm giả lập, model 2,1 GB chỉ nằm ở head, còn RPC server chỉ
+giữ cache tensor khoảng 724 MB.
+
+</details>
+
+<details>
+<summary><b>Hỗ trợ GPU và driver nào?</b></summary>
+
+GPU NVIDIA với driver 525 trở lên. Image agent được build trên CUDA 12.4 cho các kiến trúc 61, 70, 75, 80, 86, 89 và
+90. Server GPU cần Docker và NVIDIA Container Toolkit.
+
+</details>
+
+<details>
+<summary><b>Chạy được mà không cần Docker không?</b></summary>
+
+Được: `uv run gpupool coordinator`, và trên mỗi server GPU
+`uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir <llama.cpp build/bin>`.
+Agent cần bản build llama.cpp b11342 có CUDA và RPC. Xem mục "Không dùng Docker" trong
+[hướng dẫn bắt đầu nhanh](docs/QUICKSTART.vi.md).
+
+</details>
+
+<details>
+<summary><b>Serve được model safetensors không?</b></summary>
+
+Được, bằng cách chuyển chúng sang GGUF trong coordinator (UI hoặc `/api/convert`). Việc hỗ trợ phụ thuộc converter đã
+ghim (llama.cpp b11342): kiến trúc chưa được hỗ trợ sẽ được báo ở bước inspect. LoRA adapter và vision projector chưa
+được chuyển đổi.
+
+</details>
+
+<details>
+<summary><b>Có an toàn khi dùng trên mạng công cộng không?</b></summary>
+
+Không tự thân. Cổng RPC của llama.cpp không có xác thực và không mã hóa (firewall RPC của gpupool giới hạn truy cập),
+cluster token và API key đi qua HTTP thường, và `/v1` mở với mọi người trừ khi bạn đặt `GPUPOOL_API_KEYS`. Hãy giữ cụm
+trong mạng riêng hoặc VPN, và đặt một proxy kết thúc TLS trước coordinator nếu client ở bên ngoài. Xem
+[Bảo mật](docs/QUICKSTART.vi.md#bảo-mật) và [SECURITY.vi.md](SECURITY.vi.md).
+
+</details>
+
+<details>
+<summary><b>Trộn các loại GPU khác nhau được không?</b></summary>
+
+Được. Scheduler đọc bộ nhớ của từng GPU và xếp hạng các phương án theo tốc độ decode ước tính dựa trên băng thông bộ
+nhớ, số chặng mạng và việc chia sẻ GPU. Ước tính dùng hiệu suất cố định đo trên một GTX 1650; GPU datacenter có thể
+khác, nên hãy thận trọng với bảng xếp hạng tok/s ở đó. Việc dàn trải trên phần cứng nhiều GPU, nhiều server thật mới
+chỉ được kiểm chứng bằng agent giả lập.
+
+</details>
+
+<details>
+<summary><b>Có chạy trên Windows không?</b></summary>
+
+Dự án được phát triển và kiểm thử trên Windows 11: chạy native với node giả lập, và Docker trong WSL2 cho cụm giả
+lập (xem ghi chú WSL2 trong phần xử lý sự cố của hướng dẫn bắt đầu nhanh). Môi trường triển khai được tài liệu hóa
+cho server GPU là Docker với NVIDIA Container Toolkit. Cụm Windows nhiều server thật chưa được thử.
+
+</details>
+
+## Cộng đồng
+
+[Đóng góp](CONTRIBUTING.vi.md) · [Quy tắc ứng xử](CODE_OF_CONDUCT.vi.md) · [Chính sách bảo mật](SECURITY.vi.md) · [Nhật ký thay đổi](CHANGELOG.vi.md)
+
+## Giấy phép
+
+[MIT](LICENSE), © 2026 Long Duong. Các model bạn serve giữ giấy phép riêng của chúng; xem [THIRD_PARTY_NOTICES.vi.md](THIRD_PARTY_NOTICES.vi.md).
+
+## Lời cảm ơn
+
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) và [ggml](https://github.com/ggml-org/ggml): engine suy luận và backend RPC giúp việc gom pool khả thi.
+- [Hugging Face](https://huggingface.co): nơi lưu trữ model và các định dạng mà gpupool chuyển đổi từ đó.
+- [FastAPI](https://fastapi.tiangolo.com): dịch vụ HTTP của coordinator và agent.
+- [Alpine.js](https://alpinejs.dev): giao diện web.

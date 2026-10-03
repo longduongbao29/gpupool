@@ -1,0 +1,46 @@
+name: Feature request / Đề xuất tính năng
+description: Suggest an improvement. / Đề xuất một cải tiến.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Vietnamese is fine. Please read the platform design docs first: the idea may already be planned.
+        Viết tiếng Anh hoặc tiếng Việt đều được. Hãy xem tài liệu thiết kế trước: ý tưởng có thể đã nằm trong kế hoạch.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Vấn đề
+      description: "What are you trying to do and what stops you? / Bạn đang cố làm gì và điều gì cản trở?"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / Giải pháp đề xuất
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / Các phương án khác đã cân nhắc
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / Khu vực
+      options:
+        - Scheduler / placement
+        - Coordinator / API
+        - Agent / engines
+        - Router / OpenAI API
+        - Web UI
+        - HF to GGUF conversion
+        - Docker / images
+        - Documentation
+        - Other
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution / Đóng góp
+      options:
+        - label: I could help implement this. / Tôi có thể giúp triển khai.

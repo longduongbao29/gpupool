@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability / Lỗ hổng bảo mật
+    url: https://github.com/longduongbao29/multi-gpu-inference/security/advisories/new
+    about: Report privately, do not open a public issue. / Báo riêng tư, đừng mở issue công khai.
+  - name: Documentation / Tài liệu
+    url: https://github.com/longduongbao29/multi-gpu-inference/blob/master/docs/QUICKSTART.en.md
+    about: Quick start, configuration and troubleshooting (EN + VI). / Hướng dẫn nhanh, cấu hình, xử lý sự cố (EN + VI).

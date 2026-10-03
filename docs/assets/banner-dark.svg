@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="gpupool: pool scattered GPU memory into one OpenAI-compatible endpoint">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5563f5"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <rect x="1" y="1" width="1198" height="298" rx="20" fill="#0b0d12" stroke="#2a2f3c" stroke-width="2"/>
+  <rect x="30" y="30" width="1140" height="240" rx="16" fill="#12151c"/>
+  <g transform="translate(70 80) scale(5)">
+    <rect width="32" height="32" rx="8" fill="url(#g)"/>
+    <g fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="10" y="10" width="12" height="12" rx="2.5"/>
+      <path d="M13.5 5v5M18.5 5v5M13.5 22v5M18.5 22v5M5 13.5h5M5 18.5h5M22 13.5h5M22 18.5h5"/>
+    </g>
+  </g>
+  <text x="260" y="148" font-size="76" font-weight="700" fill="#e8eaf0" letter-spacing="-2">gpupool</text>
+  <text x="262" y="190" font-size="22" fill="#8b93a7">Pool scattered GPU memory into one</text>
+  <text x="262" y="220" font-size="22" fill="#a9b2ff" font-weight="600">OpenAI-compatible endpoint.</text>
+  <path d="M700 70v160" stroke="#2a2f3c" stroke-width="2"/>
+  <text x="790" y="95" font-size="13" fill="#8b93a7">server A</text>
+  <rect x="870" y="82" width="200" height="16" rx="8" fill="#232836"/>
+  <rect x="870" y="82" width="60" height="16" rx="8" fill="url(#g)"/>
+  <text x="1082" y="95" font-size="13" font-weight="600" fill="#e8eaf0">3 GB</text>
+  <text x="790" y="139" font-size="13" fill="#8b93a7">server B</text>
+  <rect x="870" y="126" width="200" height="16" rx="8" fill="#232836"/>
+  <rect x="870" y="126" width="100" height="16" rx="8" fill="url(#g)"/>
+  <text x="1082" y="139" font-size="13" font-weight="600" fill="#e8eaf0">5 GB</text>
+  <text x="790" y="183" font-size="13" fill="#8b93a7">server C</text>
+  <rect x="870" y="170" width="200" height="16" rx="8" fill="#232836"/>
+  <rect x="870" y="170" width="200" height="16" rx="8" fill="url(#g)"/>
+  <text x="1082" y="183" font-size="13" font-weight="600" fill="#e8eaf0">10 GB</text>
+  <text x="790" y="226" font-size="13" fill="#8b93a7">3 + 5 + 10 = 18 GB, one model, one URL</text>
+  </g>
+</svg>

@@ -1,0 +1,69 @@
+name: Bug report / Báo lỗi
+description: Something does not work as documented. / Có thứ không chạy như tài liệu mô tả.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. English or Vietnamese is fine. For security problems do not use this form: see SECURITY.md.
+        Cảm ơn bạn đã báo lỗi. Viết tiếng Anh hoặc tiếng Việt đều được. Với lỗi bảo mật, đừng dùng biểu mẫu này: xem SECURITY.vi.md.
+  - type: input
+    id: version
+    attributes:
+      label: gpupool version / image tag
+      description: "`pip show gpupool` or the image tag (for example 0.3.0, latest). / Phiên bản hoặc tag image."
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment / Cách triển khai
+      options:
+        - Docker (images)
+        - Docker Compose
+        - Native (uv / pip)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: GPUs, drivers and OS / GPU, driver và hệ điều hành
+      description: "GPU models, VRAM, NVIDIA driver and CUDA version (`nvidia-smi`), OS, number of servers. / Loại GPU, VRAM, driver, CUDA, hệ điều hành, số máy chủ."
+    validations:
+      required: true
+  - type: input
+    id: llama
+    attributes:
+      label: llama.cpp build / Bản build llama.cpp
+      description: "Shown in the UI and as `llama_version` in the agent report (the images use b11342). / Hiển thị trên UI và trong báo cáo agent."
+      placeholder: "b11342"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / Các bước tái hiện
+      description: "What you did, step by step, including the model, its settings and the placement. / Các bước đã làm, gồm mô hình, cấu hình và cách xếp chỗ."
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour / Kết quả mong đợi và thực tế
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Nhật ký
+      description: "Coordinator log and the log of the agent(s) involved (`docker logs gpupool-coordinator`, `docker logs gpupool-agent`). Remove tokens, keys and private paths. / Log coordinator và agent liên quan. Xóa token, khóa, đường dẫn riêng tư."
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else / Thông tin khác
