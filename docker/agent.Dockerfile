@@ -121,7 +121,7 @@ ARG UV_PYTHON_INSTALL_MIRROR=
 WORKDIR /app
 # .python-version pins 3.12, the version gpupool is tested on: without it uv picks the newest CPython
 # that satisfies requires-python (>=3.12), which was 3.14 at the time of writing.
-COPY pyproject.toml uv.lock README.md .python-version ./
+COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md .python-version ./
 # An empty value is unset first so uv never sees an empty mirror URL.
 RUN --mount=type=bind,source=vendor,target=/vendor \
     [ -n "${UV_PYTHON_INSTALL_MIRROR:-}" ] || unset UV_PYTHON_INSTALL_MIRROR; \
