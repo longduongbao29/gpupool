@@ -838,3 +838,27 @@ def test_fake_devices_identity_passthrough(tmp_path, monkeypatch):
         "uuid": "GPU-fake", "pci_bus_id": "00000000:02:00.0"}]))
     d = probe_devices(make_cfg(tmp_path))[0]
     assert (d.uuid, d.pci_bus_id) == ("GPU-fake", "00000000:02:00.0")
+
+
+def test_disable_core_dumps_sets_rlimit_core_to_zero(monkeypatch):
+    # Engines inherit the agent's limit: a llama.cpp abort must not write a core of 0.1-0.5 GB.
+    import gpupool.agent.procs as procs_mod
+    resource = pytest.importorskip("resource")  # POSIX only; a no-op elsewhere
+    calls = []
+    monkeypatch.setattr(resource, "setrlimit", lambda what, lim: calls.append((what, lim)))
+    procs_mod.disable_core_dumps()
+    assert calls == [(resource.RLIMIT_CORE, (0, 0))]
+
+
+def test_disable_core_dumps_is_a_no_op_without_resource(monkeypatch):
+    import builtins
+    import gpupool.agent.procs as procs_mod
+    real_import = builtins.__import__
+
+    def no_resource(name, *a, **kw):
+        if name == "resource":
+            raise ImportError(name)
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_resource)
+    procs_mod.disable_core_dumps()  # must not raise (Windows)

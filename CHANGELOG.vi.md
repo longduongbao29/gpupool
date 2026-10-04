@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Dừng một model chạy chia qua RPC làm máy chính bị crash: mọi engine bị dừng cùng lúc, `ggml-rpc-server` thoát ngay,
+  rồi `llama-server` không giải phóng được buffer ở máy RPC và tự abort (SIGABRT, mỗi lần một file core dump 0,1-0,5 GB,
+  WSL lưu trong `%TEMP%\wsl-crashes`). Giờ máy chính được dừng trước và chờ thoát hẳn, lệnh dừng chờ lâu hơn thời gian
+  ân hạn của agent, và engine chạy không sinh core dump.
+
 ## [0.4.0] - 2026-10-03
 
 ### Thêm mới

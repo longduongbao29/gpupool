@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from gpupool.agent.gpu import probe_devices
 from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
-from gpupool.agent.procs import EngineExists, PortInUse, ProcessManager, llama_version
+from gpupool.agent.procs import EngineExists, PortInUse, ProcessManager, disable_core_dumps, llama_version
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
 from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
@@ -256,4 +256,5 @@ def run_agent(cfg: AgentConfig) -> None:
     # healthcheck and the self-join probe can use 127.0.0.1 whatever cfg.host resolved to.
     # Engines still bind cfg.host (ProcessManager), the address other nodes connect to.
     bind = cfg.host if cfg.host in ("127.0.0.1", "localhost", "::1") else "0.0.0.0"
+    disable_core_dumps()  # inherited by every engine this agent starts
     uvicorn.run(create_app(cfg), host=bind, port=cfg.port)

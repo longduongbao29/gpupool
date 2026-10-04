@@ -70,6 +70,25 @@ def _find_device(devices: list[Device], a: DeviceAssignment) -> Device | None:
     return next((d for d in devices if d.device_id == a.device_id), None)
 
 
+def is_head_engine(engine_id: str) -> bool:
+    return engine_id.endswith("-head")
+
+
+async def stop_head_first(pairs, stop) -> None:
+    """Stop the head engines (llama-server) and wait for them to exit, then the RPC servers.
+
+    A head frees its buffers on the RPC servers while it shuts down; if an RPC server is already
+    gone that send fails and llama.cpp aborts (ggml-rpc.cpp "Remote RPC server crashed", SIGABRT,
+    a core dump each time). Stopping everything at once lost that race on every stop, because
+    ggml-rpc-server exits immediately while llama-server takes a moment to clean up."""
+    pairs = list(pairs)
+    heads = [p for p in pairs if is_head_engine(p[1])]
+    rest = [p for p in pairs if not is_head_engine(p[1])]
+    for group in (heads, rest):
+        if group:
+            await asyncio.gather(*(stop(a, b) for a, b in group))
+
+
 def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
     """(node_id, engine_id) for every engine this replica owns."""
     p = rec.placement
@@ -880,7 +899,7 @@ class Reconciler:
             except Exception as e:  # best effort; agent GC / next report will show leftovers
                 log.warning("stop %s on %s failed: %s", engine_id, node_id, e)
 
-        await asyncio.gather(*(one(n, e) for n, e in engine_ids(rec)))
+        await stop_head_first(engine_ids(rec), one)
 
     async def _fail_orphaned_launches(self, nodes: dict[str, NodeRecord], now: float) -> None:
         """Fail pending/launching replicas that no launch task of this process owns.
@@ -1241,7 +1260,7 @@ class Reconciler:
             except Exception as e:
                 log.warning("rollback: stop %s failed: %s", eid, e)
 
-        await asyncio.gather(*(one(u, e) for u, e in created))
+        await stop_head_first(created, one)  # the head may already be up: same race as a stop
 
     async def _wait_running(self, url: str, eid: str) -> None:
         deadline = time.monotonic() + self.cfg.launch_timeout_s

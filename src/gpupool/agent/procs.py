@@ -127,6 +127,22 @@ def _exposed(bind_host: str) -> bool:
         return False  # hostname: can't judge without resolving; stay quiet
 
 
+def disable_core_dumps() -> None:
+    """No core dumps from this process or the engines it starts (children inherit the limit).
+
+    A llama.cpp abort (e.g. a head whose RPC peer died) wrote a 0.1-0.5 GB core each time; WSL
+    keeps them in %TEMP%/wsl-crashes. The engine log already has ggml's backtrace. Set once in the
+    parent rather than per child: preexec_fn is not safe in this multi-threaded process."""
+    try:
+        import resource  # POSIX only
+    except ImportError:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ValueError, OSError) as e:
+        log.warning("could not disable core dumps: %s", e)
+
+
 @dataclass
 class _Engine:
     spec: EngineSpec

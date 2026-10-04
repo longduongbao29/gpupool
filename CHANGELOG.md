@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopping a model split over RPC crashed its head: every engine was stopped at once, `ggml-rpc-server` exits
+  immediately, and `llama-server` then failed to free its remote buffers and aborted (SIGABRT, a core dump of
+  0.1-0.5 GB each time, which WSL kept in `%TEMP%\wsl-crashes`). Heads are now stopped first and awaited, the stop
+  request waits past the agent's grace period, and engines run without core dumps.
+
 ## [0.4.0] - 2026-10-03
 
 ### Added

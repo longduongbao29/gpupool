@@ -16,6 +16,9 @@ class AgentError(Exception):
         super().__init__(f"agent {url} returned {status}: {self.body}")
 
 
+STOP_TIMEOUT_S = 30.0  # > the agent's 10 s grace period plus the kill and reap
+
+
 class AgentClient:
     def __init__(self, cluster_token: str, http: httpx.AsyncClient | None = None):
         self._headers = bearer_headers(cluster_token)
@@ -35,7 +38,11 @@ class AgentClient:
         return EngineStatus.model_validate(r.json())
 
     async def stop_engine(self, agent_url: str, engine_id: str) -> EngineStatus | None:
-        r = await self._call("DELETE", f"{agent_url.rstrip('/')}/engines/{engine_id}")
+        # The agent answers once the process has exited: up to 10 s of graceful shutdown, then a
+        # kill. A shorter wait here would let the caller stop the RPC servers while the head is
+        # still cleaning up (the crash stop_head_first avoids).
+        r = await self._call("DELETE", f"{agent_url.rstrip('/')}/engines/{engine_id}",
+                             timeout=httpx.Timeout(10.0, read=STOP_TIMEOUT_S))
         if r.status_code == 404:
             return None
         self._check(r)

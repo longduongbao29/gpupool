@@ -1776,3 +1776,63 @@ async def test_launch_in_flight_is_not_an_orphan(mock_health):
     await settle(rec)
     assert store.get_replica(rid).state == "ready"
     await rec.shutdown()
+
+
+# ---------------------------------------------------------------- stop order
+async def test_stop_head_first_waits_for_the_head_before_rpc_servers():
+    # Regression: all engines were stopped at once; ggml-rpc-server exits instantly while
+    # llama-server still frees its remote buffers on shutdown, so every stop of a split replica
+    # ended in "Remote RPC server crashed" -> SIGABRT -> a core dump (seen in the sim cluster logs).
+    from gpupool.coordinator.reconciler import stop_head_first
+    log = []
+
+    async def stop(node, eid):
+        log.append(("begin", eid))
+        await asyncio.sleep(0.05 if eid.endswith("-head") else 0)
+        log.append(("end", eid))
+
+    await stop_head_first([("b", "r-rpc-CUDA0"), ("a", "r-head"), ("c", "r-rpc-CUDA1")], stop)
+    head_end = log.index(("end", "r-head"))
+    assert all(log.index(("begin", e)) > head_end for e in ("r-rpc-CUDA0", "r-rpc-CUDA1"))
+    await stop_head_first([], stop)  # nothing to do is fine
+    log.clear()
+    await stop_head_first([("b", "r-rpc-CUDA0")], stop)  # rollback before the head started
+    assert log == [("begin", "r-rpc-CUDA0"), ("end", "r-rpc-CUDA0")]
+
+
+class _SlowHeadClient(FakeClient):
+    """The agent answers a stop only once the process exited; a head takes a while."""
+
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    async def stop_engine(self, url, engine_id):
+        self.events.append(("begin", engine_id))
+        await asyncio.sleep(0.05 if engine_id.endswith("-head") else 0)
+        self.events.append(("end", engine_id))
+        return await super().stop_engine(url, engine_id)
+
+
+def _rpc_started_after_head_ended(events):
+    head_end = events.index(("end", "m-1-head"))
+    return all(i > head_end for i, e in enumerate(events) if e == ("begin", "m-1-rpc-CUDA0"))
+
+
+async def test_stopping_a_split_replica_waits_for_the_head_first():
+    client = _SlowHeadClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"), node("b"))
+    r = put_replica(store, "m-1", rpc_node="b")
+    nodes = {n.report.node_id: n for n in store.list_nodes()}
+    await rec._stop_engines(r, nodes, clock())
+    assert _rpc_started_after_head_ended(client.events), client.events
+    await rec.shutdown()
+
+
+async def test_rollback_waits_for_the_head_first():
+    client = _SlowHeadClient()
+    rec, store, clock = make_reconciler(client=client)
+    await rec._rollback([("http://b:7070", "m-1-rpc-CUDA0"), ("http://a:7070", "m-1-head")])
+    assert _rpc_started_after_head_ended(client.events), client.events
+    await rec.shutdown()
