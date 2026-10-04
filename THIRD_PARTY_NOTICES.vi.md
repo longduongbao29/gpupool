@@ -117,7 +117,7 @@ các thành phần bên thứ ba kèm thông báo riêng; xem <https://github.co
 | --- | --- | --- |
 | uv (tệp thực thi sao chép từ `ghcr.io/astral-sh/uv`, hoặc `pip install uv`) | MIT OR Apache-2.0 (theo upstream) | <https://github.com/astral-sh/uv> |
 | `python:3.12-slim` (image nền của coordinator) | Python theo Giấy phép PSF; image còn chứa các gói Debian, mỗi gói có giấy phép riêng | <https://docs.python.org/3/license.html>, <https://hub.docker.com/_/python>; văn bản từng gói nằm ở `/usr/share/doc/*/copyright` trong image |
-| `nvidia/cuda:*-devel-ubuntu*` và `nvidia/cuda:*-runtime-ubuntu*` (image nền của agent, mặc định CUDA 12.4.1 trên Ubuntu 22.04) | NVIDIA CUDA EULA và giấy phép NVIDIA Deep Learning Container, cùng giấy phép các gói Ubuntu | xem lưu ý bên dưới |
+| `nvidia/cuda:*-devel-ubuntu*` và `nvidia/cuda:*-runtime-ubuntu*` (image nền của agent, mặc định CUDA 12.8.1 trên Ubuntu 22.04) | NVIDIA CUDA EULA và giấy phép NVIDIA Deep Learning Container, cùng giấy phép các gói Ubuntu | xem lưu ý bên dưới |
 | Python 3.12 (image agent; bản CPython do uv tải) | Giấy phép PSF | python-build-standalone, <https://github.com/astral-sh/python-build-standalone> |
 | iptables, libgomp1 và các gói Debian/Ubuntu khác cài trong image | GPL/LGPL và khác, theo từng gói | văn bản ở `/usr/share/doc/*/copyright` trong image |
 

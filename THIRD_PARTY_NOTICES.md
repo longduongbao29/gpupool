@@ -117,7 +117,7 @@ third-party components with their own notices; see <https://github.com/pytorch/p
 | --- | --- | --- |
 | uv (binary copied from `ghcr.io/astral-sh/uv`, or `pip install uv`) | MIT OR Apache-2.0 (per upstream) | <https://github.com/astral-sh/uv> |
 | `python:3.12-slim` (coordinator image base) | Python is under the PSF License; the image also contains Debian packages, each with its own license | <https://docs.python.org/3/license.html>, <https://hub.docker.com/_/python>; per-package texts are in `/usr/share/doc/*/copyright` inside the image |
-| `nvidia/cuda:*-devel-ubuntu*` and `nvidia/cuda:*-runtime-ubuntu*` (agent image base, default CUDA 12.4.1 on Ubuntu 22.04) | NVIDIA CUDA EULA and NVIDIA Deep Learning Container license, plus Ubuntu package licenses | see the notice below |
+| `nvidia/cuda:*-devel-ubuntu*` and `nvidia/cuda:*-runtime-ubuntu*` (agent image base, default CUDA 12.8.1 on Ubuntu 22.04) | NVIDIA CUDA EULA and NVIDIA Deep Learning Container license, plus Ubuntu package licenses | see the notice below |
 | Python 3.12 (agent image; CPython build downloaded by uv) | PSF License | python-build-standalone, <https://github.com/astral-sh/python-build-standalone> |
 | iptables, libgomp1 and other Debian/Ubuntu packages installed in the images | GPL/LGPL and others, per package | texts in `/usr/share/doc/*/copyright` inside the image |
 

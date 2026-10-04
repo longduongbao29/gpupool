@@ -38,12 +38,12 @@ docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network
 
 Vài giây sau server hiện trong UI cùng toàn bộ GPU của nó. Tên server là hostname, IP được tự dò.
 
-Yêu cầu trên server GPU: driver NVIDIA ≥ 525, Docker và
+Yêu cầu trên server GPU: driver NVIDIA ≥ 525 (≥ 570 với RTX 50 / Blackwell), Docker và
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 Kiểm tra bằng:
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
 ## 3. Serve một model (trên UI)

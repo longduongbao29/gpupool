@@ -12,8 +12,9 @@
 #   on the server's own IP. --pid host: NVML reports host PIDs; without it GPU process names
 #   would be looked up in the container's PID namespace and come out wrong.
 #
-# CUDA 12.4 runs on drivers >= 525 (minor-version compatibility). For older drivers rebuild
-# with a lower CUDA_VERSION.
+# CUDA 12.8 is the first toolkit that builds for Blackwell (RTX 50-series, sm_120). It runs on
+# drivers >= 525 through CUDA minor-version compatibility; RTX 50-series cards themselves need a
+# driver >= 570. For older drivers rebuild with a lower CUDA_VERSION (and without 120 in CUDA_ARCHS).
 #
 # Behind a proxy: Docker forwards the predefined build args to every RUN step (apt-get, git clone,
 # curl, uv downloads), so pass them at build time:
@@ -34,7 +35,7 @@
 #   llama.cpp's web UI is downloaded from Hugging Face at build time (gpupool does not use it; a
 #   failed download only logs a warning): --build-arg LLAMA_USE_PREBUILT_UI=OFF skips the attempt.
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
 ARG UBUNTU_VERSION=22.04
 # Overridable so a registry mirror can be used where ghcr.io is blocked.
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10
@@ -45,8 +46,9 @@ FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llam
 # Pinned: the RPC protocol must match on every server, and gpupool was tested on b11342.
 ARG LLAMA_CPP_REF=b11342
 # Compute capabilities to compile kernels for. 61 Pascal, 70 Volta, 75 Turing, 80/86 Ampere,
-# 89 Ada, 90 Hopper. Fewer archs = much faster build.
-ARG CUDA_ARCHS="61;70;75;80;86;89;90"
+# 89 Ada, 90 Hopper, 120 Blackwell (RTX 5090/5080, RTX PRO 6000; needs CUDA >= 12.8, and
+# llama.cpp turns it into 120a for the FP4 tensor cores). Fewer archs = much faster build.
+ARG CUDA_ARCHS="61;70;75;80;86;89;90;120"
 # Last-resort source download, used when there is no vendored tarball and git cannot reach GitHub.
 # Must serve the GitHub tag archive layout (one top-level directory, stripped on extract).
 ARG LLAMA_CPP_URL=https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF}.tar.gz
@@ -96,6 +98,15 @@ RUN num="${LLAMA_CPP_REF#b}"; \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
         -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
     && cmake --build build --config Release -j"$(nproc)" --target llama-server ggml-rpc-server
+# Every requested architecture must really be in the CUDA backend: a GPU whose code is missing
+# fails only at run time on that server ("no kernel image is available"), far from the build.
+RUN lib="$(find build -name 'libggml-cuda.so*' -type f | head -n1)"; \
+    have="$(cuobjdump --list-elf "$lib" | grep -o 'sm_[0-9]*' | sort -u | tr '\n' ' ')"; \
+    echo "CUDA kernels built for: $have"; \
+    for a in $(echo "$CUDA_ARCHS" | tr ';' ' '); do \
+        a="${a%%-*}"; a="${a%a}"; \
+        echo "$have" | grep -qw "sm_$a" || { echo "missing sm_$a in $lib" >&2; exit 1; }; \
+    done
 RUN mkdir -p /out \
     && cp build/bin/llama-server build/bin/ggml-rpc-server /out/ \
     && find build -name "*.so*" -exec cp -P {} /out/ \;

@@ -11,7 +11,7 @@ services:
       context: .
       dockerfile: docker/agent.Dockerfile
       args:
-        CUDA_ARCHS: ${CUDA_ARCHS:-61;70;75;80;86;89;90}
+        CUDA_ARCHS: ${CUDA_ARCHS:-61;70;75;80;86;89;90;120}
         # GitHub-free builds. Defaults match the Dockerfile (an empty value would override a
         # default there, so every non-empty default is repeated here).
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b11342}

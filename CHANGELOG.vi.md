@@ -8,6 +8,19 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.4.1] - 2026-10-04
+
+### Thêm mới
+
+- GPU Blackwell (RTX 5090/5080, RTX PRO 6000): image agent build kernel cho compute capability 120 (llama.cpp đổi thành
+  120a để dùng FP4 tensor core). Build image giờ báo lỗi nếu thiếu bất kỳ kiến trúc nào đã yêu cầu trong backend CUDA,
+  thay vì để một server lỗi "no kernel image is available" lúc chạy.
+
+### Thay đổi
+
+- Image agent build trên CUDA 12.8.1 (trước là 12.4.1), bản toolkit đầu tiên hỗ trợ Blackwell. Vẫn chạy trên driver
+  >= 525; card RTX 50 cần driver >= 570.
+
 ### Sửa lỗi
 
 - Dừng một model chạy chia qua RPC làm máy chính bị crash: mọi engine bị dừng cùng lúc, `ggml-rpc-server` thoát ngay,
@@ -122,7 +135,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0

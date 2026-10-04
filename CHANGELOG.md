@@ -8,6 +8,19 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-04
+
+### Added
+
+- Blackwell GPUs (RTX 5090/5080, RTX PRO 6000): the agent image builds kernels for compute capability 120 (llama.cpp
+  turns it into 120a for the FP4 tensor cores). The image build now fails if any requested architecture is missing
+  from the CUDA backend, instead of a server failing later with "no kernel image is available".
+
+### Changed
+
+- The agent image is built on CUDA 12.8.1 (was 12.4.1), the first toolkit that targets Blackwell. It still runs on
+  drivers >= 525; RTX 50-series cards need a driver >= 570.
+
 ### Fixed
 
 - Stopping a model split over RPC crashed its head: every engine was stopped at once, `ggml-rpc-server` exits
@@ -122,7 +135,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/longduongbao29/gpupool/releases/tag/v0.2.0

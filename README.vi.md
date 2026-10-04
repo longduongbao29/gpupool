@@ -210,7 +210,7 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
   -d '{"model": "llama-70b", "messages": [{"role": "user", "content": "Xin chào"}]}'
 ```
 
-Server GPU cần driver NVIDIA 525 trở lên, Docker và NVIDIA Container Toolkit.
+Server GPU cần driver NVIDIA 525 trở lên (570 trở lên với RTX 50), Docker và NVIDIA Container Toolkit.
 
 <details>
 <summary><b>Thử trên một máy (cụm 3 server giả lập)</b></summary>
@@ -313,8 +313,9 @@ giữ cache tensor khoảng 724 MB.
 <details>
 <summary><b>Hỗ trợ GPU và driver nào?</b></summary>
 
-GPU NVIDIA với driver 525 trở lên. Image agent được build trên CUDA 12.4 cho các kiến trúc 61, 70, 75, 80, 86, 89 và
-90. Server GPU cần Docker và NVIDIA Container Toolkit.
+GPU NVIDIA từ Pascal đến Blackwell: image agent được build trên CUDA 12.8 cho các kiến trúc 61, 70, 75, 80, 86, 89, 90
+và 120, tức từ dòng GTX 10 tới RTX 4090/5090, A100/H100 và RTX PRO 6000 Blackwell. Driver 525 trở lên (riêng card RTX 50
+cần driver 570 trở lên). Server GPU cần Docker và NVIDIA Container Toolkit.
 
 </details>
 

@@ -96,11 +96,11 @@ có `pin_devices`, cho mọi device không nằm trong danh sách. Tắt GPU ch�
 - `docker/coordinator.Dockerfile`: `python:3.12-slim` + uv, cài app, `EXPOSE 8080`, volume `/data`
   (database + `models`). Cấu hình qua biến môi trường: `GPUPOOL_ADMIN_KEY`, `GPUPOOL_CLUSTER_TOKEN`,
   `GPUPOOL_API_KEYS`, `HF_TOKEN`.
-- `docker/agent.Dockerfile`: stage build `nvidia/cuda:12.4.1-devel-ubuntu22.04` biên dịch llama.cpp
+- `docker/agent.Dockerfile`: stage build `nvidia/cuda:12.8.1-devel-ubuntu22.04` biên dịch llama.cpp
   (pin tag, `GGML_CUDA=ON GGML_RPC=ON`, build arg `LLAMA_CPP_REF`, `CUDA_ARCHS`); stage chạy
-  `nvidia/cuda:12.4.1-runtime-ubuntu22.04` + uv + app. Cấu hình qua biến môi trường:
+  `nvidia/cuda:12.8.1-runtime-ubuntu22.04` + uv + app. Cấu hình qua biến môi trường:
   `GPUPOOL_NODE_ID`, `GPUPOOL_HOST` (IP gọi tới được), `GPUPOOL_CLUSTER_TOKEN`, `GPUPOOL_PORT`.
-  CUDA 12.4 chạy được trên driver ≥ 525 (tương thích minor version của CUDA).
+  CUDA 12.8 chạy được trên driver ≥ 525 (tương thích minor version của CUDA); card RTX 50 cần ≥ 570.
 - `docker-compose.coordinator.yml` và `docker-compose.agent.yml`.
 - Lưu ý: Docker cần quyền nhóm `docker` hoặc root trên mỗi server. Cách cài bằng uv vẫn được giữ cho
   server không có quyền Docker.

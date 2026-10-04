@@ -210,7 +210,7 @@ curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json
   -d '{"model": "llama-70b", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-GPU servers need an NVIDIA driver 525 or newer, Docker and the NVIDIA Container Toolkit.
+GPU servers need an NVIDIA driver 525 or newer (570 or newer for RTX 50-series), Docker and the NVIDIA Container Toolkit.
 
 <details>
 <summary><b>Try it on one machine (simulated 3-server cluster)</b></summary>
@@ -313,8 +313,9 @@ while the RPC server held a tensor cache of about 724 MB.
 <details>
 <summary><b>Which GPUs and drivers?</b></summary>
 
-NVIDIA GPUs with driver 525 or newer. The agent image is built on CUDA 12.4 for architectures 61, 70, 75, 80, 86, 89
-and 90. GPU servers need Docker and the NVIDIA Container Toolkit.
+NVIDIA GPUs from Pascal to Blackwell: the agent image is built on CUDA 12.8 for architectures 61, 70, 75, 80, 86, 89,
+90 and 120, so GTX 10-series through RTX 4090/5090, A100/H100 and RTX PRO 6000 Blackwell are covered. Driver 525 or
+newer (RTX 50-series cards need 570 or newer). GPU servers need Docker and the NVIDIA Container Toolkit.
 
 </details>
 

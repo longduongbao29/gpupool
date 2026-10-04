@@ -96,11 +96,11 @@ nothing else (no path traversal possible: names are looked up, not joined).
 - `docker/coordinator.Dockerfile`: `python:3.12-slim` + uv, app installed, `EXPOSE 8080`, volume `/data`
   (database + `models`). Config from environment: `GPUPOOL_ADMIN_KEY`, `GPUPOOL_CLUSTER_TOKEN`,
   `GPUPOOL_API_KEYS`, `HF_TOKEN`.
-- `docker/agent.Dockerfile`: build stage `nvidia/cuda:12.4.1-devel-ubuntu22.04` compiles llama.cpp
+- `docker/agent.Dockerfile`: build stage `nvidia/cuda:12.8.1-devel-ubuntu22.04` compiles llama.cpp
   (pinned tag, `GGML_CUDA=ON GGML_RPC=ON`, build args `LLAMA_CPP_REF`, `CUDA_ARCHS`); runtime stage
-  `nvidia/cuda:12.4.1-runtime-ubuntu22.04` + uv + the app. Config from environment:
+  `nvidia/cuda:12.8.1-runtime-ubuntu22.04` + uv + the app. Config from environment:
   `GPUPOOL_NODE_ID`, `GPUPOOL_HOST` (reachable IP), `GPUPOOL_CLUSTER_TOKEN`, `GPUPOOL_PORT`.
-  CUDA 12.4 runs on drivers ≥ 525 (CUDA minor-version compatibility).
+  CUDA 12.8 runs on drivers ≥ 525 (CUDA minor-version compatibility); RTX 50-series cards need ≥ 570.
 - `docker-compose.coordinator.yml` and `docker-compose.agent.yml`.
 - Note: Docker needs the `docker` group or root on each server. The uv install path stays supported for
   servers without Docker access.

@@ -40,12 +40,12 @@ docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network
 The server appears in the UI within a few seconds with all its GPUs. Its name is the hostname and its
 IP is detected automatically.
 
-Requirements on the GPU server: an NVIDIA driver ≥ 525, Docker and the
+Requirements on the GPU server: an NVIDIA driver ≥ 525 (≥ 570 for RTX 50-series / Blackwell), Docker and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 Check with:
 
 ```bash
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
 ## 3. Serve a model (in the UI)
