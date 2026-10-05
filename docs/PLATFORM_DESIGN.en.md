@@ -382,7 +382,8 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 
 - `ModelSpec`: the policy fields (JSON in the `models` table, no migration), later also `kv_cache_type`,
   `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`.
-- `NodeReport.features`: capabilities an agent has beyond 0.5 (`rpc_multi_device`); the coordinator only uses
+- `NodeReport.features`: capabilities an agent has beyond 0.5, by its llama.cpp build (`rpc_multi_device`, `spec_mtp`,
+  `kv_unified`); the coordinator only uses
   what an agent reports, so it can be upgraded before its agents.
 - `ModelMeta`: per-layer cache layout (`kv_k`, `kv_v`, `swa`, `n_swa`, `state_bytes`), MTP blocks (`n_nextn`,
   `nextn_bytes`) and MoE `active_bytes`, all optional (metadata without them keeps the old estimate).

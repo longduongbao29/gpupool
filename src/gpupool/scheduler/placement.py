@@ -199,7 +199,8 @@ def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
         totals[d.node.node_id] = totals.get(d.node.node_id, 0) + d.dev.usable_mb
     others = sorted(
         (d for d in devs if d.node.node_id != head_id),
-        key=lambda d: (-totals[d.node.node_id], d.node.node_id, -d.dev.usable_mb),
+        # within a node, GPUs before CPU: same-kind devices stay adjacent, so one RPC server serves them
+        key=lambda d: (-totals[d.node.node_id], d.node.node_id, d.dev.kind != "cuda", -d.dev.usable_mb),
     )
     return others + head_cpu + head_cuda
 
@@ -329,6 +330,20 @@ def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
     return groups
 
 
+def head_features(spec: ModelSpec) -> set[str]:
+    """Agent features (NodeReport.features) the head's llama-server needs for this spec."""
+    need = set()
+    if spec.speculative == "mtp":
+        need.add("spec_mtp")
+    if spec.kv_unified:
+        need.add("kv_unified")
+    return need
+
+
+def _head_node(c: _Cand) -> NodeReport:
+    return _head_first(c).node
+
+
 def _head_first(c: _Cand) -> _Dev:
     """The head's first device in the order (its local GPU when it has one), else the first."""
     return next((d for d in c.order if d.node.node_id == c.head_id), c.order[0])
@@ -450,6 +465,9 @@ def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset(),
         cands, used = _draft_candidates(meta, spec, pool, draft_mb)
     else:
         cands, used = _all_candidates(meta, spec.ctx_size, ct, pool)
+    need = head_features(spec)
+    if need:
+        cands = [c for c in cands if need <= set(_head_node(c).features)]
     if extra_cands:
         # extras are scored in the same pass (scores are relative); their devices also
         # count for the waste normaliser so a lone extra does not divide by a tiny pool
@@ -517,6 +535,10 @@ def _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, d
             need += draft_mb
             draft = (f" (incl. {draft_mb} MB for the draft model, which must fit on one local "
                      "CUDA device of the head node)")
+        missing = head_features(spec)
+        if missing and not any(missing <= set(n.features) for n in nodes if n.node_id not in exclude_nodes):
+            raise NoFit(f"model {spec.name!r} needs an agent with {', '.join(sorted(missing))} as its head "
+                        "(speculative 'mtp' / kv_unified need llama.cpp b11342 or newer): upgrade the agents")
         raise NoFit(
             f"model {spec.name!r} needs about {need} MB at ctx {ctx}{draft}, "
             f"pool has {sum(d.usable_mb for d in pool)} MB usable "

@@ -116,7 +116,7 @@ change; agent and coordinator of different versions must keep talking, so every 
 | Model | Direction | Key fields |
 | --- | --- | --- |
 | `Device` | agent to coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (configured cap; the coordinator also subtracts the estimates of its own live replicas from it, since free memory does not show their share), `uuid` / `pci_bus_id` (stable identity), `bandwidth_gbps` (NVML bus width x memory clock; ranks GPUs), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (GGUF files in the local cache), `features` (capabilities beyond 0.5, e.g. `rpc_multi_device`; the coordinator uses only what an agent reports), CPU/RAM telemetry |
+| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (GGUF files in the local cache), `features` (capabilities by the agent's llama.cpp build: `rpc_multi_device`, `spec_mtp`, `kv_unified` from b11342, none for an unknown build; the coordinator uses only what an agent reports, and heads an `mtp` or `kv_unified` model only on an agent that has it), CPU/RAM telemetry |
 | `EngineSpec` | coordinator to agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: order = `--device`; rpc: the devices one `ggml-rpc-server` serves, `-d` order), `rpc_endpoints` (one per RPC server), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: hosts allowed to connect) |
 | `EngineStatus` | agent to coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (at most 50 lines) |
 | `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = stopped), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
@@ -400,13 +400,16 @@ layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_s
   node that goes silent triggers no write.
 - **Prefix key** = sha256 of canonical JSON cut at 4 KB: for a single turn (system messages + one user
   message), all messages but the last, so a shared system prompt meets on one replica; for a multi-turn
-  chat, the system messages and the first user message, which every later turn repeats, so the conversation
-  stays with its KV cache. With a single message, its first 512 characters; for `/v1/completions`, the
+  chat, the system messages and the first user message, which every later turn repeats, so from its second
+  turn on the conversation stays with its KV cache (from the first when it has no system prompt: a single
+  message keys on its content either way). With a single message, its first 512 characters; for `/v1/completions`, the
   first 512 characters of the prompt.
 - Weighted rendezvous hashing picks the preferred replica: the highest `-weight / ln(hash(prefix, replica))`
-  wins, with `weight` = the replica's generation speed: measured by llama-server
-  (`llamacpp:predicted_tokens_seconds` from the autoscaler's fresh scrape) once it has generated, else the
-  placement's estimate (`Placement.est_decode_tps`); a replica with neither counts as the average of the others. A replica twice as fast gets twice the share of prefixes
+  wins, with `weight` = the placement's estimated decode tok/s (`Placement.est_decode_tps`; a replica without
+  one counts as the average of the others). Not llama-server's measured rate: its bucket resets on every
+  `/metrics` read, so it is 0 when idle and lower when busy, and every change of a weight moves prefixes to a
+  replica without them in its KV cache; measured speed improves the estimate through the speed model
+  (section 6.3) instead. A replica twice as fast gets twice the share of prefixes
   (the idea of Helix, ASPLOS'25: route by capacity on heterogeneous GPUs), and with equal weights it is plain
   rendezvous hashing. If the preferred replica's load exceeds the least-loaded one's by more than 2, the
   least-loaded one is used; load is outstanding requests x (fastest weight / own weight), so a slow

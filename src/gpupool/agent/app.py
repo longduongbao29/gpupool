@@ -83,7 +83,20 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
             delay = min(delay * 2, 60.0)
 
 
-FEATURES = ("rpc_multi_device",)  # NodeReport.features
+# NodeReport.features, by the first llama.cpp build each was verified against (b11342: one
+# ggml-rpc-server -d A,B process, --spec-type draft-mtp, -kvu). An unknown build reports none, so
+# the coordinator keeps it on the 0.5 behaviour (one RPC server per GPU, no mtp / kv_unified head).
+FEATURES = {"rpc_multi_device": 11342, "spec_mtp": 11342, "kv_unified": 11342}
+
+
+def build_number(version: str) -> int | None:
+    """'b11413' -> 11413; None for 'unknown' or anything else."""
+    return int(version[1:]) if version.startswith("b") and version[1:].isdigit() else None
+
+
+def features_of(version: str) -> list[str]:
+    build = build_number(version)
+    return [] if build is None else sorted(f for f, first in FEATURES.items() if build >= first)
 RPC_CACHE_PRUNE_S = 600.0  # how often the rpc weight cache is trimmed to rpc_cache_gb
 
 
@@ -133,7 +146,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
-            cuda_archs=archs(), features=list(FEATURES),
+            cuda_archs=archs(), features=features_of(version()),
             models=list_models(cfg.cache_dir), ts=time.time())
 
     async def heartbeat_loop() -> None:
@@ -172,6 +185,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
     async def lifespan(app: FastAPI):
         psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
+        pm.llama_build = build_number(version())  # engines' flags follow the build (procs.py)
         prune_task = asyncio.create_task(rpc_cache_loop()) if cfg.rpc_cache_gb > 0 else None
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None

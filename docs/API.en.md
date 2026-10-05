@@ -573,7 +573,7 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, no auth |
-| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (`["rpc_multi_device"]`: one rpc engine may serve several devices), CPU/RAM |
+| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (by the llama.cpp build: `rpc_multi_device` one rpc engine may serve several devices, `spec_mtp`, `kv_unified`), CPU/RAM |
 | POST | `/engines` | start one llama.cpp process from an `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | per-device buffers llama.cpp reported at load |

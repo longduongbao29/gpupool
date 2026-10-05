@@ -113,7 +113,7 @@ coordinator khác phiên bản phải vẫn nói chuyện được, nên mọi f
 | Model | Hướng | Field chính |
 | --- | --- | --- |
 | `Device` | agent tới coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (mức trần đã cấu hình; coordinator còn trừ ước lượng của các replica đang chạy của chính nó vì free memory không cho thấy phần đó), `uuid` / `pci_bus_id` (định danh ổn định), `bandwidth_gbps` (độ rộng bus NVML x xung nhớ; dùng để xếp hạng GPU), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (file GGUF trong cache local), `features` (khả năng ngoài bản 0.5, ví dụ `rpc_multi_device`; coordinator chỉ dùng khả năng mà agent báo), telemetry CPU/RAM |
+| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (file GGUF trong cache local), `features` (khả năng theo bản build llama.cpp của agent: `rpc_multi_device`, `spec_mtp`, `kv_unified` từ b11342, không có gì với bản build không rõ; coordinator chỉ dùng khả năng mà agent báo, và chỉ chọn làm head cho model `mtp` hoặc `kv_unified` agent có khả năng đó), telemetry CPU/RAM |
 | `EngineSpec` | coordinator tới agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: thứ tự = `--device`; rpc: các device một `ggml-rpc-server` phục vụ, theo thứ tự `-d`), `rpc_endpoints` (mỗi RPC server một cái), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: host được phép kết nối) |
 | `EngineStatus` | agent tới coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (tối đa 50 dòng) |
 | `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = dừng), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
@@ -384,13 +384,14 @@ mọi model có nhiều slot.
   lần ghi nào.
 - **Prefix key** = sha256 của JSON chuẩn hóa cắt ở 4 KB: với một lượt (các message system + một message
   user), mọi message trừ cái cuối, để các request chung system prompt gặp nhau trên một replica; với hội thoại
-  nhiều lượt, các message system cộng message user đầu tiên, phần mọi lượt sau đều lặp lại, để hội thoại ở
-  cùng KV cache của nó. Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
+  nhiều lượt, các message system cộng message user đầu tiên, phần mọi lượt sau đều lặp lại, để từ lượt thứ hai hội
+  thoại ở cùng KV cache của nó (từ lượt đầu khi không có system prompt: một message đơn luôn lấy khoá theo nội dung). Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
   tự đầu của prompt.
 - Weighted rendezvous hashing chọn replica ưu tiên: `-weight / ln(hash(prefix, replica))` lớn nhất thắng, với
-  `weight` = tốc độ sinh token của replica: số đo của llama-server (`llamacpp:predicted_tokens_seconds` trong lần
-  scrape còn mới của autoscaler) khi nó đã sinh token, nếu không thì ước lượng của placement
-  (`Placement.est_decode_tps`); replica không có cả hai được tính bằng trung bình các replica khác. Replica nhanh gấp đôi nhận gấp đôi phần prefix (ý tưởng của Helix, ASPLOS'25:
+  `weight` = tok/s decode ước lượng của placement (`Placement.est_decode_tps`; replica không có ước lượng được tính
+  bằng trung bình các replica khác). Không dùng tốc độ đo của llama-server: bộ đếm của nó reset sau mỗi lần đọc
+  `/metrics`, nên bằng 0 khi rảnh và thấp hơn khi bận, và mỗi lần trọng số đổi là prefix bị chuyển sang replica không
+  có chúng trong KV cache; thay vào đó tốc độ đo được cải thiện ước lượng qua mô hình tốc độ (mục 6.3). Replica nhanh gấp đôi nhận gấp đôi phần prefix (ý tưởng của Helix, ASPLOS'25:
   định tuyến theo năng lực trên GPU không đồng nhất), và khi trọng số bằng nhau thì đúng là rendezvous hashing
   thường. Nếu tải của replica ưu tiên vượt replica rảnh nhất hơn 2 thì dùng replica rảnh nhất; tải là số request
   đang chờ x (trọng số nhanh nhất / trọng số của nó), nên replica chậm đầy sớm hơn.

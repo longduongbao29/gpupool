@@ -306,12 +306,14 @@ def test_candidates_carry_the_estimated_speed_as_weight(routing):
     assert {e.replica_id: e.weight for e in cap["get_candidates"]("m")} == {"m-1": 42.5, "m-2": 42.5}
 
 
-def test_measured_speed_beats_the_estimate(routing, monkeypatch):
+def test_measured_speed_does_not_move_routing_weights(routing, monkeypatch):
     from gpupool.coordinator.autoscaler import Autoscaler
     cap, store, calls, clock, _ = routing
     store.upsert_node(node("a"), clock())
     rec = put_replica(store, "m-1", now=clock())
     store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
         update={"est_decode_tps": 42.5})}))
+    # llama-server's measured rate resets on every scrape (0 when idle, lower when busy): a weight
+    # that followed it would reshuffle prefixes every poll. Routing keeps the stable estimate.
     monkeypatch.setattr(Autoscaler, "measured_tps", lambda self, rid: 17.0 if rid == "m-1" else None)
-    assert [e.weight for e in cap["get_candidates"]("m")] == [17.0]
+    assert [e.weight for e in cap["get_candidates"]("m")] == [42.5]

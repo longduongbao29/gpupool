@@ -26,9 +26,11 @@ def _anchor(messages: list) -> list:
     Single turn ([system..., user]): everything but the last message, so requests sharing a
     system prompt meet on one replica. Multi-turn: the system messages and the first
     conversational message, which every later turn of the same conversation repeats verbatim,
-    so the whole conversation stays on the replica whose KV cache holds it. Keying on
-    messages[:-1] instead would change the key on every turn (until the canonical prefix
-    passed the 4096-character cap) and move the conversation to another replica each time.
+    so from its second turn on a conversation stays on the replica whose KV cache holds it
+    (without a system prompt, from the first). Keying on messages[:-1] instead would change the
+    key on every turn (until the canonical prefix passed the 4096-character cap). The switch
+    between turns 1 and 2 of a chat with a system prompt is the price of grouping single-turn
+    requests by their shared system prompt.
     """
     first = next((i for i, m in enumerate(messages)
                   if not (isinstance(m, dict) and m.get("role") in _PREAMBLE_ROLES)), len(messages))
@@ -45,10 +47,11 @@ def prefix_key(body: dict) -> str:
     """
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
-        if len(messages) > 1:
-            material = _canon(_anchor(messages))[:4096]
-        else:
-            first = messages[0]
+        anchor = _anchor(messages) if len(messages) > 1 else messages
+        if len(anchor) > 1:
+            material = _canon(anchor)[:4096]
+        else:  # one message: its content, the same rule whether or not later turns follow
+            first = anchor[0]
             content = first.get("content") if isinstance(first, dict) else first
             material = _text(content)[:512]
     else:
@@ -59,7 +62,8 @@ def prefix_key(body: dict) -> str:
 def _hash01(key: str, replica_id: str) -> float:
     """Uniform in (0, 1) per (key, replica)."""
     digest = hashlib.sha256(f"{key}\x00{replica_id}".encode()).digest()
-    return (int.from_bytes(digest[:8], "big") + 0.5) / 2.0 ** 64
+    # 52 bits + 0.5: exact in a float (at most 1 - 2^-53), never 0 or 1 (log(1) would divide by 0)
+    return ((int.from_bytes(digest[:8], "big") >> 12) + 0.5) / 2.0 ** 52
 
 
 def _score(key: str, c: ReplicaEndpoint) -> float:

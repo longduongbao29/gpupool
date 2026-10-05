@@ -379,7 +379,8 @@ Khác biệt so với bản nháp đầu: không có endpoint nhãn (`PUT /api/s
 
 - `ModelSpec`: các trường chính sách (JSON trong bảng `models`, không cần migration), về sau thêm
   `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`.
-- `NodeReport.features`: khả năng của agent ngoài bản 0.5 (`rpc_multi_device`); coordinator chỉ dùng khả năng agent
+- `NodeReport.features`: khả năng của agent ngoài bản 0.5, theo bản build llama.cpp của nó (`rpc_multi_device`, `spec_mtp`,
+  `kv_unified`); coordinator chỉ dùng khả năng agent
   báo, nên có thể nâng cấp coordinator trước các agent.
 - `ModelMeta`: bố cục cache theo layer (`kv_k`, `kv_v`, `swa`, `n_swa`, `state_bytes`), block MTP (`n_nextn`,
   `nextn_bytes`) và `active_bytes` của MoE, đều tùy chọn (metadata không có chúng giữ ước lượng cũ).

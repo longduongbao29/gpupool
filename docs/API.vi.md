@@ -570,7 +570,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, không xác thực |
-| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (`["rpc_multi_device"]`: một engine rpc có thể phục vụ nhiều thiết bị), CPU/RAM |
+| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (theo bản build llama.cpp: `rpc_multi_device` một engine rpc có thể phục vụ nhiều thiết bị, `spec_mtp`, `kv_unified`), CPU/RAM |
 | POST | `/engines` | khởi động một tiến trình llama.cpp từ `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | các buffer theo thiết bị mà llama.cpp báo lúc load |

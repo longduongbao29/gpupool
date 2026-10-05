@@ -544,3 +544,24 @@ def test_fewer_rpc_servers_estimate_faster_decode():
     new = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
     old = plan(meta, SPEC, _two_gpu_remote([]), "r", Ports())
     assert new.est_decode_tps > old.est_decode_tps
+
+
+def test_remote_gpus_stay_adjacent_ahead_of_that_nodes_cpu():
+    from gpupool.scheduler.placement import _Dev, _order
+    a = node("a", dev("CUDA0", 3000))
+    b = node("b", dev("CUDA0", 2400), dev("CPU", 1600, kind="cpu"), dev("CUDA1", 800))
+    order = _order([_Dev(n, d) for n in (a, b) for d in n.devices], "a")
+    assert [(d.node.node_id, d.dev.device_id) for d in order] == [
+        ("b", "CUDA0"), ("b", "CUDA1"), ("b", "CPU"), ("a", "CUDA0")]
+
+
+def test_kv_unified_needs_a_head_that_supports_it():
+    meta = make_meta(n_layers=8)
+    spec = SPEC.model_copy(update={"kv_unified": True, "parallel": 2})
+    old = node("old", dev("CUDA0", 20000))
+    new = node("new", dev("CUDA0", 20000))
+    new.features = ["kv_unified"]
+    pl = plan(meta, spec, [old, new], "r", Ports())
+    assert pl.head_node == "new"
+    with pytest.raises(NoFit, match="kv_unified"):
+        plan(meta, spec, [old], "r", Ports())

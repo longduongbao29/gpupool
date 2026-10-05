@@ -20,13 +20,15 @@ All notable changes to gpupool are documented here. The format follows
 
 - `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
   whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a
-  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool.
+  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool. Only an
+  agent that reports the `kv_unified` feature heads such a model.
 
 - Speculative decoding `mtp`: GGUFs that ship multi-token-prediction (nextn) layers (Qwen3.5, GLM-4.5 and
   newer, DeepSeek V3...) draft with them through llama.cpp's `--spec-type draft-mtp`, with no extra model
   file. Fewer target passes per token means fewer RPC round trips when the model is split. The API refuses
   `mtp` for a model without such layers, the estimate counts the layers (loaded only in this mode) and their
-  cache, and the Recommend panel suggests it ahead of n-gram and draft models.
+  cache, and the Recommend panel suggests it ahead of n-gram and draft models. Only an agent that reports the
+  `spec_mtp` feature (llama.cpp b11342+) heads such a model.
 
 ### Changed
 
@@ -40,8 +42,9 @@ All notable changes to gpupool are documented here. The format follows
   CUDA, Volta flash-attention fixes, and `llama-imatrix --nextn`, which gpupool now passes for models with MTP
   layers so importance-matrix types can quantize them.
 
-- The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with each
-  replica's generation speed as weight (measured by llama-server once it has generated, else estimated), and the overload check counts requests relative to capacity.
+- The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with the
+  placement's estimated decode tok/s as weight (which the learned speed model keeps honest), and the overload check
+  counts requests relative to capacity.
   A replica split over the network at 10 tok/s no longer gets the same share as a single-GPU one at 50 tok/s.
   Replicas of equal speed route exactly as before.
 

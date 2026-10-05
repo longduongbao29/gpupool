@@ -1188,10 +1188,10 @@ class Reconciler:
             try:
                 await self._start_rpc_engines(rid, p, agent, head_host, created)
                 path, draft_path = await models
-            finally:
+            finally:  # always reap: a download that failed meanwhile must not go unretrieved
                 if not models.done():
                     models.cancel()
-                    await asyncio.gather(models, return_exceptions=True)
+                await asyncio.gather(models, return_exceptions=True)
             if draft_path is not None:
                 extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
                              draft_n_max=spec.draft_n_max)

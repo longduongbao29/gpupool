@@ -365,9 +365,11 @@ def create_app(
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
         _, _, ready, nodes = _snapshot()
-        # Weight = generation speed: measured by llama-server when it has generated, else estimated.
-        rows = [(rid, head, port, autoscaler.measured_tps(rid) or tps)
-                for rid, head, port, tps in ready.get(model, ())]
+        # Weight = the placement's estimated speed. Not llama-server's measured one: that is a rate
+        # over the last scrape interval (its bucket resets on every /metrics read), 0 when idle and
+        # lower when busy, and every change of a weight moves prefixes to a replica without them in
+        # its KV cache. The estimate improves anyway as the speed model learns from those samples.
+        rows = list(ready.get(model, ()))
         known = [tps for *_, tps in rows if tps > 0]
         default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []

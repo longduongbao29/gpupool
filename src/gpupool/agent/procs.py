@@ -210,7 +210,7 @@ class ProcessManager:
         self._lock = threading.RLock()
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
-        self._build: int | None = None
+        self.llama_build: int | None = None
         self.firewall = (firewall or RpcFirewall()) if rpc_firewall else None
         if self.firewall is not None:
             self.firewall.setup()  # also flushes rules of engines a previous agent left behind
@@ -269,11 +269,14 @@ class ProcessManager:
         return reaped
 
     def _llama_build(self) -> int | None:
-        """Build number of llama-server ("b11413" -> 11413), None when unknown; read once."""
-        if self._build is None:
+        """Build number of llama-server ("b11413" -> 11413), None when unknown. The agent app sets
+        llama_build from its cached version at start; otherwise it is probed here, and only a
+        successful probe is kept (a slow binary that timed out once must not disable flags)."""
+        if self.llama_build is None:
             v = llama_version(self.llama_dir)
-            self._build = int(v[1:]) if v.startswith("b") and v[1:].isdigit() else 0
-        return self._build or None
+            if v.startswith("b") and v[1:].isdigit():
+                self.llama_build = int(v[1:])
+        return self.llama_build
 
     def _binaries(self) -> dict[str, Path]:
         if self._bins is None:
@@ -298,13 +301,14 @@ class ProcessManager:
             s.close()
 
     def start(self, spec: EngineSpec, model_path: str | None = None) -> EngineStatus:
+        build = self._llama_build()  # may run llama-server --version: outside the lock
         with self._lock:
             old = self._engines.get(spec.engine_id)
             if old is not None and old.proc.poll() is None:
                 raise EngineExists(spec.engine_id)
             if not self._port_free(spec.port):
                 raise PortInUse(f"port {spec.port} not available on {self.bind_host}")
-            cmd = build_command(spec, self._binaries(), self.bind_host, model_path, self._llama_build())
+            cmd = build_command(spec, self._binaries(), self.bind_host, model_path, build)
             self.log_dir.mkdir(parents=True, exist_ok=True)
             if old is not None:
                 self._drop_rules(old)  # crashed engine being replaced: its rules are stale

@@ -309,6 +309,8 @@ async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
 
 
 async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
+    import gpupool.agent.app as appmod
+    monkeypatch.setattr(appmod, "llama_version", lambda d: "b11413")
     seen = []
     monkeypatch.setattr(ProcessManager, "start", lambda self, spec, mp=None: seen.append(spec) or
                         procs.EngineStatus(engine_id=spec.engine_id, kind=spec.kind, state="starting",
@@ -320,5 +322,14 @@ async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
         for bad in ([], ["CUDA0", "CUDA0"]):
             r = await c.post("/engines", json={**two, "engine_id": "e2", "devices": bad}, headers=H)
             assert r.status_code == 422, bad
-        assert "rpc_multi_device" in (await c.get("/report", headers=H)).json()["features"]
+        assert (await c.get("/report", headers=H)).json()["features"] == [
+            "kv_unified", "rpc_multi_device", "spec_mtp"]
     assert seen[0].devices == ["CUDA0", "CUDA1"]
+
+
+@pytest.mark.parametrize("version, features", [
+    ("b11413", ["kv_unified", "rpc_multi_device", "spec_mtp"]), ("b11342", ["kv_unified", "rpc_multi_device", "spec_mtp"]),
+    ("b9000", []), ("unknown", []), ("x1", [])])
+def test_features_follow_the_llama_build(version, features):
+    from gpupool.agent.app import features_of
+    assert features_of(version) == features

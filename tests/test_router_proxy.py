@@ -463,3 +463,24 @@ def test_load_escape_hatch_counts_load_per_capacity():
     assert b.pick([fast, slow], key).replica_id == "fast"
     b.acquire("fast")  # 6 > 3 + 2: the slow replica is relatively idler now
     assert b.pick([fast, slow], key).replica_id == "slow"
+
+
+def test_hash_stays_strictly_inside_zero_and_one(monkeypatch):
+    import hashlib
+    from gpupool.router import balancer as bal
+
+    class Top:  # the largest 64-bit prefix rounded to 1.0 before
+        def digest(self):
+            return b"\xff" * 32
+
+    monkeypatch.setattr(hashlib, "sha256", lambda data: Top())
+    u = bal._hash01("k", "r")
+    assert 0 < u < 1
+    assert bal._score("k", ReplicaEndpoint(replica_id="r", model="m", base_url="http://r:1")) > 0
+
+
+def test_a_chat_without_system_prompt_keeps_its_key_from_the_first_turn():
+    turn1 = {"messages": [{"role": "user", "content": "hello"}]}
+    turn2 = {"messages": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"},
+                          {"role": "user", "content": "more"}]}
+    assert prefix_key(turn1) == prefix_key(turn2)

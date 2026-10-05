@@ -145,7 +145,8 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
             fa = {"flash_attn": "auto"} if spec.flash_attn == "off" else {}  # quantized V needs FA
             p = await try_rank(spec.model_copy(update={"kv_cache_type": kv, **fa}))
             if p is not None and _tier(p) < _tier(best):
-                kw = {"parallel": spec.parallel, "ubatch": spec.ubatch}
+                kw = {"parallel": spec.parallel, "ubatch": spec.ubatch, "mtp": spec.speculative == "mtp",
+                      "kv_unified": spec.kv_unified}
                 saved = (kv_total_bytes(meta, spec.ctx_size, spec.kv_cache_type, **kw)
                          - kv_total_bytes(meta, spec.ctx_size, kv, **kw)) / 1024 ** 2
                 quality = "negligible quality loss" if kv == "q8_0" else "a small quality loss"
