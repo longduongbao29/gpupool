@@ -120,7 +120,8 @@ Trạng thái điều khiển nằm trong SQLite, còn nguyên khi coordinator k
 <td valign="top">
 
 **Giao diện web và image Docker**<br>
-Server, GPU, model, deployment, đề xuất, sự kiện. Image build được khi không có GitHub và sau HTTP proxy.
+Server, GPU, model, deployment, đề xuất, sự kiện, và Playground stream câu trả lời của model đã deploy kèm thời gian
+tới token đầu và token/giây. Image build được khi không có GitHub và sau HTTP proxy.
 
 </td>
 </tr>

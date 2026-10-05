@@ -10,6 +10,20 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- **Playground** in the UI: chat with a deployed model through `/v1/chat/completions` (router, balancer and replica, as a
+  client would). Replies stream character by character with a live strip of time to first token, generation tokens/s,
+  tokens and total latency; each reply also shows prompt (prefill) tokens and speed and the replica that answered.
+  Speeds come from llama-server's own `timings` at the end (counted in the browser while streaming), thinking models'
+  `reasoning_content` goes to a collapsible block, *Stop* cancels, idle on-demand models cold-start on the first
+  message. A *Chat* button on running model cards opens it. The settings (not the chat) are remembered per browser.
+
+- `/v1` accepts the admin key too once API keys are set (the Playground signs in with it); an open `/v1` (no API key)
+  stays open. Every proxied response carries `x-gpupool-replica`, the replica that answered.
+
+- UI: each server card shows its llama.cpp build and flags servers whose build differs from the most common one;
+  *Placement health* shows the learned speed model (share of peak bandwidth, time per network hop); *Why here*
+  breaks a token's time into reading weights, network hops and logits.
+
 - The decode-speed model learns from measured speed: eta (fraction of peak bandwidth) from replicas on one server
   and the time per RPC hop from split ones, both from llama-server's measured generation speed of replicas that
   run one plain stream. Persisted, shown as `speed_model` in `GET /api/state`; placements then rank by the
@@ -96,6 +110,8 @@ All notable changes to gpupool are documented here. The format follows
   every 2 s per server on the event loop that also proxies inference, no longer fsync each time.
 
 ### Fixed
+
+- UI on phones: panel header buttons (Placement health) wrap instead of overflowing the screen.
 
 - Multi-turn chats stay on one replica. The router keyed a conversation on every message but the last, so the
   key changed on each turn (until the prefix passed 4096 characters) and with several replicas the conversation

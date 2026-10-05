@@ -10,6 +10,21 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thêm
 
+- **Playground** trong UI: chat với model đã deploy qua `/v1/chat/completions` (router, balancer và replica, đúng như
+  client). Câu trả lời stream từng ký tự, kèm dải số đo trực tiếp: thời gian tới token đầu, token/giây khi sinh, số
+  token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill) và replica đã trả lời.
+  Tốc độ lấy từ `timings` của chính llama-server khi xong (đếm trong trình duyệt khi đang stream), `reasoning_content`
+  của model có suy nghĩ vào một khối thu gọn được, *Stop* để huỷ, model on-demand đang ngủ được nạp (cold start) ở tin
+  nhắn đầu tiên. Nút *Chat* trên thẻ model đang chạy mở Playground. Phần cài đặt (không phải nội dung chat) được nhớ
+  theo trình duyệt.
+
+- `/v1` nhận thêm admin key khi đã đặt API key (Playground đăng nhập bằng khóa này); `/v1` đang mở (không có API key)
+  vẫn mở. Mọi phản hồi được chuyển tiếp có header `x-gpupool-replica`, tức replica đã trả lời.
+
+- UI: thẻ server hiện bản llama.cpp của nó và đánh dấu server có bản khác với bản phổ biến nhất; *Placement health*
+  hiện mô hình tốc độ đã học (phần băng thông đỉnh đạt được, thời gian mỗi hop mạng); *Why here* tách thời gian của
+  một token thành đọc weight, các hop mạng và logits.
+
 - Mô hình tốc độ decode tự học từ tốc độ đo được: eta (tỉ lệ băng thông đỉnh) từ replica trên một server và thời gian
   mỗi hop RPC từ replica bị chia, đều lấy từ tốc độ sinh token đo được của llama-server ở các replica chạy một luồng
   thuần. Được lưu lại, hiển thị là `speed_model` trong `GET /api/state`; placement khi đó xếp hạng theo mạng và GPU thật
@@ -94,6 +109,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   một commit mỗi 2 s trên chính event loop chuyển tiếp suy luận, không còn fsync mỗi lần.
 
 ### Sửa lỗi
+
+- UI trên điện thoại: các nút ở đầu khung (Placement health) xuống dòng thay vì tràn ra ngoài màn hình.
 
 - Hội thoại nhiều lượt ở yên trên một bản sao. Router lấy khoá theo mọi tin nhắn trừ tin cuối, nên khoá đổi ở
   mỗi lượt (cho tới khi tiền tố quá 4096 ký tự) và khi có nhiều bản sao, hội thoại nhảy sang bản sao phải xử lý

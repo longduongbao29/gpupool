@@ -330,3 +330,12 @@ def test_routing_weight_follows_the_learned_speed_model(routing):
     assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.022)
     set_speed_model(0.25, 0.010)  # learned: slower GPUs, slower network
     assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.05)
+
+
+def test_router_keys_add_the_admin_key_only_when_v1_has_keys():
+    from gpupool.common.config import CoordinatorConfig
+    from gpupool.coordinator.app import router_keys
+    # with API keys the admin login also works on /v1 (the UI's Playground)
+    assert router_keys(CoordinatorConfig(api_keys=["k"], admin_key="adm")) == ["k", "adm"]
+    # an open /v1 stays open: requiring the admin key would lock every client out
+    assert router_keys(CoordinatorConfig(api_keys=[], admin_key="adm")) == []

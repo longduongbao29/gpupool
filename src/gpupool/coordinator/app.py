@@ -118,6 +118,13 @@ def _safe_file(models_dir: Path, name: str) -> Path:
     return p
 
 
+def router_keys(cfg: CoordinatorConfig) -> list[str]:
+    """Keys /v1 accepts. The admin key also works there once API keys are set, so the UI's
+    Playground can chat with the admin login; with no API key /v1 stays open (requiring the
+    admin key then would lock out every client)."""
+    return [*cfg.api_keys, cfg.admin_key] if cfg.api_keys and cfg.admin_key else list(cfg.api_keys)
+
+
 def create_app(
     cfg: CoordinatorConfig,
     *,
@@ -389,7 +396,7 @@ def create_app(
     app.include_router(make_router(
         get_candidates=get_candidates,
         list_models=lambda: list(_snapshot()[1]),
-        balancer=balancer, metrics=metrics, api_keys=cfg.api_keys,
+        balancer=balancer, metrics=metrics, api_keys=router_keys(cfg),
         on_replica_error=reconciler.note_error,
         max_body_bytes=cfg.max_request_mb * 1024 * 1024,
         on_request=autoscaler.note_request, can_cold_start=autoscaler.can_cold_start,

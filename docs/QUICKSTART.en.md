@@ -85,6 +85,9 @@ Any OpenAI-compatible client works. Only two values change:
 | Model | the name you gave the model in the UI |
 | API key | none needed by default; if you set `GPUPOOL_API_KEYS`, one of those keys |
 
+The quickest check needs no client: open **Playground** in the UI (or **Chat** on the model's card), send a message
+and watch the reply stream in with its time to first token and tokens/s.
+
 curl:
 
 ```bash

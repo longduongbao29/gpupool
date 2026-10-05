@@ -119,7 +119,8 @@ Control state lives in SQLite and survives coordinator restarts, including launc
 <td valign="top">
 
 **Web UI and Docker images**<br>
-Servers, GPUs, models, deployments, recommendations, events. Images build without GitHub access and behind HTTP proxies.
+Servers, GPUs, models, deployments, recommendations, events, and a Playground that streams a deployed model's replies with
+their time to first token and tokens/s. Images build without GitHub access and behind HTTP proxies.
 
 </td>
 </tr>

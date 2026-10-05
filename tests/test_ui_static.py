@@ -979,3 +979,51 @@ def test_mock_recommend_tips_and_perf_validation(client):
     assert r.status_code == 422
     gpus = client.get("/api/state", headers=HEAD).json()["servers"][0]["report"]["devices"]
     assert gpus[0]["compute_cap"] == "9.0"
+
+
+def _sse(text: str) -> list:
+    import json
+    out = []
+    for block in text.split("\n\n"):
+        if block.startswith("data: "):
+            payload = block[len("data: "):]
+            out.append(payload if payload == "[DONE]" else json.loads(payload))
+    return out
+
+
+def test_mock_v1_chat_streams_like_the_router(client):
+    body = {"model": "chat-auto", "stream": True, "stream_options": {"include_usage": True}, "max_tokens": 5,
+            "messages": [{"role": "user", "content": "hi /think"}]}
+    r = client.post("/v1/chat/completions", json=body, headers=HEAD)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["x-gpupool-replica"].startswith("chat-auto-")
+    ev = _sse(r.text)
+    assert ev[0]["choices"][0]["delta"]["role"] == "assistant" and ev[-1] == "[DONE]"
+    deltas = [e["choices"][0]["delta"] for e in ev[1:-1] if isinstance(e, dict) and e["choices"]]
+    assert any("reasoning_content" in d for d in deltas) and sum("content" in d for d in deltas) == 5
+    last = next(e for e in ev if isinstance(e, dict) and e["choices"] and e["choices"][0]["finish_reason"])
+    assert last["choices"][0]["finish_reason"] == "length"
+    assert {"prompt_n", "prompt_per_second", "predicted_n", "predicted_per_second"} <= set(last["timings"])
+    usage = next(e for e in ev if isinstance(e, dict) and "usage" in e)["usage"]
+    assert usage["completion_tokens"] == last["timings"]["predicted_n"]
+
+
+def test_mock_v1_chat_errors_like_the_router(client):
+    msgs = [{"role": "user", "content": "hi"}]
+    assert client.post("/v1/chat/completions", json={"model": "nope", "messages": msgs}, headers=HEAD).status_code == 404
+    r = client.post("/v1/chat/completions", json={"model": "qwen3b", "messages": msgs}, headers=HEAD)  # stopped
+    assert r.status_code == 503 and r.json()["error"]["code"] == "no_replica"
+    r = client.post("/v1/chat/completions", json={"model": "chat-auto", "messages": msgs, "max_tokens": 3}, headers=HEAD)
+    assert r.json()["usage"]["completion_tokens"] == 3 and r.headers["x-gpupool-replica"]
+
+
+def test_ui_has_playground():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    assert "view==='playground'" in html and "go('playground')" in html and "pgOpen(m.spec.name)" in html
+    for needle in ('"/v1/chat/completions"', "x-gpupool-replica", "timings", "reasoning_content",
+                   "stream_options", "AbortController", "predicted_per_second"):
+        assert needle in js, needle
+    # model output is untrusted: rendered as text only
+    pg = html[html.index("<!-- ============ playground"):html.index("<!-- ============", html.index("<!-- ============ playground") + 10)]
+    assert re.findall(r'x-html="(?!icon\()', pg) == []

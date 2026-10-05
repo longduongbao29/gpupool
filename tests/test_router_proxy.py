@@ -494,3 +494,14 @@ def test_long_system_prompts_do_not_merge_conversations():
     # single turn: still grouped by (the start of) the shared system prompt
     single = lambda q: {"messages": [sys_msg, {"role": "user", "content": q}]}  # noqa: E731
     assert prefix_key(single("a")) == prefix_key(single("b"))
+
+
+async def test_responses_name_the_replica_that_answered():
+    env = Env({"*": ok})
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+        assert r.status_code == 200 and r.headers["x-gpupool-replica"].startswith("r")
+    env = Env({"*": lambda r: sse_response([b"data: 1\n\n", b"data: [DONE]\n\n"])})
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json={**chat(), "stream": True})
+        assert r.headers["x-gpupool-replica"].startswith("r")

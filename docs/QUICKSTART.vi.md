@@ -82,6 +82,9 @@ Client nào tương thích OpenAI cũng dùng được. Chỉ cần đổi hai g
 | Model | tên bạn đặt cho model trên UI |
 | API key | mặc định không cần; nếu đặt `GPUPOOL_API_KEYS` thì dùng một trong các key đó |
 
+Cách thử nhanh nhất không cần client: mở **Playground** trên UI (hoặc **Chat** trên thẻ của model), gửi một tin nhắn
+và xem câu trả lời stream về kèm thời gian tới token đầu và token/giây.
+
 curl:
 
 ```bash

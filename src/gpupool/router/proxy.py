@@ -65,6 +65,11 @@ def _error(status: int, message: str, etype: str, code: str) -> JSONResponse:
     )
 
 
+# Which replica answered: lets the Playground (and anyone debugging routing) see where a
+# request went without reading the coordinator's logs.
+REPLICA_HEADER = "x-gpupool-replica"
+
+
 class _Retryable(Exception):
     pass
 
@@ -222,7 +227,8 @@ def make_router(
                         status = resp.status_code
                         await resp.aclose()
                         release()
-                        return Response(content=data, status_code=status, media_type=ctype)
+                        return Response(content=data, status_code=status, media_type=ctype,
+                                        headers={REPLICA_HEADER: rid})
                     it = resp.aiter_raw()
                     try:
                         first: bytes | None = await it.__anext__()
@@ -285,7 +291,7 @@ def make_router(
             # BackgroundTask is a second safety net for the case where the generator is
             # never started (client gone before the first send); cleanup is idempotent.
             return StreamingResponse(gen(), status_code=resp.status_code, media_type=ctype,
-                                     background=BackgroundTask(cleanup))
+                                     headers={REPLICA_HEADER: rid}, background=BackgroundTask(cleanup))
 
     @router.post("/v1/chat/completions")
     async def chat(request: Request):

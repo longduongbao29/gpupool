@@ -46,7 +46,9 @@ var ICONS = {
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
   swap: '<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
-  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>'
+  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/>',
+  send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/>'
 };
 
 // Event kinds with their own look; other kinds fall back to the level (info/warning/error).
@@ -60,6 +62,14 @@ var EV_KIND = {
   rebalanced: { cls: "green", icon: "swap" },
   rebalance_failed: { cls: "amber", icon: "alert" }
 };
+
+// Playground settings remembered per browser (model, system prompt, sampling); never the chat itself.
+var PG_STORE = "gpupool.playground";
+function pgSaved() {
+  var d = { model: "", system: "", temperature: 0.7, maxTokens: 512 };
+  try { var v = JSON.parse(localStorage.getItem(PG_STORE) || "{}"); if (v && typeof v === "object") Object.keys(d).forEach(function (k) { if (v[k] != null) d[k] = v[k]; }); } catch (e) { /* storage blocked or bad JSON */ }
+  return d;
+}
 
 // Scaling part of the deploy form, derived from a model spec (defaults match the server's).
 function scalingForm(spec) {
@@ -174,12 +184,14 @@ function app() {
     // deploy (new / edit) modal
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
+    // Playground: chat with a deployed model through the same /v1 route clients use
+    pg: Object.assign({ input: "", msgs: [], busy: false, ctrl: null, raf: 0 }, pgSaved()),
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
 
     // ================= lifecycle =================
     init: function () {
       var hv = (location.hash || "").replace("#", "");
-      if (["overview", "servers", "gpus", "models", "events", "settings"].indexOf(hv) >= 0) this.view = hv;
+      if (["overview", "servers", "gpus", "models", "playground", "events", "settings"].indexOf(hv) >= 0) this.view = hv;
       this.theme = savedTheme();
       var saved = "";
       try { saved = localStorage.getItem(KEY_STORE) || ""; } catch (e) { saved = ""; }
@@ -414,6 +426,19 @@ function app() {
       try { return new URL(s.agent_url).hostname; } catch (e) { return s.agent_url; }
     },
     gpuModel: function (s) { var g = this.gpus(s); return g.length ? g[0].name : this.dash; },
+    // llama.cpp build of a server's agent ("" when unknown). A model split over servers needs the
+    // same RPC protocol everywhere, so a build that differs from the most common one is flagged
+    // (the coordinator raises llama_version_mismatch for the same set of servers).
+    llamaVer: function (s) { var v = s.report && s.report.llama_version; return v && v !== "unknown" ? v : ""; },
+    llamaMajority: function () {
+      var n = {}, best = "", self = this;
+      this.servers().forEach(function (s) { var v = self.llamaVer(s); if (v) n[v] = (n[v] || 0) + 1; });
+      var keys = Object.keys(n);
+      if (keys.length < 2) return "";
+      keys.sort().forEach(function (v) { if (!best || n[v] > n[best]) best = v; });
+      return best;
+    },
+    llamaOdd: function (s) { var m = this.llamaMajority(), v = this.llamaVer(s); return !!(m && v && v !== m); },
     freePoolGb: function () {
       var sum = this.summary();
       return sum.pool_usable_mb == null ? this.dash : this.gb(sum.pool_usable_mb);
@@ -1039,9 +1064,168 @@ function app() {
         out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
           note: self.replicaNote(r), mark: self.replicaMark(m, r),
           devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }),
-          tps: self.tps(r.placement.est_decode_tps), draft: r.placement.draft_est_mb ? "+draft " + Math.round(r.placement.draft_est_mb) + " MB" : "", reasons: (r.placement.reasons || []).join("; ") });
+          tps: self.tps(r.placement.est_decode_tps), draft: r.placement.draft_est_mb ? "+draft " + Math.round(r.placement.draft_est_mb) + " MB" : "", reasons: (r.placement.reasons || []).join("; "),
+          time: self.tokenTime(r.placement) });
       });
       return out;
+    },
+    // The coordinator's decode-speed model, learned from replicas' measured speed: eta = the
+    // fraction of peak memory bandwidth GPUs reach, hop_ms = time per RPC network hop.
+    speedModel: function () { var m = this.st && this.st.speed_model; return m && m.eta ? m : null; },
+    speedModelText: function () {
+      var m = this.speedModel();
+      return m ? "Speed model: GPUs reach " + Math.round(m.eta * 100) + "% of peak memory bandwidth, " +
+        (+m.hop_ms).toFixed(1) + " ms per network hop (learned from running replicas)" : "";
+    },
+    // Where one token's time goes, from the placement's stored parts and the current speed model
+    // (the same sum as the coordinator's current_tps). "" for placements without parts.
+    tokenTime: function (p) {
+      var m = this.speedModel();
+      if (!m || !p || !p.est_bw_s) return "";
+      var w = p.est_bw_s / m.eta * 1000, hops = p.est_hops || 0, net = hops * m.hop_ms, lg = (p.est_logits_s || 0) * 1000;
+      var bits = ["reading weights " + w.toFixed(1) + " ms"];
+      if (hops) bits.push(hops + (hops === 1 ? " network hop " : " network hops ") + net.toFixed(1) + " ms");
+      if (lg >= 0.05) bits.push("logits over the network " + lg.toFixed(1) + " ms");
+      return "Per token about " + (w + net + lg).toFixed(1) + " ms: " + bits.join(" + ");
+    },
+    // ================= playground =================
+    // Models a chat can go to: running ones, and idle on-demand ones (the first request loads them).
+    pgModels: function () {
+      return this.models().map(function (m) {
+        var ok = m.state === "running" || m.state === "idle";
+        return { name: m.spec.name, ok: ok, label: m.spec.name + (m.state === "running" ? "" : " (" + m.state + ")") };
+      });
+    },
+    pgCurrent: function () { var n = this.pg.model; return this.models().find(function (m) { return m.spec.name === n; }) || null; },
+    pgReady: function () { var m = this.pgCurrent(); return !!(m && (m.state === "running" || m.state === "idle")); },
+    pgBlock: function () {
+      if (!this.models().length) return "Deploy a model first (Models → New model).";
+      var m = this.pgCurrent();
+      if (!m) return "Pick a model.";
+      if (m.state === "idle") return "";
+      if (m.state !== "running") return m.spec.name + " is " + m.state + ": start it on the Models page to chat with it.";
+      return "";
+    },
+    pgSave: function () {
+      var p = this.pg;
+      try { localStorage.setItem(PG_STORE, JSON.stringify({ model: p.model, system: p.system, temperature: p.temperature, maxTokens: p.maxTokens })); } catch (e) { /* storage blocked */ }
+    },
+    pgOpen: function (name) { this.pg.model = name; this.pgSave(); this.go("playground"); },
+    pgClear: function () { this.pgStop(); this.pg.msgs = []; },
+    pgStop: function () { if (this.pg.ctrl) this.pg.ctrl.abort(); },
+    pgKey: function (ev) { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); this.pgSend(); } },
+    pgLast: function () {
+      for (var i = this.pg.msgs.length - 1; i >= 0; i--) if (this.pg.msgs[i].role === "assistant") return this.pg.msgs[i];
+      return null;
+    },
+    pgMs: function (ms) { return ms == null ? this.dash : (ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s"); },
+    pgRate: function (r) { return r == null || !isFinite(r) ? this.dash : (r >= 100 ? Math.round(r) : r.toFixed(1)) + " tok/s"; },
+    pgScroll: function (force) {
+      var el = document.getElementById("pg-log");
+      if (!el) return;
+      // follow the reply only while the reader is at the bottom; scrolling up to read stops it
+      if (force || el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
+    },
+    // Typewriter: text that has arrived but is not shown yet is revealed a few characters per frame,
+    // more when the backlog grows, so the display never trails the stream by more than a few frames.
+    pgTick: function () {
+      var self = this, more = false, now = performance.now();
+      this.pg.msgs.forEach(function (a) {
+        if (a.role !== "assistant") return;
+        [["reasoning", "rshown"], ["full", "content"]].forEach(function (k) {
+          var have = a[k[1]].length, want = a[k[0]].length;
+          if (have < want) { var step = Math.max(1, Math.ceil((want - have) / 6)); a[k[1]] = a[k[0]].slice(0, have + step); more = true; }
+        });
+        if (a.streaming) { a.m.elapsed = now - a.t0; more = true; }
+      });
+      this.$nextTick(function () { self.pgScroll(false); });
+      this.pg.raf = more ? requestAnimationFrame(function () { self.pgTick(); }) : 0;
+    },
+    pgKick: function () { var self = this; if (!this.pg.raf) this.pg.raf = requestAnimationFrame(function () { self.pgTick(); }); },
+    pgSend: async function () {
+      var p = this.pg, text = (p.input || "").trim();
+      if (!text || p.busy || this.pgBlock()) return;
+      this.pgSave();
+      var history = [];
+      if ((p.system || "").trim()) history.push({ role: "system", content: p.system.trim() });
+      p.msgs.forEach(function (m) {
+        if (m.role === "user") history.push({ role: "user", content: m.content });
+        else if (!m.error && m.full) history.push({ role: "assistant", content: m.full });
+      });
+      history.push({ role: "user", content: text });
+      p.input = "";
+      p.msgs.push({ role: "user", content: text });
+      p.msgs.push({ role: "assistant", model: p.model, full: "", content: "", reasoning: "", rshown: "", streaming: true, error: "",
+        finish: "", t0: performance.now(), m: { ttft: null, elapsed: 0, total: null, tps: null, ptps: null, n: 0, pn: null, replica: "", src: "" } });
+      var a = p.msgs[p.msgs.length - 1]; // Alpine's reactive proxy: writes to it re-render
+      var ctrl = new AbortController();
+      p.ctrl = ctrl; p.busy = true;
+      this.$nextTick(function () { this.pgScroll(true); }.bind(this));
+      this.pgKick();
+      var body = { model: p.model, messages: history, stream: true, stream_options: { include_usage: true } };
+      var t = parseFloat(p.temperature); if (isFinite(t)) body.temperature = t;
+      var mt = parseInt(p.maxTokens, 10); if (mt > 0) body.max_tokens = mt;
+      var first = null, last = null, pieces = 0, timings = null, usage = null;
+      try {
+        var res = await fetch("/v1/chat/completions", { method: "POST", signal: ctrl.signal,
+          headers: { "Authorization": "Bearer " + this.key, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        a.m.replica = res.headers.get("x-gpupool-replica") || "";
+        if (!res.ok) {
+          var txt = await res.text(), data = null;
+          try { data = JSON.parse(txt); } catch (e) { data = txt; }
+          var msg = (data && data.error && data.error.message) || this.errText(data, res.status);
+          if (res.status === 401) msg = "The API rejected the admin key. This coordinator is older than the Playground, or /v1 uses other keys: " + msg;
+          throw new Error(msg);
+        }
+        var reader = res.body.getReader(), dec = new TextDecoder(), buf = "";
+        for (;;) {
+          var r = await reader.read();
+          if (r.done) break;
+          buf += dec.decode(r.value, { stream: true });
+          var events = buf.split(/\r?\n\r?\n/);
+          buf = events.pop();
+          for (var i = 0; i < events.length; i++) {
+            var lines = events[i].split(/\r?\n/).filter(function (l) { return l.indexOf("data:") === 0; });
+            if (!lines.length) continue;
+            var payload = lines.map(function (l) { return l.slice(5).trim(); }).join("\n");
+            if (payload === "[DONE]") continue;
+            var j; try { j = JSON.parse(payload); } catch (e) { continue; }
+            if (j.error) throw new Error(j.error.message || "the stream failed");
+            var ch = j.choices && j.choices[0], d = (ch && ch.delta) || {};
+            var piece = typeof d.content === "string" ? d.content : "", think = typeof d.reasoning_content === "string" ? d.reasoning_content : "";
+            if (piece || think) {
+              var now = performance.now();
+              if (first === null) { first = now; a.m.ttft = now - a.t0; }
+              last = now; pieces++;
+              a.full += piece; a.reasoning += think;
+              a.m.n = pieces;
+              // live rate: tokens after the first over the time since it (llama-server sends one token per chunk)
+              if (pieces > 1) a.m.tps = (pieces - 1) / ((now - first) / 1000);
+            }
+            if (ch && ch.finish_reason) a.finish = ch.finish_reason;
+            if (j.timings) timings = j.timings;
+            if (j.usage) usage = j.usage;
+          }
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") a.finish = "stopped";
+        else a.error = (e && e.message) || String(e);
+      } finally {
+        a.m.total = performance.now() - a.t0;
+        a.m.elapsed = a.m.total;
+        // llama-server's own timings are exact (GPU time, real token counts); the browser's are the fallback
+        if (timings && timings.predicted_per_second) {
+          a.m.tps = timings.predicted_per_second; a.m.n = timings.predicted_n || a.m.n;
+          a.m.ptps = timings.prompt_per_second || null; a.m.pn = timings.prompt_n != null ? timings.prompt_n : null; a.m.src = "server";
+        } else {
+          if (usage) { a.m.n = usage.completion_tokens || a.m.n; a.m.pn = usage.prompt_tokens != null ? usage.prompt_tokens : null; }
+          if (first !== null && last !== null && last > first && pieces > 1) a.m.tps = (pieces - 1) / ((last - first) / 1000);
+          a.m.src = "browser";
+        }
+        a.streaming = false;
+        p.busy = false; p.ctrl = null;
+        this.pgKick();
+      }
     },
     // ----- model card summary -----
     replicaClass: function (state) { return { ready: "green", starting: "amber", stopping: "amber", failed: "red" }[state] || ""; },
@@ -1445,7 +1629,8 @@ function app() {
     go: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
     title: function () {
       return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers", "Manage servers and the GPUs in the pool"],
-        gpus: ["GPUs", "Every GPU across all servers"], events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"], settings: ["Settings", "Connection details and snippets"] }[this.view];
+        gpus: ["GPUs", "Every GPU across all servers"], events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"],
+        playground: ["Playground", "Chat with a deployed model and see how fast it answers"], settings: ["Settings", "Connection details and snippets"] }[this.view];
     }
   };
 }

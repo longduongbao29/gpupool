@@ -27,7 +27,7 @@ Three independent secrets exist. A route that needs a secret that is configured 
 
 | Name | Config | Header | Protects |
 | --- | --- | --- | --- |
-| API key | `api_keys` / `GPUPOOL_API_KEYS` (list) | `Authorization: Bearer <key>` | `/v1/*` (any one key of the list works) |
+| API key | `api_keys` / `GPUPOOL_API_KEYS` (list) | `Authorization: Bearer <key>` | `/v1/*` (any one key of the list works; once the list is non-empty the admin key works there too, for the UI's Playground) |
 | Admin key | `admin_key` / `GPUPOOL_ADMIN_KEY` | `Authorization: Bearer <admin key>` | `/api/*`, `/admin/*` |
 | Cluster token | `cluster_token` / `GPUPOOL_CLUSTER_TOKEN` | `Authorization: Bearer <token>` | `/internal/*`, `/files/{name}`, and every agent route except `GET /health` |
 
@@ -56,7 +56,8 @@ curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/state | jq .summary
 
 ## 1. OpenAI-compatible API (`/v1`)
 
-Served by the coordinator's router. Auth: API key (open when `api_keys` is empty).
+Served by the coordinator's router. Auth: API key or the admin key (open when `api_keys` is empty: the admin key
+is not required then, so existing keyless clients keep working).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -78,6 +79,8 @@ forwarded unchanged except that `cache_prompt` defaults to `true`. Rules the rou
   replica, for the llama.cpp prompt cache; a multi-turn chat keeps its replica), weighted by each replica's estimated speed so a
   faster replica gets a larger share, falling back to the least-loaded replica (requests in flight relative to speed) when the
   preferred one is more than 2 ahead.
+- Every proxied response carries `x-gpupool-replica: <replica id>`, the replica that answered (the Playground
+  shows it; useful when checking routing).
 - A failed attempt (connection error or upstream status >= 500) is retried on another replica, at most
   2 retries (3 attempts), only while nothing has reached the client.
 - **Cold start**: if the model has `min_replicas = 0`, is started (`replicas > 0`) and has no ready replica,

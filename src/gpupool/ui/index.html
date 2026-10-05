@@ -34,6 +34,7 @@
       <button :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
       <button :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
       <button :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
+      <button :class="{active: view==='playground'}" @click="go('playground')"><span x-html="icon('chat')"></span> Playground</button>
       <button :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
         <span class="pill red right" x-show="unread() > 0" x-text="unread()"></span></button>
       <button :class="{active: view==='settings'}" @click="go('settings')"><span x-html="icon('gear')"></span> Settings</button>
@@ -130,8 +131,9 @@
               <div class="grow">
                 <div class="name"><span x-text="s.node_id"></span>
                   <span class="pill green lead live" x-show="s.alive">Online</span>
-                  <span class="pill red lead" x-show="!s.alive">Offline</span></div>
-                <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span></div>
+                  <span class="pill red lead" x-show="!s.alive">Offline</span>
+                  <span class="pill amber lead" x-show="llamaOdd(s)" :title="'Most servers run llama.cpp ' + llamaMajority() + ', this one ' + llamaVer(s) + '. A model split over servers needs the same RPC protocol on all of them: upgrade every agent to the same image.'">Different llama.cpp</span></div>
+                <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span><span x-show="llamaVer(s)"> &middot; llama.cpp <span x-text="llamaVer(s)"></span></span></div>
               </div>
               <div class="meters" x-show="s.report">
                 <div class="meter"><div class="t"><span>CPU</span><span x-text="pct(s.report && s.report.cpu_pct)"></span></div>
@@ -417,6 +419,7 @@
             <button class="btn" @click="runRebalance(true)" :disabled="rb.busy"><span x-html="icon('search')"></span> Check placement</button>
             <button class="btn primary" @click="runRebalance(false)" :disabled="rb.busy || !!rbMove()" :title="rbMove() ? 'A replica is already being moved' : 'Start moving the replica with the biggest gain'"><span x-html="icon('swap')"></span> Rebalance now</button>
           </div></div>
+        <div class="panel-note muted small" x-show="speedModel()" x-text="speedModelText()"></div>
         <div class="empty" x-show="!rb.checked">Check whether any replica would run clearly better on other GPUs. Nothing changes until you press <b>Rebalance now</b>.</div>
         <div class="empty" x-show="rb.checked && rb.moves.length === 0">All replicas are well placed</div>
         <div class="rb-moves" x-show="rb.checked && rb.moves.length > 0">
@@ -527,7 +530,8 @@
                   <summary>Why here</summary>
                   <template x-for="p in placementLines(m)" :key="'w' + p.id">
                     <div class="why-item"><b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
-                      <div class="rnote" x-show="p.reasons" x-text="p.reasons"></div></div>
+                      <div class="rnote" x-show="p.reasons" x-text="p.reasons"></div>
+                      <div class="rnote" x-show="p.time" x-text="p.time"></div></div>
                   </template>
                 </details>
               </div>
@@ -542,6 +546,7 @@
                   </div>
                 </template>
                 <button class="btn" x-show="m.state==='running' || m.state==='starting' || m.state==='idle'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
+                <button class="btn" x-show="m.state==='running' || m.state==='idle'" @click="pgOpen(m.spec.name)" title="Chat with this model in the Playground"><span x-html="icon('chat')"></span> Chat</button>
                 <div class="row right" style="gap:var(--s-1)">
                   <button class="btn" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
                   <button class="btn ghost danger icon" @click="deleteModel(m)" title="Delete" aria-label="Delete" x-html="icon('trash')"></button>
@@ -579,6 +584,84 @@
     </div>
 
     <!-- ============ Settings ============ -->
+    <!-- ============ playground ============ -->
+    <div class="view" x-show="view==='playground'"
+         x-effect="if (view === 'playground' && !pgCurrent()) { var f = pgModels().find(function (m) { return m.ok; }); if (f) pg.model = f.name; }">
+      <div class="pg">
+        <div class="panel pg-side">
+          <div class="panel-head"><h2>Settings</h2></div>
+          <div class="pg-side-body">
+            <label class="field"><span>Model</span>
+              <select x-model="pg.model" @change="pgSave()" :disabled="pg.busy">
+                <template x-for="m in pgModels()" :key="m.name"><option :value="m.name" x-text="m.label" :disabled="!m.ok"></option></template>
+              </select></label>
+            <div class="notice info small" x-show="pgCurrent() && pgCurrent().state === 'idle'">Unloaded to save memory: the first message loads it (a cold start), so it takes longer.</div>
+            <label class="field"><span>System prompt</span>
+              <textarea rows="4" x-model="pg.system" @change="pgSave()" placeholder="Optional, e.g. You are a concise assistant."></textarea></label>
+            <div class="pg-row">
+              <label class="field"><span>Temperature</span>
+                <input type="number" min="0" max="2" step="0.1" x-model="pg.temperature" @change="pgSave()"></label>
+              <label class="field"><span>Max tokens</span>
+                <input type="number" min="1" max="32768" step="1" x-model="pg.maxTokens" @change="pgSave()"></label>
+            </div>
+            <div class="help">Requests go through <code>/v1/chat/completions</code>, the same route your clients use: the router, the balancer and a replica, so the numbers are what a client sees.</div>
+            <button class="btn" style="margin-top:var(--s-4)" @click="pgClear()" :disabled="!pg.msgs.length"><span x-html="icon('trash')"></span> New chat</button>
+          </div>
+        </div>
+
+        <div class="panel pg-main">
+          <div class="pg-stats" aria-live="polite">
+            <div class="pg-stat" title="Time to first token: from sending until the first token arrived (queueing, a cold start, prompt processing, network)">
+              <div class="l">Time to first token</div><div class="v" x-text="pgLast() ? pgMs(pgLast().m.ttft) : dash"></div></div>
+            <div class="pg-stat" title="Generation speed. While streaming: tokens counted in the browser; at the end: llama-server's own measurement">
+              <div class="l">Generation</div><div class="v" x-text="pgLast() ? pgRate(pgLast().m.tps) : dash"></div></div>
+            <div class="pg-stat" title="Tokens generated by the last reply">
+              <div class="l">Tokens</div><div class="v" x-text="pgLast() ? pgLast().m.n : dash"></div></div>
+            <div class="pg-stat" title="Total time of the last request, sending to last token">
+              <div class="l">Total latency</div><div class="v" x-text="pgLast() ? pgMs(pgLast().m.streaming ? pgLast().m.elapsed : (pgLast().m.total != null ? pgLast().m.total : pgLast().m.elapsed)) : dash"></div></div>
+          </div>
+          <div class="pg-log" id="pg-log">
+            <div class="empty" x-show="!pg.msgs.length">
+              <div x-show="!pgBlock()">Send a message to <b x-text="pg.model"></b>. Replies stream as they are generated, with their latency and speed.</div>
+              <div x-show="pgBlock()" x-text="pgBlock()"></div>
+            </div>
+            <template x-for="(a, i) in pg.msgs" :key="i">
+              <div class="pg-msg" :class="a.role">
+                <div class="pg-bubble" x-show="a.role === 'user'" x-text="a.content"></div>
+                <template x-if="a.role === 'assistant'">
+                  <div class="pg-reply">
+                    <details class="pg-think" x-show="a.reasoning" :open="a.streaming && !a.full">
+                      <summary x-text="a.streaming && !a.full ? 'Thinking…' : 'Thought process'"></summary>
+                      <div class="pg-text muted" x-text="a.rshown"></div>
+                    </details>
+                    <div class="pg-text" :class="{typing: a.streaming || a.content.length < a.full.length}"><span x-text="a.content"></span><span class="pg-wait muted" x-show="a.streaming && !a.full && !a.reasoning">waiting for the first token…</span></div>
+                    <div class="notice bad small" x-show="a.error" x-text="a.error"></div>
+                    <div class="pg-meta">
+                      <span class="chip" title="Time to first token" x-show="a.m.ttft != null" x-text="'TTFT ' + pgMs(a.m.ttft)"></span>
+                      <span class="chip" title="Generation speed" x-show="a.m.tps != null" x-text="pgRate(a.m.tps)"></span>
+                      <span class="chip" x-show="a.m.n" x-text="a.m.n + ' tokens'"></span>
+                      <span class="chip" title="Total time, sending to last token" x-show="!a.streaming && a.m.total != null" x-text="pgMs(a.m.total) + ' total'"></span>
+                      <span class="chip" title="Prompt processing (prefill): tokens read and llama-server's speed" x-show="a.m.pn != null" x-text="'prompt ' + a.m.pn + ' tok' + (a.m.ptps ? ' · ' + pgRate(a.m.ptps) : '')"></span>
+                      <span class="chip mono" title="Replica that answered (x-gpupool-replica)" x-show="a.m.replica" x-text="a.m.replica"></span>
+                      <span class="chip amber" x-show="a.finish === 'length'" title="The reply hit Max tokens">cut at max tokens</span>
+                      <span class="chip" x-show="a.finish === 'stopped'">stopped</span>
+                      <span class="muted small" x-show="!a.streaming && a.m.src" x-text="a.m.src === 'server' ? 'speeds measured by llama-server' : 'speeds measured in the browser'"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <div class="pg-compose">
+            <textarea rows="2" x-model="pg.input" @keydown="pgKey($event)" :disabled="!!pgBlock()"
+                      :placeholder="pgBlock() || 'Message ' + pg.model" title="Enter to send, Shift+Enter for a new line" aria-label="Message"></textarea>
+            <button class="btn primary" x-show="!pg.busy" @click="pgSend()" :disabled="!pg.input.trim() || !!pgBlock()"><span x-html="icon('send')"></span> Send</button>
+            <button class="btn" x-show="pg.busy" @click="pgStop()"><span x-html="icon('stop')"></span> Stop</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="view" x-show="view==='settings'">
       <div class="panel"><div class="panel-head"><h2>API</h2></div><div class="panel-body">
         <div class="muted small">OpenAI-compatible base URL</div>

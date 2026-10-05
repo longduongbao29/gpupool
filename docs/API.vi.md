@@ -26,7 +26,7 @@ kiểm tra khi chưa cấu hình khóa nào khác rỗng).
 
 | Tên | Cấu hình | Header | Bảo vệ |
 | --- | --- | --- | --- |
-| API key | `api_keys` / `GPUPOOL_API_KEYS` (danh sách) | `Authorization: Bearer <key>` | `/v1/*` (một khóa bất kỳ trong danh sách là được) |
+| API key | `api_keys` / `GPUPOOL_API_KEYS` (danh sách) | `Authorization: Bearer <key>` | `/v1/*` (một khóa bất kỳ trong danh sách là được; khi danh sách không rỗng thì admin key cũng dùng được ở đây, cho Playground của UI) |
 | Admin key | `admin_key` / `GPUPOOL_ADMIN_KEY` | `Authorization: Bearer <admin key>` | `/api/*`, `/admin/*` |
 | Cluster token | `cluster_token` / `GPUPOOL_CLUSTER_TOKEN` | `Authorization: Bearer <token>` | `/internal/*`, `/files/{name}` và mọi route của agent trừ `GET /health` |
 
@@ -55,7 +55,8 @@ curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/state | jq .summary
 
 ## 1. API tương thích OpenAI (`/v1`)
 
-Do router của coordinator phục vụ. Xác thực: API key (mở khi `api_keys` trống).
+Do router của coordinator phục vụ. Xác thực: API key hoặc admin key (mở khi `api_keys` trống: khi đó không
+đòi admin key, nên các client không dùng khóa vẫn chạy như cũ).
 
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
@@ -77,6 +78,8 @@ chuyển tiếp nguyên vẹn, chỉ có `cache_prompt` mặc định là `true`
   vào cùng replica, để tận dụng prompt cache của llama.cpp; hội thoại nhiều lượt giữ nguyên replica), có trọng số
   theo tốc độ ước lượng của từng replica nên replica nhanh hơn nhận nhiều hơn, và chuyển sang replica ít tải nhất
   (số request đang chạy so với tốc độ) khi replica được ưu tiên vượt quá 2.
+- Mọi phản hồi được chuyển tiếp đều có header `x-gpupool-replica: <replica id>`, tức replica đã trả lời
+  (Playground hiện nó; hữu ích khi kiểm tra định tuyến).
 - Lần thử lỗi (lỗi kết nối hoặc upstream trả status >= 500) được thử lại trên replica khác, tối đa 2 lần
   thử lại (3 lần thử), và chỉ khi chưa có byte nào tới client.
 - **Khởi động lạnh**: nếu model có `min_replicas = 0`, đã start (`replicas > 0`) và chưa có replica sẵn
