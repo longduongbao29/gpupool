@@ -398,9 +398,10 @@ layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_s
 - Candidates = `ready` replicas of the model whose head node is alive. The router reads a snapshot of the
   store that is rebuilt only when the store's version moves; liveness is judged on every call, because a
   node that goes silent triggers no write.
-- **Prefix key** = sha256 of canonical JSON cut at 4 KB: for a single turn (system messages + one user
-  message), all messages but the last, so a shared system prompt meets on one replica; for a multi-turn
-  chat, the system messages and the first user message, which every later turn repeats, so from its second
+- **Prefix key** = sha256 of canonical JSON: for a single turn (system messages + one user message), all
+  messages but the last, cut at 4 KB, so a shared system prompt meets on one replica; for a multi-turn
+  chat, the system messages and the first user message, uncut (a system prompt longer than any cut would
+  otherwise give every conversation one key), which every later turn repeats, so from its second
   turn on the conversation stays with its KV cache (from the first when it has no system prompt: a single
   message keys on its content either way). With a single message, its first 512 characters; for `/v1/completions`, the
   first 512 characters of the prompt.

@@ -382,9 +382,10 @@ mọi model có nhiều slot.
 - Ứng viên = các replica `ready` của model mà node head còn sống. Router đọc một snapshot của store, chỉ được
   dựng lại khi version của store đổi; tình trạng sống được xét ở mỗi lần gọi, vì node im lặng không gây ra
   lần ghi nào.
-- **Prefix key** = sha256 của JSON chuẩn hóa cắt ở 4 KB: với một lượt (các message system + một message
-  user), mọi message trừ cái cuối, để các request chung system prompt gặp nhau trên một replica; với hội thoại
-  nhiều lượt, các message system cộng message user đầu tiên, phần mọi lượt sau đều lặp lại, để từ lượt thứ hai hội
+- **Prefix key** = sha256 của JSON chuẩn hóa: với một lượt (các message system + một message user), mọi message
+  trừ cái cuối, cắt ở 4 KB, để các request chung system prompt gặp nhau trên một replica; với hội thoại nhiều lượt,
+  các message system cộng message user đầu tiên, không cắt (system prompt dài hơn mọi mức cắt sẽ làm mọi hội thoại
+  chung một khoá), phần mọi lượt sau đều lặp lại, để từ lượt thứ hai hội
   thoại ở cùng KV cache của nó (từ lượt đầu khi không có system prompt: một message đơn luôn lấy khoá theo nội dung). Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
   tự đầu của prompt.
 - Weighted rendezvous hashing chọn replica ưu tiên: `-weight / ln(hash(prefix, replica))` lớn nhất thắng, với
