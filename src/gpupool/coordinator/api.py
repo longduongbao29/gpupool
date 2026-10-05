@@ -12,11 +12,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
-    ACTIVE_STATES, LIVE_STATES, AutoscalePolicy, KvCacheType, ModelSpec, SpecMode, Spread,
+    ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_UBATCH, LIVE_STATES, AutoscalePolicy, FlashAttn, KvCacheType,
+    ModelSpec, SpecMode, Spread,
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.store import ServerRecord, gpu_key, planning_factor
+from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
 
@@ -55,6 +57,10 @@ class ModelBody(BaseModel):
     speculative: SpecMode | None = None
     draft_file: str | None = None  # library file of the draft model
     draft_n_max: int | None = Field(default=None, ge=1, le=16)
+    # llama.cpp batching / attention: None keeps the stored value (else auto / 2048 / 512).
+    flash_attn: FlashAttn | None = None
+    batch: int | None = Field(default=None, ge=32, le=16384)
+    ubatch: int | None = Field(default=None, ge=32, le=8192)
 
 
 class RecommendBody(BaseModel):
@@ -69,6 +75,9 @@ class RecommendBody(BaseModel):
     speculative: SpecMode = "none"
     draft_file: str | None = None
     draft_n_max: int = Field(default=4, ge=1, le=16)
+    flash_attn: FlashAttn = "auto"
+    batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
+    ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
 
 
 class SimFields(BaseModel):
@@ -87,6 +96,9 @@ class SimFields(BaseModel):
     speculative: SpecMode | None = None
     draft_file: str | None = None
     draft_n_max: int | None = Field(default=None, ge=1, le=16)
+    flash_attn: FlashAttn | None = None
+    batch: int | None = Field(default=None, ge=32, le=16384)
+    ubatch: int | None = Field(default=None, ge=32, le=8192)
 
     def fields(self) -> dict:
         out = self.model_dump(exclude_none=True, include=set(SimFields.model_fields))
@@ -128,6 +140,18 @@ def normalize_agent_url(raw: str) -> str:
     if u.scheme not in ("http", "https") or not u.netloc:
         raise HTTPException(400, "agent_url must look like http://host:port")
     return url
+
+
+def check_attention(spec: ModelSpec) -> None:
+    """llama.cpp refuses a quantized V cache without flash attention: fail at save, not at launch."""
+    if spec.kv_cache_type != "f16" and spec.flash_attn == "off":
+        raise HTTPException(422, f"{spec.name}: KV cache {spec.kv_cache_type} needs flash attention "
+                                 "(auto or on); llama.cpp refuses a quantized V cache without it")
+
+
+def with_batch_floor(spec: ModelSpec) -> ModelSpec:
+    """llama.cpp caps the micro-batch at the batch: raise the batch rather than lose the micro-batch."""
+    return spec if spec.batch >= spec.ubatch else spec.model_copy(update={"batch": spec.ubatch})
 
 
 def spec_or_404(store, name: str) -> ModelSpec:
@@ -380,11 +404,16 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             kv_cache_type=body.kv_cache_type or (existing.kv_cache_type if existing else "f16"),
             speculative=speculative, draft=draft,
             draft_n_max=body.draft_n_max or (existing.draft_n_max if existing else 4),
+            flash_attn=keep(body.flash_attn, "flash_attn") or "auto",
+            ubatch=keep(body.ubatch, "ubatch") or DEFAULT_UBATCH,
+            batch=keep(body.batch, "batch") or DEFAULT_BATCH,
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
             min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle,
             preemptible=body.preemptible if body.preemptible is not None else existing.preemptible if existing else True)
+        spec = with_batch_floor(spec)
+        check_attention(spec)
         await check_draft(spec)
         store.put_model(spec)
         reconciler.wake()
@@ -488,6 +517,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 raise HTTPException(422, f"{spec.name}: pin_devices entry {pin!r} is not a registered node/device")
         if spec.speculative != "draft":
             spec = spec.model_copy(update={"draft": None})
+        spec = with_batch_floor(spec)
+        check_attention(spec)
         await check_draft(spec, spec.name)
         return spec
 
@@ -553,8 +584,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 replicas=1, pin_devices=body.pin_devices, priority=body.priority, spread=body.spread,
                 kv_cache_type=body.kv_cache_type, speculative=body.speculative,
                 draft=COORD_PREFIX + body.draft_file if body.speculative == "draft" and body.draft_file else None,
-                draft_n_max=body.draft_n_max)
+                draft_n_max=body.draft_n_max, flash_attn=body.flash_attn,
+                ubatch=body.ubatch, batch=max(body.batch, body.ubatch))
 
+        check_attention(spec_for(body.ctx_size))
         await check_draft(spec_for(body.ctx_size))
         try:
             meta = await reconciler.meta_for(spec_for(body.ctx_size))
@@ -573,9 +606,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                     hi = mid - 1
             return best
 
-        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type)
+        ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn}
+        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, **ckw)
         if dmeta is not None:
-            need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type)
+            need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type, **ckw)
         try:
             ranked = (await reconciler.rank_for(spec_for(body.ctx_size), body.limit))[: body.limit]
             max_single = await largest_ctx(131072, lambda opts: any(o.tier == "single_gpu" for o in opts))
@@ -606,11 +640,27 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             options.append(option(0, placements[0], {"requires_preemption": [
                 {"replica_id": v.replica_id, "model": v.model, "priority": prio.get(v.model, 0)}
                 for v in victims]}))
+        async def top(s: ModelSpec) -> Any:
+            got = await reconciler.rank_for(s, 1)
+            return got[0] if got else None
+
+        async def lib_meta(file: str) -> Any:
+            return await reconciler.meta_for(ModelSpec(name="tuning", source=COORD_PREFIX + file))
+
+        try:
+            tips = await suggest(spec_for(body.ctx_size), meta, ranked[0] if ranked else None, rank=top,
+                                 meta_of=lib_meta, library=library.list(), max_ctx_single_gpu=max_single,
+                                 devices={(r.node_id, d.device_id): d
+                                          for r in reconciler.available_reports() for d in r.devices})
+        except Exception:  # suggestions are advice: never fail the placement answer over them
+            log.exception("tuning suggestions failed")
+            tips = []
         return {
             "need_mb": need,
             "options": options,
             "max_ctx_single_gpu": max_single,
             "not_possible": not_possible,
+            "tips": tips,
         }
 
     # ------------------------------------------------------------------ events

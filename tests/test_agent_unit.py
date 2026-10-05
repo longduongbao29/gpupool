@@ -862,3 +862,50 @@ def test_disable_core_dumps_is_a_no_op_without_resource(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", no_resource)
     procs_mod.disable_core_dumps()  # must not raise (Windows)
+
+
+# ---------- attention / batching flags, CUDA architectures ----------
+
+def test_build_flash_attn_and_batches():
+    assert build_command(_srv(flash_attn="auto", batch=2048, ubatch=512), BINS, "h", "/m.gguf") == _BASE
+    cmd = build_command(_srv(flash_attn="on", ubatch=1024), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["-fa", "on", "-ub", "1024"]
+    # a micro-batch above the batch raises the batch (llama.cpp would cap the micro-batch instead)
+    cmd = build_command(_srv(flash_attn="off", batch=1024, ubatch=4096), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["-fa", "off", "-b", "4096", "-ub", "4096"]
+
+
+def test_llama_cuda_archs_file_and_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("GPUPOOL_CUDA_ARCHS", raising=False)
+    assert procs.llama_cuda_archs(tmp_path) is None
+    (tmp_path / "cuda-archs.txt").write_text("120 61 86 junk 70\n")
+    assert procs.llama_cuda_archs(tmp_path) == ["61", "70", "86", "120"]
+    monkeypatch.setenv("GPUPOOL_CUDA_ARCHS", "75;89")
+    assert procs.llama_cuda_archs(tmp_path) == ["75", "89"]
+
+
+def test_nvml_compute_cap_reported(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    monkeypatch.delenv("GPUPOOL_CUDA_ARCHS", raising=False)
+    m = _stub_nvml(monkeypatch)
+    m.nvmlDeviceGetCudaComputeCapability = lambda h: (8, 6)
+    d = g._cuda_devices(make_cfg(tmp_path))[0]
+    assert d.compute_cap == "8.6" and d.kernels_ok is None and d.usable_mb > 0  # build archs unknown
+
+
+@pytest.mark.parametrize("archs,cc,ok", [("61 86", (8, 9), True), ("86", (6, 1), False), ("61", (7, 5), True)])
+def test_nvml_gpu_without_kernels_is_not_offered(tmp_path, monkeypatch, archs, cc, ok):
+    import gpupool.agent.gpu as g
+    monkeypatch.delenv("GPUPOOL_CUDA_ARCHS", raising=False)
+    (tmp_path / "cuda-archs.txt").write_text(archs)
+    m = _stub_nvml(monkeypatch)
+    m.nvmlDeviceGetCudaComputeCapability = lambda h: cc
+    d = g._cuda_devices(make_cfg(tmp_path))[0]
+    assert d.kernels_ok is ok and (d.usable_mb > 0) is ok
+
+
+def test_nvml_compute_cap_failure_keeps_device(tmp_path, monkeypatch):
+    import gpupool.agent.gpu as g
+    _stub_nvml(monkeypatch)  # no nvmlDeviceGetCudaComputeCapability (very old pynvml)
+    d = g._cuda_devices(make_cfg(tmp_path))[0]
+    assert d.compute_cap is None and d.kernels_ok is None and d.usable_mb > 0

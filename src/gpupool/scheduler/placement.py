@@ -23,7 +23,9 @@ from gpupool.common.models import (
     Placement,
 )
 from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
-from gpupool.scheduler.estimate import draft_need_mb, overhead_mb, total_need_mb
+from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
+from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
+from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
 from gpupool.scheduler.scoring import default_cuda_bw, est_decode_tps
 
 
@@ -42,12 +44,18 @@ class _Dev(NamedTuple):
 _MEM_FACTOR: ContextVar[float] = ContextVar("gpupool_mem_factor", default=1.0)
 
 
+# The spec's compute-buffer settings (micro-batch, flash attention), seen the same way.
+_COMPUTE: ContextVar[dict] = ContextVar("gpupool_compute", default={})
+
+
 @contextlib.contextmanager
-def _with_factor(f: float) -> Iterator[None]:
+def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
+    ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn})
     try:
         yield
     finally:
+        _COMPUTE.reset(ctok)
         _MEM_FACTOR.reset(tok)
 
 
@@ -57,7 +65,19 @@ def _scale(mb: int) -> int:
 
 
 def device_need_mb(*a, **kw) -> int:
-    return _scale(_raw_need_mb(*a, **kw))
+    return _scale(_raw_need_mb(*a, **_COMPUTE.get(), **kw))
+
+
+def total_need_mb(*a, **kw) -> int:
+    return _raw_total_mb(*a, **_COMPUTE.get(), **kw)
+
+
+def draft_need_mb(*a, **kw) -> int:
+    return _raw_draft_mb(*a, **_COMPUTE.get(), **kw)
+
+
+def overhead_mb(meta, kind, ctx_size: int = 0) -> int:
+    return _raw_overhead_mb(meta, kind, ctx_size=ctx_size, **_COMPUTE.get())
 
 
 def _need(meta, ctx, ct, d: _Dev, start: int, count: int, is_last: bool) -> int:
@@ -83,7 +103,7 @@ def _split(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev]) -> list[int] |
     n, L = len(order), meta.n_layers
     if n == 0 or n > L:
         return None
-    w = [max(1, d.dev.usable_mb - overhead_mb(meta, d.dev.kind)) for d in order]
+    w = [max(1, d.dev.usable_mb - overhead_mb(meta, d.dev.kind, ctx)) for d in order]
     # every device gets at least one layer; distribute the rest proportionally
     spare = L - n
     raw = [spare * x / sum(w) for x in w]
@@ -388,7 +408,7 @@ def plan(
 `mem_factor` scales every estimated need (measured / estimated for this model).
     With spec.speculative == "draft" and `draft_meta`, the draft model is reserved on the
     head's first local CUDA device."""
-    with _with_factor(mem_factor):
+    with _with_factor(mem_factor, spec):
         return _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, draft_meta)
 
 
@@ -438,7 +458,7 @@ def rank(
     counts candidates only. A candidate equal to an extra is dropped. The caller must leave
     the extra's own replica out of `occupants`, or it would be penalised for sharing with itself.
     """
-    with _with_factor(mem_factor):
+    with _with_factor(mem_factor, spec):
         return _rank(meta, spec, nodes, occupants, limit, extra, draft_meta)
 
 

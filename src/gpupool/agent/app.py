@@ -16,7 +16,9 @@ from pydantic import BaseModel
 from gpupool.agent.gpu import probe_devices
 from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
-from gpupool.agent.procs import EngineExists, PortInUse, ProcessManager, disable_core_dumps, llama_version
+from gpupool.agent.procs import (
+    EngineExists, PortInUse, ProcessManager, disable_core_dumps, llama_cuda_archs, llama_version,
+)
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
 from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
@@ -82,7 +84,7 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall)
-    version_cache: dict[str, str] = {}
+    version_cache: dict = {}  # llama version and CUDA archs: fixed for the agent's lifetime
     # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
     ensured: set[str] = set()
     cache_root = Path(cfg.cache_dir).resolve()
@@ -106,6 +108,11 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             version_cache["v"] = llama_version(cfg.llama_dir)
         return version_cache["v"]
 
+    def archs() -> list[str] | None:
+        if "archs" not in version_cache:
+            version_cache["archs"] = llama_cuda_archs(cfg.llama_dir)
+        return version_cache["archs"]
+
     def build_report() -> NodeReport:
         # Non-blocking (interval=None): /report is polled every 2 s per server.
         try:
@@ -119,6 +126,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
+            cuda_archs=archs(),
             models=list_models(cfg.cache_dir), ts=time.time())
 
     async def heartbeat_loop() -> None:

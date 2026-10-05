@@ -8,7 +8,9 @@ import threading
 
 import psutil
 
+from gpupool.agent.procs import llama_cuda_archs
 from gpupool.common.config import AgentConfig
+from gpupool.common.cuda import kernel_support
 from gpupool.common.models import Device, GpuProcess
 
 log = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ def _fake_devices(cfg: AgentConfig, raw: str) -> list[Device]:
             processes=[GpuProcess(**p) for p in d.get("processes", [])],
             driver=d.get("driver"), cuda=d.get("cuda"),
             uuid=d.get("uuid"), pci_bus_id=d.get("pci_bus_id"),
-            bandwidth_gbps=d.get("bandwidth_gbps"),
+            bandwidth_gbps=d.get("bandwidth_gbps"), compute_cap=d.get("compute_cap"),
         ))
     return out
 
@@ -144,6 +146,25 @@ def _note_nvml_error(pynvml, e: Exception) -> None:
         _nvml_reset(pynvml)
 
 
+_archs_cache: dict[str, list[str] | None] = {}
+_no_kernels_logged: set[str] = set()
+
+
+def _built_archs(cfg: AgentConfig) -> list[str] | None:
+    key = str(cfg.llama_dir)
+    if key not in _archs_cache:
+        _archs_cache[key] = llama_cuda_archs(cfg.llama_dir)
+    return _archs_cache[key]
+
+
+def _compute_cap(pynvml, h) -> str | None:
+    try:
+        major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(h)
+        return f"{int(major)}.{int(minor)}"
+    except Exception:
+        return None
+
+
 def _cuda_devices(cfg: AgentConfig) -> list[Device]:
     import pynvml
 
@@ -194,13 +215,25 @@ def _cuda_devices(cfg: AgentConfig) -> list[Device]:
             # Stable identity across reboots/bus loss; "CUDA<i>" shifts when a card drops.
             uuid = _text(_best_effort(lambda: pynvml.nvmlDeviceGetUUID(h)))
             bandwidth = _bandwidth_gbps(pynvml, h)
+            cc = _compute_cap(pynvml, h)
+            support = kernel_support(cc, _built_archs(cfg))
+            kernels_ok = None if support == "unknown" else support != "missing"
             did = f"CUDA{idx}"
             out.append(Device(device_id=did, kind="cuda", name=name, total_mb=total, free_mb=free,
                               usable_mb=_usable(cfg, did, "cuda", total, free),
                               budget_mb=cfg.budget_mb.get(did), util_pct=util,
                               temp_c=temp, power_w=power, processes=_gpu_processes(pynvml, h),
                               driver=driver, cuda=cuda, uuid=uuid, pci_bus_id=pci,
-                              bandwidth_gbps=bandwidth))
+                              bandwidth_gbps=bandwidth, compute_cap=cc, kernels_ok=kernels_ok))
+            if kernels_ok is False:
+                # Every launch on it would die with "no kernel image is available": never offer it.
+                out[-1].usable_mb = 0
+                if pci not in _no_kernels_logged:
+                    _no_kernels_logged.add(pci)
+                    log.error("GPU %s (%s, compute capability %s) has no kernels in this llama.cpp "
+                              "build (built for %s): not used. Rebuild the agent image with its "
+                              "architecture in CUDA_ARCHS.", did, name, cc,
+                              ",".join(_built_archs(cfg) or []))
         if lost:
             # The CUDA runtime behind llama.cpp may or may not still count the lost GPU, so
             # "CUDA<i>" -> physical card is no longer trustworthy: a per-device flag or a new

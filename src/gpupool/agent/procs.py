@@ -14,7 +14,7 @@ from pathlib import Path
 import psutil
 
 from gpupool.agent.firewall import RpcFirewall, Rule
-from gpupool.common.models import EngineSpec, EngineStatus
+from gpupool.common.models import DEFAULT_BATCH, DEFAULT_UBATCH, EngineSpec, EngineStatus
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,23 @@ def llama_version(llama_dir: Path) -> str:
         return "unknown"
 
 
+CUDA_ARCHS_FILE = "cuda-archs.txt"  # written next to the binaries by docker/agent.Dockerfile
+
+
+def llama_cuda_archs(llama_dir: Path) -> list[str] | None:
+    """CUDA architectures llama.cpp was built for, from cuda-archs.txt ("61 70 86 120"), or
+    GPUPOOL_CUDA_ARCHS ("61;86" or "61 86") for builds outside the image. None when unknown."""
+    raw = os.environ.get("GPUPOOL_CUDA_ARCHS")
+    if not raw:
+        try:
+            raw = (Path(llama_dir) / CUDA_ARCHS_FILE).read_text()
+        except OSError:
+            return None
+    archs = sorted({a for a in re.split(r"[\s;,]+", raw) if re.fullmatch(r"\d{2,3}[af]?", a)},
+                   key=lambda a: int(a.rstrip("af")))
+    return archs or None
+
+
 def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
                   model_path: str | None) -> list[str]:
     if spec.kind == "rpc":
@@ -82,6 +99,14 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
         cmd += ["--tensor-split", ",".join(f"{x:g}" for x in spec.tensor_split)]
     if spec.cache_type != "f16":
         cmd += ["-ctk", spec.cache_type, "-ctv", spec.cache_type]
+    # Only non-defaults, so a default spec launches exactly as before these options existed.
+    if spec.flash_attn != "auto":
+        cmd += ["-fa", spec.flash_attn]
+    batch = max(spec.batch, spec.ubatch)  # llama.cpp caps ubatch at batch; keep what was asked
+    if batch != DEFAULT_BATCH:
+        cmd += ["-b", str(batch)]
+    if spec.ubatch != DEFAULT_UBATCH:
+        cmd += ["-ub", str(spec.ubatch)]
     # b11342: without --spec-type, -md loads the draft model but never uses it.
     if spec.spec_type == "ngram":
         cmd += ["--spec-type", "ngram-mod"]

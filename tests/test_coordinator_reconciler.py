@@ -1836,3 +1836,15 @@ async def test_rollback_waits_for_the_head_first():
     await rec._rollback([("http://b:7070", "m-1-rpc-CUDA0"), ("http://a:7070", "m-1-head")])
     assert _rpc_started_after_head_ended(client.events), client.events
     await rec.shutdown()
+
+
+async def test_launch_sends_attention_and_batches(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC.model_copy(update={"flash_attn": "on", "ubatch": 1024, "batch": 4096, "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert (hs.flash_attn, hs.ubatch, hs.batch) == ("on", 1024, 4096)
+    await rec.shutdown()

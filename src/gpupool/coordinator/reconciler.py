@@ -1136,7 +1136,8 @@ class Reconciler:
             name, src = self._model_source(spec)
             path = await self.client.ensure_model(head_url, name, src)
 
-            extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative}
+            extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
+                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch}
             if spec.speculative == "draft":
                 if not spec.draft:
                     raise LaunchError("speculative 'draft' without a draft model")

@@ -106,9 +106,11 @@ RUN lib="$(find build -name 'libggml-cuda.so*' -type f | head -n1)"; \
     for a in $(echo "$CUDA_ARCHS" | tr ';' ' '); do \
         a="${a%%-*}"; a="${a%a}"; \
         echo "$have" | grep -qw "sm_$a" || { echo "missing sm_$a in $lib" >&2; exit 1; }; \
-    done
+    done; \
+    echo "$have" | tr ' ' '\n' | sed -n 's/^sm_//p' | sort -n | tr '\n' ' ' > build/cuda-archs.txt
+# cuda-archs.txt: the agent reports these and never places work on a GPU none of them can run on.
 RUN mkdir -p /out \
-    && cp build/bin/llama-server build/bin/ggml-rpc-server /out/ \
+    && cp build/bin/llama-server build/bin/ggml-rpc-server build/cuda-archs.txt /out/ \
     && find build -name "*.so*" -exec cp -P {} /out/ \;
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}

@@ -956,3 +956,26 @@ console.log(JSON.stringify(out));
     assert out[7] == ["b/CUDA0", "a/*"]  # a whole server replaces that node's single-GPU pins
     assert out[8] == ["b/CUDA0"]
     assert out[9] == ["Limited to a, b/CUDA1"]
+
+
+def test_form_has_attention_batch_fields_and_tips():
+    html = (UI / "index.html").read_text()
+    js = (UI / "app.js").read_text()
+    for needle in ('x-model="form.fa"', 'x-model.number="form.ubatch"', 'x-model.number="form.batch"',
+                   "form.rec.tips", "applyTip(t)", "ctxPerSlot()", "archLabel(r.d)", "kernels_ok === false"):
+        assert needle in html, needle
+    # every field a tip can apply maps onto a form field
+    for field in ("kv_cache_type", "speculative", "draft_file", "draft_n_max", "flash_attn", "ubatch", "batch",
+                  "ctx_size", "parallel", "file"):
+        assert re.search(r"\b" + field + r': "', js), field
+    assert "flash_attn: fa, ubatch: ub, batch: b" in js
+
+
+def test_mock_recommend_tips_and_perf_validation(client):
+    j = client.post("/api/recommend", headers=HEAD, json={"file": "qwen2.5-3b-q4.gguf"}).json()
+    assert [t["id"] for t in j["tips"]] == ["parallel", "ngram", "ubatch"]
+    r = client.post("/api/recommend", headers=HEAD,
+                    json={"file": "qwen2.5-3b-q4.gguf", "kv_cache_type": "q8_0", "flash_attn": "off"})
+    assert r.status_code == 422
+    gpus = client.get("/api/state", headers=HEAD).json()["servers"][0]["report"]["devices"]
+    assert gpus[0]["compute_cap"] == "9.0"

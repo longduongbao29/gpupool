@@ -77,10 +77,13 @@ function scalingForm(spec) {
   return f;
 }
 
-// Performance part of the deploy form (KV cache type, speculative decoding), derived from a model spec.
+// Performance part of the deploy form (KV cache, attention, batching, speculative decoding), derived from a model spec.
 function perfForm(spec) {
-  var f = { kv: "f16", spec: "none", draftFile: "", draftN: 4 };
+  var f = { kv: "f16", spec: "none", draftFile: "", draftN: 4, fa: "auto", ubatch: 512, batch: 2048 };
   if (!spec) return f;
+  if (spec.flash_attn) f.fa = spec.flash_attn;
+  if (spec.ubatch) f.ubatch = spec.ubatch;
+  if (spec.batch) f.batch = spec.batch;
   if (spec.kv_cache_type) f.kv = spec.kv_cache_type;
   if (spec.speculative) f.spec = spec.speculative;
   if (spec.draft) f.draftFile = String(spec.draft).replace(/^coordinator:\/\//, "");
@@ -1198,13 +1201,70 @@ function app() {
     },
     // Performance fields (KV cache type, speculative decoding) of the request body, or { error } when invalid.
     perfBody: function (f) {
-      var kv = f.kv || "f16", sp = f.spec || "none";
-      if (sp !== "draft") return { body: { kv_cache_type: kv, speculative: sp, draft_file: null, draft_n_max: 4 } };
+      var kv = f.kv || "f16", sp = f.spec || "none", fa = f.fa || "auto";
+      var ub = parseInt(f.ubatch, 10) || 512, b = Math.max(parseInt(f.batch, 10) || 2048, ub);
+      if (kv !== "f16" && fa === "off") return { error: "A quantized KV cache needs flash attention (Auto or On)" };
+      var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b };
+      if (sp !== "draft") return { body: Object.assign(common, { speculative: sp, draft_file: null, draft_n_max: 4 }) };
       var n = parseFloat(f.draftN);
       if (!f.draftFile) return { error: "Pick a draft model, or turn speculative decoding off" };
       if (f.draftFile === f.file) return { error: "The draft model must be a different file than the model" };
       if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
-      return { body: { kv_cache_type: kv, speculative: sp, draft_file: f.draftFile, draft_n_max: n } };
+      return { body: Object.assign(common, { speculative: sp, draft_file: f.draftFile, draft_n_max: n }) };
+    },
+    // Context each request gets: llama.cpp divides the context across the parallel slots.
+    ctxPerSlot: function () {
+      var c = parseInt(this.form.ctx, 10) || 0, p = parseInt(this.form.parallel, 10) || 1;
+      return Math.floor(c / Math.max(1, p));
+    },
+    // GPU generation from the compute capability NVML reports ("8.6" -> "Ampere · cc 8.6").
+    archName: function (cc) {
+      var m = /^(\d+)\.(\d+)$/.exec(cc || "");
+      if (!m) return "";
+      var v = parseInt(m[1], 10) * 10 + parseInt(m[2], 10);
+      var t = [[100, "Blackwell"], [90, "Hopper"], [89, "Ada"], [80, "Ampere"], [75, "Turing"], [70, "Volta"], [60, "Pascal"], [50, "Maxwell"]];
+      for (var i = 0; i < t.length; i++) if (v >= t[i][0]) return t[i][1];
+      return "";
+    },
+    archLabel: function (d) {
+      if (!d || !d.compute_cap) return "";
+      var n = this.archName(d.compute_cap);
+      return (n ? n + " · " : "") + "cc " + d.compute_cap;
+    },
+    tensorCores: function (d) {
+      var m = /^(\d+)\./.exec((d && d.compute_cap) || "");
+      return m ? parseInt(m[1], 10) >= 7 : null;
+    },
+    archHelp: function (d) {
+      var tc = this.tensorCores(d);
+      if (tc === null) return "";
+      return tc ? "Tensor cores: fast flash attention and big micro-batches pay off"
+        : "No tensor cores: flash attention uses fallback kernels, big micro-batches gain little";
+    },
+    // GPUs without tensor cores the form may use (all GPUs, or the selected ones).
+    formOldGpus: function () {
+      var f = this.form, out = [], self = this;
+      this.servers().forEach(function (s) {
+        self.gpus(s).forEach(function (d) {
+          var allowed = f.auto || f.pins.indexOf(s.node_id + "/*") >= 0 || f.pins.indexOf(s.node_id + "/" + d.device_id) >= 0;
+          if (allowed && self.tensorCores(d) === false) out.push(s.node_id + "/" + d.device_id + " (" + d.name + ")");
+        });
+      });
+      return out;
+    },
+    // Suggested-settings cards of the recommendation.
+    tipKind: function (t) { return { speed: "Faster", throughput: "More users", fix: "Fits better", memory: "Memory" }[t.kind] || t.kind; },
+    tipClass: function (t) { return { speed: "green", throughput: "blue", fix: "amber" }[t.kind] || ""; },
+    applyTip: async function (t) {
+      var f = this.form, a = t.apply || {};
+      var map = { kv_cache_type: "kv", speculative: "spec", draft_file: "draftFile", draft_n_max: "draftN", flash_attn: "fa",
+                  ubatch: "ubatch", batch: "batch", ctx_size: "ctx", parallel: "parallel", file: "file" };
+      Object.keys(a).forEach(function (k) { if (map[k]) f[map[k]] = a[k]; });
+      if (f.draftFile === f.file) f.draftFile = "";
+      f.plan = null;
+      f.sim = null;
+      this.toast("Applied: " + t.title, "ok");
+      await this.recommend();
     },
     // Ready library files that can serve as the draft model (not the model's own file).
     draftChoices: function () {
@@ -1215,6 +1275,9 @@ function app() {
     specChips: function (m) {
       var sp = m.spec || {}, out = [];
       if (sp.kv_cache_type && sp.kv_cache_type !== "f16") out.push("KV " + sp.kv_cache_type);
+      if (sp.flash_attn && sp.flash_attn !== "auto") out.push("Flash attn " + sp.flash_attn);
+      if (sp.ubatch && sp.ubatch !== 512) out.push("Micro-batch " + sp.ubatch);
+      if (sp.parallel > 1) out.push(sp.parallel + " slots · " + Math.floor(sp.ctx_size / sp.parallel) + " ctx each");
       if ((sp.pin_devices || []).length) out.push("Limited to " + sp.pin_devices.map(function (p) { return p.replace(/\/\*$/, ""); }).join(", "));
       if (sp.speculative === "ngram") out.push("Spec: n-gram");
       else if (sp.speculative === "draft") out.push("Spec: draft " + (sp.draft ? String(sp.draft).replace(/^coordinator:\/\//, "") : "?"));

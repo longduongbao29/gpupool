@@ -123,6 +123,9 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | speculative decoding: `ngram` guesses from the text so far (no extra memory); `draft` runs a small model with the same tokenizer on the head's first GPU |
 | `draft` | string or null, null | source of the draft model, `coordinator://<file>`; only for `speculative: "draft"` (dropped otherwise) |
 | `draft_n_max` | int 1..16, 4 | tokens drafted per step. On a GTX 1650 (3B + 0.5B draft) 4 gave +5 %, 8 was slower than none |
+| `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | llama.cpp `-fa`. Auto turns it on where the GPU supports it. A quantized `kv_cache_type` needs it (`off` with q8_0/q4_0 is a 422) |
+| `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): prompt tokens per pass. Bigger reads long prompts faster on GPUs with tensor cores (cc 7.0+); the compute buffer, charged on every device, grows with it |
+| `batch` | int 32..16384, 2048 | logical batch (`-b`); raised to `ubatch` when smaller |
 
 Validation applied by `PUT /api/models/{name}` and by `/api/simulate` (the same checks):
 
@@ -168,6 +171,7 @@ model; a new model gets the default.
 | `speculative` | enum or null | keep, else `none` |
 | `draft_file` | string or null | keep (stored draft), else none |
 | `draft_n_max` | int 1..16 or null | keep, else 4 |
+| `flash_attn`, `ubatch`, `batch` | as above, or null | keep, else `auto` / 512 / 2048 |
 
 `replicas` is not in the body: a new model starts with `replicas = 0` and an existing model keeps its value.
 Returns the stored `ModelSpec` (JSON). Errors: 422 (bad name, file not ready, bad pin, min > max, idle
@@ -358,6 +362,7 @@ Body `RecommendBody`:
 | `speculative` | enum, `none` | |
 | `draft_file` | string or null | for `speculative: "draft"` (same 422 checks as `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
+| `flash_attn`, `ubatch`, `batch` | as in `PUT /api/models`, `auto` / 512 / 2048 | |
 
 Response:
 
@@ -367,7 +372,10 @@ Response:
               "assignments": [{"node_id": "b", "device_id": "CUDA1", "layers": 28, "est_mb": 6120}],
               "est_decode_tps": 41.0, "est_total_mb": 6120, "reasons": ["..."]}],
  "max_ctx_single_gpu": 16384,
- "not_possible": null}
+ "not_possible": null,
+ "tips": [{"id": "parallel", "kind": "throughput", "title": "Serve 4 requests at once (4 slots)",
+           "detail": "...", "apply": {"parallel": 4, "ctx_size": 32768},
+           "tier": "single_gpu", "est_decode_tps": 41.0, "est_total_mb": 7400}]}
 ```
 
 - `options`: up to `limit` placements ranked by the scheduler's own score. When none fits now but stopping
@@ -377,6 +385,15 @@ Response:
   null.
 - `not_possible`: when nothing fits even with preemption:
   `{"need_mb", "largest_single_gpu_mb", "largest_single_node_mb", "max_ctx_that_fits"}`, else null.
+- `tips`: settings that would make this model faster or let it serve more users, each checked with the
+  ranker against the live pool (a tip never needs more GPUs than the request as sent). `apply` holds the
+  `PUT /api/models` fields to change; `kind` is `speed`, `throughput` or `fix`; `tier` / `est_*` describe the
+  best placement with the tip applied. Ids: `kv_cache`, `smaller_quant` (a smaller quantization of the same
+  model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `ctx_per_slot`,
+  `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
+  tensor cores (compute capability below 7.0) `flash_attn_old_gpu` / `ubatch_old_gpu`. The GPU generation
+  comes from each device's `compute_cap`; `ubatch` is only suggested when every GPU of the placement has
+  tensor cores. Empty when nothing would help.
 
 ```bash
 curl -s -X POST $COORD/api/recommend -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
@@ -395,7 +412,7 @@ changes. Body:
 
 - `changes[]`: `model` (existing, else 404) plus any of `replicas`, `min_replicas`, `max_replicas`,
   `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`, `pin_devices`, `kv_cache_type`, `speculative`,
-  `draft_file`, `draft_n_max`. Absent = unchanged.
+  `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`. Absent = unchanged.
 - `add[]`: `name` (new, `[A-Za-z0-9._-]{1,64}`), `file` (ready library item), plus the same optional fields.
   A new model starts at its floor (`max(min_replicas, 1)`) when `replicas > 0`.
 - Validation as `PUT /api/models` (422); the result of each model is checked in full.
@@ -560,7 +577,8 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: exactly one local device; server: ordered list such as
 `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF on the head), `rpc_endpoints` (`"host:port"`, order of
 `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
-`spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `allowed_peers` (hosts allowed
+`spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
+`batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (hosts allowed
 to reach an rpc engine; enforced only when the agent runs with `rpc_firewall`). Returns `EngineStatus`
 (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`, `port`, `exit_code`, `log_tail` of at
 most 50 lines). Errors: `422` for `extra_args` (not accepted by this agent, so the token cannot become

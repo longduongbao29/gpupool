@@ -233,6 +233,7 @@
                 <dt>Model</dt><dd x-text="devName(selected().d)"></dd>
                 <dt>Total memory</dt><dd x-text="gb(selected().d.total_mb) + ' GB'"></dd>
                 <dt>CUDA</dt><dd x-text="selected().d.cuda || dash"></dd>
+                <dt>Architecture</dt><dd x-text="archLabel(selected().d) || dash" :title="archHelp(selected().d)"></dd>
                 <dt>Driver</dt><dd x-text="selected().d.driver || dash"></dd>
               </dl>
             </div>
@@ -252,7 +253,8 @@
           <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
             <tr :style="r.s.alive ? '' : 'opacity:.55'">
               <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
-              <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id"></div></td>
+              <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id + (archLabel(r.d) ? ' · ' + archLabel(r.d) : '')" :title="archHelp(r.d)"></div>
+                <span class="pill red lead" x-show="r.d.kernels_ok === false" :title="'The agent\'s llama.cpp was built for ' + ((r.s.report && r.s.report.cuda_archs) || []).join(', ') + '. Rebuild with this GPU in CUDA_ARCHS.'">No kernels in this build</span></td>
               <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
               <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
               <td x-text="mem(r.d)"></td>
@@ -898,6 +900,9 @@
         <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" @input="form.rec = null" style="width:100%"></label>
         <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
       </div>
+      <div class="muted small" style="margin:-4px 0 var(--s-3)" :class="{warn: ctxPerSlot() < 2048}">
+        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context (context &divide; slots).
+        More slots serve more users at once (continuous batching): total tok/s grows, one request alone slows slightly.</div>
       <div class="row">
         <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" @input="form.sim = null" style="width:100%"></label>
         <label class="field grow"><span>Spread replicas across</span>
@@ -913,6 +918,22 @@
           <option value="q8_0">8-bit (q8_0) &mdash; about half the KV memory, negligible quality loss</option>
           <option value="q4_0">4-bit (q4_0) &mdash; about a quarter, small quality loss</option></select></label>
       <div class="muted small" style="margin:-4px 0 var(--s-3)">The KV cache grows with context size &times; parallel slots; quantizing it can let a model fit on fewer GPUs.</div>
+      <div class="row">
+        <label class="field grow"><span>Flash attention</span>
+          <select x-model="form.fa" @change="form.rec = null; form.sim = null" style="width:100%">
+            <option value="auto">Auto (recommended)</option>
+            <option value="on">On</option>
+            <option value="off">Off</option></select></label>
+        <label class="field grow"><span>Micro-batch (-ub)</span>
+          <select x-model.number="form.ubatch" @change="if (form.batch < form.ubatch) form.batch = form.ubatch; form.rec = null; form.sim = null" style="width:100%">
+            <template x-for="n in [128, 256, 512, 1024, 2048, 4096]" :key="n"><option :value="n" :selected="n === form.ubatch" x-text="n + (n === 512 ? ' (default)' : '')"></option></template></select></label>
+        <label class="field grow"><span>Batch (-b)</span>
+          <select x-model.number="form.batch" @change="if (form.batch < form.ubatch) form.ubatch = form.batch; form.rec = null; form.sim = null" style="width:100%">
+            <template x-for="n in [512, 1024, 2048, 4096, 8192]" :key="n"><option :value="n" :selected="n === form.batch" x-text="n + (n === 2048 ? ' (default)' : '')"></option></template></select></label>
+      </div>
+      <div class="muted small" style="margin:-4px 0 var(--s-3)">Flash attention: faster attention and less memory where the GPU supports it; a quantized KV cache needs it. Micro-batch: tokens of a prompt read per pass. Bigger reads long prompts faster on GPUs with tensor cores (Volta, cc 7.0 and newer), costs compute memory on every GPU, and does not change generation speed.</div>
+      <div class="notice warn" x-show="form.kv !== 'f16' && form.fa === 'off'" role="status">A quantized KV cache needs flash attention: set it to Auto or On.</div>
+      <div class="notice warn" x-show="form.fa === 'on' && formOldGpus().length" role="status" x-text="'Forcing flash attention on: ' + formOldGpus().join(', ') + ' has no tensor cores, so llama.cpp uses slower fallback kernels there. Auto is safer.'"></div>
       <label class="field"><span>Speculative decoding</span>
         <select x-model="form.spec" @change="form.rec = null; form.sim = null" style="width:100%">
           <option value="none">Off</option>
@@ -1020,6 +1041,22 @@
                   <button class="btn sm" @click="useCtx(form.rec.not_possible.max_ctx_that_fits)" :disabled="form.recBusy">Use ctx <span x-text="form.rec.not_possible.max_ctx_that_fits"></span></button></div>
               </template></div>
           </template>
+          <template x-if="(form.rec.tips || []).length">
+            <div class="tips">
+              <div class="row"><b>Suggested settings</b><span class="muted small">checked against your GPUs; Apply copies them into the form</span></div>
+              <template x-for="t in form.rec.tips" :key="t.id">
+                <div class="tip">
+                  <span class="pill lead" :class="tipClass(t)" x-text="tipKind(t)"></span>
+                  <div class="grow">
+                    <div><b x-text="t.title"></b></div>
+                    <div class="muted small" x-text="t.detail"></div>
+                    <div class="muted small" x-show="t.tier" x-text="'With it: ' + String(t.tier || '').replace('_', ' ') + (t.est_total_mb ? ' · ' + gb(t.est_total_mb) + ' GB' : '') + (t.est_decode_tps ? ' · ~' + tps(t.est_decode_tps) : '')"></div>
+                  </div>
+                  <button class="btn sm" x-show="Object.keys(t.apply || {}).length" @click="applyTip(t)" :disabled="form.recBusy">Apply</button>
+                </div>
+              </template>
+            </div>
+          </template>
           <div class="muted small" x-show="!form.rec.not_possible && !(form.rec.options || []).length">No options returned.</div>
           <template x-for="o in (form.rec.options || [])" :key="o.rank">
             <div class="opt">
@@ -1046,7 +1083,7 @@
     </div>
     <div class="modal-foot split">
       <div class="foot-group" role="group" aria-label="Check before saving">
-        <button class="btn sm" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement</button>
+        <button class="btn sm" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model and suggest faster settings, without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement &amp; settings</button>
         <button class="btn sm" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
         <button class="btn sm" @click="simulate()" :disabled="form.busy || form.simBusy || !form.file" title="Dry run over the whole cluster: what would start, stop or be preempted. Saves nothing"><span class="spin" x-show="form.simBusy"></span> Preview impact</button>
       </div>

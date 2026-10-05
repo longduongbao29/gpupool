@@ -8,6 +8,30 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm mới
+
+- Thiết lập tốc độ khi chạy, trong form model và `PUT /api/models`: flash attention (`flash_attn`
+  auto/on/off, `-fa` của llama.cpp), micro-batch (`ubatch`, `-ub`) và batch (`batch`, `-b`). Đây là các trường
+  có kiểu, được kiểm tra, gửi xuống agent, không phải cờ llama-server tùy ý (agent vẫn từ chối `extra_args`).
+  Ước lượng bộ nhớ tính compute buffer theo micro-batch đã chọn (và ma trận điểm attention khi tắt flash
+  attention), nên micro-batch lớn không làm GPU bị cấp quá. KV cache lượng tử hóa khi tắt flash attention bị từ
+  chối (422): llama.cpp không chạy V cache lượng tử hóa nếu thiếu nó.
+- Gợi ý thiết lập: "Recommend placement & settings" trong form model (`tips` trong `POST /api/recommend`) liệt
+  kê các thay đổi giúp model nhanh hơn hoặc phục vụ nhiều người hơn, mỗi cái đều được kiểm trên pool thật và không
+  bao giờ cần nhiều GPU hơn hiện tại, kèm nút Apply: KV cache lượng tử hóa, bản lượng tử hóa nhỏ hơn của cùng
+  model hoặc context nhỏ hơn để vừa một GPU thay vì nhiều (các layer trên nhiều GPU chạy nối tiếp nên chia ra
+  không bao giờ decode nhanh hơn); số slot song song giữ nguyên context mỗi request; model draft tương thích trong
+  thư viện hoặc speculative n-gram; micro-batch lớn hơn cho prompt dài.
+- Nhận biết thế hệ GPU: agent báo compute capability của từng GPU (`compute_cap`, hiển thị dạng
+  "Ampere · cc 8.6" ở trang GPUs) và các kiến trúc CUDA mà llama.cpp của nó được build (`cuda_archs`, từ
+  `cuda-archs.txt` do image agent ghi, hoặc `GPUPOOL_CUDA_ARCHS`). Gợi ý dựa theo đó: micro-batch lớn chỉ được
+  gợi ý khi mọi GPU có tensor core (Volta, cc 7.0+), ép bật flash attention hoặc micro-batch lớn trên Pascal sẽ bị
+  cảnh báo, và draft đề xuất ít token hơn ở đó.
+- GPU mà llama.cpp của agent không có kernel (mọi kiến trúc được build đều mới hơn card) được báo với
+  `kernels_ok: false` và bộ nhớ dùng được bằng 0, nên không có gì được đặt lên nó, thay vì mọi lần chạy đều lỗi
+  "no kernel image is available". Trang GPUs đánh dấu "No kernels in this build".
+- Form model hiển thị context mỗi request nhận được (context ÷ số slot song song).
+
 ## [0.4.2] - 2026-10-05
 
 ### Sửa lỗi

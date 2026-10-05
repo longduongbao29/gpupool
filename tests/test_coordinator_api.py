@@ -254,7 +254,8 @@ async def test_put_model_create_update_validation(env):
                         "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu",
                         "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
                         "preemptible": True, "kv_cache_type": "f16", "speculative": "none",
-                        "draft": None, "draft_n_max": 4}
+                        "draft": None, "draft_n_max": 4, "flash_attn": "auto", "batch": 2048,
+                        "ubatch": 512}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -822,3 +823,43 @@ async def test_agent_client_engine_memory_returns_json_and_none_on_404():
         with pytest.raises(AgentError):
             await c.engine_memory("http://h:7070", "e")
         await c.aclose()
+
+
+# ---------------------------------------------------------------- attention / batching settings, tuning tips
+async def test_put_model_attention_and_batches(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    r = await c.put("/api/models/qwen", json={"file": "x.gguf", "flash_attn": "on", "ubatch": 4096})
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["flash_attn"], j["ubatch"], j["batch"]) == ("on", 4096, 4096)  # batch raised to the micro-batch
+    r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192})
+    assert (r.json()["flash_attn"], r.json()["ubatch"]) == ("on", 4096)  # omitted = kept
+    r = await c.put("/api/models/qwen", json={"file": "x.gguf", "kv_cache_type": "q8_0", "flash_attn": "off"})
+    assert r.status_code == 422 and "flash attention" in r.json()["detail"]
+    assert (await c.put("/api/models/qwen", json={"file": "x.gguf", "ubatch": 8})).status_code == 422
+
+
+async def test_recommend_returns_tuning_tips(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a", devices=[dev(usable=24000).model_copy(update={"compute_cap": "8.6"})]))
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: [placement()]
+    j = (await c.post("/api/recommend", json={"file": "x.gguf", "ctx_size": 4096})).json()
+    tip_ids = [t["id"] for t in j["tips"]]
+    assert "parallel" in tip_ids and "ubatch" in tip_ids
+    assert all(set(t) >= {"id", "kind", "title", "detail", "apply"} for t in j["tips"])
+    r = await c.post("/api/recommend", json={"file": "x.gguf", "kv_cache_type": "q4_0", "flash_attn": "off"})
+    assert r.status_code == 422
+
+
+async def test_recommend_tip_failure_keeps_the_answer(env, monkeypatch):
+    import gpupool.coordinator.api as api_mod
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: [placement()]
+
+    async def boom(*a, **k):
+        raise RuntimeError("x")
+    monkeypatch.setattr(api_mod, "suggest", boom)
+    j = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()
+    assert j["tips"] == [] and len(j["options"]) == 1

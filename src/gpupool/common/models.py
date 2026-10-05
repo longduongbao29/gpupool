@@ -20,6 +20,12 @@ KvCacheType = Literal["f16", "q8_0", "q4_0"]
 # Speculative decoding: "ngram" guesses from the text so far (no extra memory); "draft" runs a small
 # model with the same tokenizer on the head's GPU. Fewer target passes = fewer RPC round trips.
 SpecMode = Literal["none", "ngram", "draft"]
+# llama.cpp -fa. "auto" turns flash attention on wherever the backend supports it (b11342 default).
+FlashAttn = Literal["auto", "on", "off"]
+# Logical (-b) and physical (-ub) batch sizes, llama.cpp defaults. A bigger micro-batch processes long
+# prompts faster on big GPUs at the cost of a bigger compute buffer on every device.
+DEFAULT_BATCH = 2048
+DEFAULT_UBATCH = 512
 
 # Replica state groups (not part of the wire format).
 ALL_REPLICA_STATES: tuple[str, ...] = ("pending", "launching", "ready", "draining", "stopped", "failed")
@@ -60,6 +66,12 @@ class Device(BaseModel):
     # Peak memory bandwidth (NVML bus width x memory clock). Decode speed is bandwidth-bound, so
     # this ranks GPUs; None for CPU devices and older agents.
     bandwidth_gbps: float | None = None
+    # CUDA compute capability, e.g. "8.6" (NVML). Decides tensor cores, flash-attention kernels and
+    # whether the agent's llama.cpp build has kernels for this GPU. None for CPU and older agents.
+    compute_cap: str | None = None
+    # False when the agent's llama.cpp build has no kernels for this GPU ("no kernel image is
+    # available"): the agent reports usable_mb 0 so nothing is placed there. None = not checked.
+    kernels_ok: bool | None = None
 
 
 class EngineSpec(BaseModel):
@@ -83,6 +95,10 @@ class EngineSpec(BaseModel):
     draft_model_path: str | None = None  # spec_type "draft": GGUF on the head node
     draft_device: str | None = None  # llama device the draft runs on, e.g. "CUDA0" (local to the head)
     draft_n_max: int = 4
+    # Optional since 0.5; an older agent ignores them (llama.cpp defaults: auto, 2048, 512).
+    flash_attn: FlashAttn = "auto"
+    batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
+    ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
     # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
     # only by agents with rpc_firewall on; ggml-rpc-server itself has no authentication.
     allowed_peers: list[str] = Field(default_factory=list)
@@ -107,6 +123,9 @@ class NodeReport(BaseModel):
     devices: list[Device]
     engines: list[EngineStatus]
     llama_version: str
+    # CUDA architectures the agent's llama.cpp was compiled for (CMake numbers, "61", "86", "120").
+    # None when unknown (builds outside the agent image, older agents).
+    cuda_archs: list[str] | None = None
     models: list[str]  # GGUF file names present in the local cache
     ts: float
     # Optional host telemetry for the UI.
@@ -146,6 +165,9 @@ class ModelSpec(BaseModel):
     draft: str | None = None  # speculative "draft": source of the draft model, e.g. coordinator://<file>
     # Measured on a GTX 1650 (Qwen2.5-3B + 0.5B draft): 4 drafted tokens +5 %, 8 slower than none.
     draft_n_max: int = Field(default=4, ge=1, le=16)
+    flash_attn: FlashAttn = "auto"
+    batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)  # -b, never below ubatch at launch
+    ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)  # -ub; sizes the compute buffer
 
 
 class AutoscalePolicy(BaseModel):

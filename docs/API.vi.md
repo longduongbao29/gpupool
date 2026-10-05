@@ -123,6 +123,9 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | giải mã suy đoán: `ngram` đoán từ văn bản đã có (không tốn thêm bộ nhớ); `draft` chạy một model nhỏ cùng tokenizer trên GPU đầu tiên của head |
 | `draft` | string hoặc null, null | nguồn của model draft, `coordinator://<file>`; chỉ dùng với `speculative: "draft"` (bị bỏ nếu không) |
 | `draft_n_max` | int 1..16, 4 | số token draft mỗi bước. Trên GTX 1650 (3B + draft 0.5B) mức 4 nhanh hơn 5 %, mức 8 chậm hơn không dùng |
+| `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | `-fa` của llama.cpp. Auto bật ở nơi GPU hỗ trợ. `kv_cache_type` lượng tử hóa cần nó (`off` cùng q8_0/q4_0 trả 422) |
+| `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): số token prompt mỗi lượt. Lớn hơn thì đọc prompt dài nhanh hơn trên GPU có tensor core (cc 7.0+); compute buffer, tính trên mọi thiết bị, tăng theo |
+| `batch` | int 32..16384, 2048 | batch logic (`-b`); được nâng lên bằng `ubatch` khi nhỏ hơn |
 
 Kiểm tra do `PUT /api/models/{name}` và `/api/simulate` áp dụng (giống nhau):
 
@@ -168,6 +171,7 @@ mới lấy giá trị mặc định.
 | `speculative` | enum hoặc null | giữ, nếu không có thì `none` |
 | `draft_file` | string hoặc null | giữ (draft đã lưu), nếu không có thì không dùng |
 | `draft_n_max` | int 1..16 hoặc null | giữ, nếu không có thì 4 |
+| `flash_attn`, `ubatch`, `batch` | như trên, hoặc null | giữ, nếu không có thì `auto` / 512 / 2048 |
 
 `replicas` không nằm trong body: model mới bắt đầu với `replicas = 0`, model đã có giữ giá trị cũ. Trả về
 `ModelSpec` đã lưu (JSON). Lỗi: 422 (tên sai, file chưa ready, pin sai, min > max, idle mà min khác 0, các
@@ -357,6 +361,7 @@ Body `RecommendBody`:
 | `speculative` | enum, `none` | |
 | `draft_file` | string hoặc null | cho `speculative: "draft"` (cùng các kiểm tra 422 như `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
+| `flash_attn`, `ubatch`, `batch` | như ở `PUT /api/models`, `auto` / 512 / 2048 | |
 
 Phản hồi:
 
@@ -366,7 +371,10 @@ Phản hồi:
               "assignments": [{"node_id": "b", "device_id": "CUDA1", "layers": 28, "est_mb": 6120}],
               "est_decode_tps": 41.0, "est_total_mb": 6120, "reasons": ["..."]}],
  "max_ctx_single_gpu": 16384,
- "not_possible": null}
+ "not_possible": null,
+ "tips": [{"id": "parallel", "kind": "throughput", "title": "Serve 4 requests at once (4 slots)",
+           "detail": "...", "apply": {"parallel": 4, "ctx_size": 32768},
+           "tier": "single_gpu", "est_decode_tps": 41.0, "est_total_mb": 7400}]}
 ```
 
 - `options`: tối đa `limit` phương án xếp hạng theo điểm của chính scheduler. Khi chưa có phương án nào đặt
@@ -376,6 +384,14 @@ Phản hồi:
   hoặc null.
 - `not_possible`: khi không có gì vừa kể cả khi giành chỗ:
   `{"need_mb", "largest_single_gpu_mb", "largest_single_node_mb", "max_ctx_that_fits"}`, nếu không thì null.
+- `tips`: các thiết lập giúp model nhanh hơn hoặc phục vụ được nhiều người hơn, mỗi cái đều được kiểm bằng
+  ranker trên pool thật (một gợi ý không bao giờ cần nhiều GPU hơn yêu cầu gốc). `apply` chứa các trường của
+  `PUT /api/models` cần đổi; `kind` là `speed`, `throughput` hoặc `fix`; `tier` / `est_*` mô tả phương án tốt
+  nhất khi áp dụng gợi ý. Các id: `kv_cache`, `smaller_quant` (bản lượng tử hóa nhỏ hơn của cùng model trong thư
+  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `ctx_per_slot`, `draft` (model nhỏ tương
+  thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
+  dưới 7.0) là `flash_attn_old_gpu` / `ubatch_old_gpu`. Thế hệ GPU lấy từ `compute_cap` của từng thiết bị;
+  `ubatch` chỉ được gợi ý khi mọi GPU của phương án đều có tensor core. Rỗng khi không có gì giúp được.
 
 ```bash
 curl -s -X POST $COORD/api/recommend -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
@@ -394,7 +410,8 @@ Body:
 
 - `changes[]`: `model` (đã tồn tại, nếu không là 404) cùng bất kỳ trường nào trong `replicas`,
   `min_replicas`, `max_replicas`, `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`,
-  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`. Vắng = không đổi.
+  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`.
+  Vắng = không đổi.
 - `add[]`: `name` (mới, `[A-Za-z0-9._-]{1,64}`), `file` (mục thư viện ready), cùng các trường tùy chọn
   như trên. Model mới bắt đầu ở mức sàn (`max(min_replicas, 1)`) khi `replicas > 0`.
 - Kiểm tra giống `PUT /api/models` (422); kết quả của từng model được kiểm tra đầy đủ.
@@ -559,7 +576,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 cục bộ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
 `rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1),
 `extra_args`, `cache_type` (`f16`), `spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max`
-(4), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
+(4), `flash_attn` (`auto`, `-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
 `rpc_firewall`). Trả `EngineStatus` (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`,
 `port`, `exit_code`, `log_tail` tối đa 50 dòng). Lỗi: `422` với `extra_args` (agent này không chấp nhận, để
 token không biến thành cờ llama-server tùy ý), engine server thiếu `model_path`, `model_path` hoặc

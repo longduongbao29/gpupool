@@ -66,13 +66,15 @@ REBAL: dict = {"in_progress": None, "done": False, "next_run_ts": None}
 REBAL_SECONDS = 20.0
 
 
+COMPUTE_CAP = {"NVIDIA H100 80GB": "9.0", "NVIDIA RTX 4090": "8.9", "NVIDIA A100 40GB": "8.0", "NVIDIA RTX 3090": "8.6"}
 BANDWIDTH_GBPS = {"NVIDIA H100 80GB": 3350.0, "NVIDIA RTX 4090": 1008.0, "NVIDIA A100 40GB": 1555.0, "NVIDIA RTX 3090": 936.2}
 
 
 def _gpu(i: int, name: str, total_mb: int, phase: float, driver="535.154.05", cuda="12.2") -> dict:
     return {"device_id": f"CUDA{i}", "kind": "cuda", "name": name, "total_mb": total_mb, "free_mb": total_mb,
             "usable_mb": total_mb, "util_pct": 0, "temp_c": 40, "power_w": 60, "processes": [],
-            "driver": driver, "cuda": cuda, "bandwidth_gbps": BANDWIDTH_GBPS.get(name), "_phase": phase, "_base": 20 + 12 * i}
+            "driver": driver, "cuda": cuda, "bandwidth_gbps": BANDWIDTH_GBPS.get(name),
+            "compute_cap": COMPUTE_CAP.get(name), "kernels_ok": True, "_phase": phase, "_base": 20 + 12 * i}
 
 
 def _server(node_id: str, ip: str, gpus: list[dict], alive: bool, ram_total: int) -> dict:
@@ -346,7 +348,38 @@ def _perf_fields(body: dict, file: str) -> dict:
         if _tok_family(df) != _tok_family(file):
             raise HTTPException(422, f"draft model {df} does not share the tokenizer of {file}")
         draft = f"coordinator://{df}"
-    return {"kv_cache_type": kv, "speculative": spec, "draft": draft, "draft_n_max": n}
+    fa = _choice(body.get("flash_attn", "auto"), ("auto", "on", "off"), "flash_attn")
+    ub = _int_in(body.get("ubatch", 512), 32, 8192, "ubatch")
+    b = max(_int_in(body.get("batch", 2048), 32, 16384, "batch"), ub)
+    if kv != "f16" and fa == "off":
+        raise HTTPException(422, f"KV cache {kv} needs flash attention (auto or on)")
+    return {"kv_cache_type": kv, "speculative": spec, "draft": draft, "draft_n_max": n,
+            "flash_attn": fa, "ubatch": ub, "batch": b}
+
+
+def _mock_tips(body: dict, perf: dict, ctx: int, parallel: int, need: int, biggest_gpu: int) -> list[dict]:
+    """A plausible subset of the real tuning suggestions (coordinator/tuning.py)."""
+    tips = []
+
+    def tip(tid, kind, title, detail, apply, tier="single_gpu"):
+        tips.append({"id": tid, "kind": kind, "title": title, "detail": detail, "apply": apply, "tier": tier,
+                     "est_decode_tps": None, "est_total_mb": None})
+    if need > biggest_gpu and perf["kv_cache_type"] == "f16":
+        tip("kv_cache", "fix", "Quantize the KV cache to q8_0 to fit on a single GPU",
+            "Saves about half of the KV memory with negligible quality loss.",
+            {"kv_cache_type": "q8_0", **({"flash_attn": "auto"} if perf["flash_attn"] == "off" else {})})
+    if need <= biggest_gpu:
+        if parallel == 1:
+            tip("parallel", "throughput", "Serve 4 requests at once (4 slots)",
+                f"Each slot keeps {ctx} tokens of context (total {ctx * 4}).", {"parallel": 4, "ctx_size": ctx * 4})
+        if perf["speculative"] == "none":
+            tip("ngram", "speed", "Speculative decoding with n-gram (no extra memory)",
+                "Helps when outputs repeat the input (code edits, RAG, extraction).", {"speculative": "ngram"})
+        if perf["ubatch"] == 512:
+            tip("ubatch", "speed", "Micro-batch 2048 for faster prompt processing",
+                "Long prompts are read faster on NVIDIA H100 80GB (Hopper, cc 9.0); about 300 MB more compute memory per GPU.",
+                {"ubatch": 2048, "batch": max(perf["batch"], 2048)})
+    return tips
 
 
 def _scaling(m: dict) -> dict:
@@ -658,7 +691,8 @@ def recommend(body: dict) -> dict:
         per_node[n] = per_node.get(n, 0) + g["usable_mb"]
     biggest_node = max(per_node.values(), default=0)
     max_ctx_single = max(0, int((biggest_gpu - fixed) / (3.0 * kv_f * parallel)) // 256 * 256)
-    out = {"need_mb": need, "options": [], "max_ctx_single_gpu": max_ctx_single or None, "not_possible": None}
+    out = {"need_mb": need, "options": [], "max_ctx_single_gpu": max_ctx_single or None, "not_possible": None,
+           "tips": _mock_tips(body, perf, ctx, parallel, need, biggest_gpu)}
     if need > biggest_node:
         fits = max(0, int((biggest_node - fixed) / (3.0 * kv_f * parallel)) // 256 * 256)
         out["not_possible"] = {"need_mb": need, "largest_single_gpu_mb": biggest_gpu, "largest_single_node_mb": biggest_node,
