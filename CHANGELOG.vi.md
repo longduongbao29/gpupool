@@ -8,6 +8,14 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- Chia layer giữa các GPU theo băng thông chứ không chỉ theo bộ nhớ trống. Sau khi có cách chia vừa, layer
+  được dời từ thiết bị chậm sang thiết bị nhanh khi còn vừa và tốc độ decode ước tính tăng (thời gian decode là
+  tổng byte / băng thông của từng thiết bị). Ước tính ví dụ, 70B Q4 trên RTX 5090 + RTX 4090: 46/34 layer thành
+  57/23, khoảng +9 % token/s. GPU cùng băng thông hoặc chưa rõ băng thông chia như cũ; mỗi thiết bị vẫn giữ ít
+  nhất một layer nên số bước RPC không đổi.
+
 ## [0.5.0] - 2026-10-05
 
 ### Thêm mới

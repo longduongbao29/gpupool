@@ -8,6 +8,14 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Layer split across GPUs follows bandwidth, not only free memory. After a split that fits, layers move
+  from slower to faster devices while they still fit and the estimated decode speed improves (decode time is
+  the sum of bytes / bandwidth per device). Example estimate, 70B Q4 on an RTX 5090 + RTX 4090: 46/34 layers
+  become 57/23, about +9 % tokens/s. GPUs of equal or unknown bandwidth split as before; every device keeps
+  at least one layer, so the number of RPC hops does not change.
+
 ## [0.5.0] - 2026-10-05
 
 ### Added

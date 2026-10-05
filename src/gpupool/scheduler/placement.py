@@ -26,7 +26,7 @@ from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
 from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
 from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
 from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
-from gpupool.scheduler.scoring import default_cuda_bw, est_decode_tps
+from gpupool.scheduler.scoring import CUDA_BW_FALLBACK_GBPS, default_cuda_bw, device_bw, est_decode_tps
 
 
 class NoFit(Exception):
@@ -115,7 +115,7 @@ def _split(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev]) -> list[int] |
         slack = _check(meta, ctx, ct, order, counts)
         worst = min(range(n), key=lambda i: slack[i])
         if slack[worst] >= 0:
-            return counts
+            return _favor_fast(meta, ctx, ct, order, counts)
         if counts[worst] <= 1:
             return None
         best = max((i for i in range(n) if i != worst), key=lambda i: slack[i], default=None)
@@ -124,6 +124,54 @@ def _split(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev]) -> list[int] |
         counts[worst] -= 1
         counts[best] += 1
     return None
+
+
+def _decode_s(meta: ModelMeta, bws: list[float], counts: list[int]) -> float:
+    """Seconds per token up to a constant (the est_decode_tps sum without ETA and hops)."""
+    t, start = 0.0, 0
+    for i, (bw, c) in enumerate(zip(bws, counts)):
+        b = sum(meta.layer_bytes[start:start + c])
+        if i == len(counts) - 1:
+            b += meta.output_bytes
+        t += b / bw
+        start += c
+    return t
+
+
+def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: list[int]) -> list[int]:
+    """Move layers from slower to faster devices while they fit and decode gets faster.
+
+    Decode time is the sum over devices of bytes / bandwidth, so a capacity-proportional split
+    leaves speed on the table whenever the devices differ: every layer a faster GPU can still
+    hold should be there. usable_mb already keeps the safety margin, so filling it is fine.
+    Every device keeps at least one layer (the device set, hence the hops, does not change).
+    """
+    n = len(order)
+    known = [d.dev.bandwidth_gbps for d in order if d.dev.kind == "cuda" and d.dev.bandwidth_gbps]
+    cuda_default = min(known) if known else CUDA_BW_FALLBACK_GBPS  # unknown ranks as slowest known
+    bws = [device_bw(d.dev, cuda_default) for d in order]
+    if len(set(bws)) < 2:
+        return counts
+    fast_first = sorted(range(n), key=lambda i: -bws[i])
+    cur = _decode_s(meta, bws, counts)
+    for _ in range(4 * meta.n_layers * n):
+        moved = False
+        for dst in fast_first:
+            for src in reversed(fast_first):
+                if bws[src] >= bws[dst] or counts[src] <= 1:
+                    continue
+                trial = counts.copy()
+                trial[src] -= 1
+                trial[dst] += 1
+                t = _decode_s(meta, bws, trial)
+                if t < cur * (1 - 1e-9) and min(_check(meta, ctx, ct, order, trial)) >= 0:
+                    counts, cur, moved = trial, t, True
+                    break
+            if moved:
+                break
+        if not moved:
+            break
+    return counts
 
 
 def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:

@@ -431,3 +431,71 @@ def test_mem_factor_scales_draft_reservation():
     assert rank(m, DSPEC, nodes, draft_meta=DRAFT, mem_factor=1.5)[0].draft_est_mb == sc.draft_est_mb
     # the factor does not leak into later calls
     assert plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT) == base
+
+
+def bw_dev(did, usable, gbps):
+    d = dev(did, usable)
+    d.bandwidth_gbps = gbps
+    return d
+
+
+def test_split_favors_faster_gpu():
+    # Neither GPU holds the model alone; the faster one is the smaller one, so a
+    # capacity-proportional split would give it fewer layers than it can hold.
+    meta = make_meta(40)
+    need = total_need_mb(meta, 512)
+    fast, slow = bw_dev("CUDA0", int(need * 0.7), 1800.0), bw_dev("CUDA1", int(need * 0.8), 360.0)
+    nodes = [node("a", fast, slow)]
+    pl = plan(meta, SPEC, nodes, "r1", Ports())
+    check(meta, pl, nodes)
+    by = {a.device_id: a for a in pl.assignments}
+    assert by["CUDA0"].layers > by["CUDA1"].layers
+    # filled up to its limit: one more layer would not fit on the fast GPU
+    order = [a.device_id for a in pl.assignments]
+    counts = [a.layers for a in pl.assignments]
+    i, j = order.index("CUDA0"), order.index("CUDA1")
+    counts[i] += 1
+    counts[j] -= 1
+    start, over = 0, False
+    for k, (a, c) in enumerate(zip(pl.assignments, counts)):
+        cap = fast.usable_mb if a.device_id == "CUDA0" else slow.usable_mb
+        over |= device_need_mb(meta, range(start, start + c), 512, "cuda", k == len(counts) - 1) > cap
+        start += c
+    assert over
+
+
+def test_split_faster_than_capacity_proportional():
+    from gpupool.scheduler import placement
+    from gpupool.scheduler.scoring import est_decode_tps
+
+    meta = make_meta(40)
+    need = total_need_mb(meta, 512)
+    nodes = [node("a", bw_dev("CUDA0", int(need * 0.7), 1800.0), bw_dev("CUDA1", int(need * 0.8), 360.0))]
+    pl = plan(meta, SPEC, nodes, "r1", Ports())
+    orig = placement._favor_fast
+    placement._favor_fast = lambda meta, ctx, ct, order, counts: counts
+    try:
+        base = plan(meta, SPEC, nodes, "r1", Ports())
+    finally:
+        placement._favor_fast = orig
+    devs = {d.device_id: d for d in nodes[0].devices}
+    tps = lambda p: est_decode_tps(meta, [(devs[a.device_id], a.layers) for a in p.assignments])  # noqa: E731
+    assert tps(pl) > tps(base) * 1.05
+    assert pl.est_decode_tps > base.est_decode_tps
+
+
+def test_split_unchanged_when_bandwidth_equal_or_unknown():
+    from gpupool.scheduler import placement
+
+    meta = make_meta(32)
+    need = total_need_mb(meta, 512)
+    for nodes in ([node("a", dev("CUDA0", need * 2 // 3), dev("CUDA1", need * 2 // 3))],
+                  [node("a", bw_dev("CUDA0", need * 2 // 3, 900.0), bw_dev("CUDA1", need * 2 // 3, 900.0))]):
+        pl = plan(meta, SPEC, nodes, "r1", Ports())
+        orig = placement._favor_fast
+        placement._favor_fast = lambda meta, ctx, ct, order, counts: counts
+        try:
+            base = plan(meta, SPEC, nodes, "r1", Ports())
+        finally:
+            placement._favor_fast = orig
+        assert [a.layers for a in pl.assignments] == [a.layers for a in base.assignments]
