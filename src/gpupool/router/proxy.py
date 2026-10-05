@@ -69,6 +69,21 @@ class _Retryable(Exception):
     pass
 
 
+def _with_cache_prompt(raw: bytes, body: dict) -> bytes:
+    """The request as received, with "cache_prompt": true added when the client did not set it.
+
+    The bytes are forwarded rather than re-serialized: a long-context request is megabytes of JSON,
+    and dumping it again costs milliseconds on the event loop that streams every other response.
+    The key is spliced in after the opening brace (the body is a non-empty object: it has "model");
+    anything but plain UTF-8 starting with "{" (a BOM, UTF-16) is re-encoded instead."""
+    if "cache_prompt" in body:
+        return raw
+    stripped = raw.lstrip()
+    if stripped[:1] == b"{":
+        return b'{"cache_prompt":true,' + stripped[1:]
+    return json.dumps({**body, "cache_prompt": True}, ensure_ascii=False).encode("utf-8")
+
+
 def make_router(
     *,
     get_candidates: Callable[[str], list[ReplicaEndpoint]],
@@ -129,8 +144,9 @@ def make_router(
             if total > max_body_bytes:
                 return too_big
             chunks.append(chunk)
+        raw = b"".join(chunks)
         try:
-            body = json.loads(b"".join(chunks))
+            body = json.loads(raw)
         except ValueError:
             return _error(400, "request body is not valid JSON",
                           "invalid_request_error", "invalid_json")
@@ -142,8 +158,7 @@ def make_router(
                           "invalid_request_error", "model_not_found")
         if on_request is not None:
             on_request(model)  # may start loading an unloaded model
-        body.setdefault("cache_prompt", True)
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        payload = _with_cache_prompt(raw, body)
         stream = body.get("stream") is True
         key = prefix_key(body)
 

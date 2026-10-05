@@ -14,6 +14,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from gpupool.agent.gpu import probe_devices
+from gpupool.agent.rpc_cache import prune as prune_rpc_cache
+from gpupool.agent.rpc_cache import rpc_cache_dir
 from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
 from gpupool.agent.procs import (
@@ -82,6 +84,7 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 
 
 FEATURES = ("rpc_multi_device",)  # NodeReport.features
+RPC_CACHE_PRUNE_S = 600.0  # how often the rpc weight cache is trimmed to rpc_cache_gb
 
 
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
@@ -153,10 +156,23 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                         log.warning("heartbeat to %s failed: %r", url, e)
                 await asyncio.sleep(cfg.heartbeat_s)
 
+    async def rpc_cache_loop() -> None:
+        cache = rpc_cache_dir(Path(cfg.cache_dir) / "llama.cpp")
+        cap = int(cfg.rpc_cache_gb * 1e9)
+        while True:
+            try:
+                await asyncio.to_thread(prune_rpc_cache, cache, cap)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("rpc cache pruning failed")
+            await asyncio.sleep(RPC_CACHE_PRUNE_S)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
+        prune_task = asyncio.create_task(rpc_cache_loop()) if cfg.rpc_cache_gb > 0 else None
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None
         try:
@@ -166,10 +182,11 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                 join_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await join_task
-            if task:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            for t in (task, prune_task):
+                if t:
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await t
             await asyncio.to_thread(pm.stop_all)
 
     app = FastAPI(title="gpupool-agent", lifespan=lifespan)

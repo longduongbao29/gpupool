@@ -648,6 +648,7 @@ Image Docker đặt sẵn `GPUPOOL_HOST`, `GPUPOOL_PORT`, `GPUPOOL_DB_PATH`, `GP
 | `GPUPOOL_HEARTBEAT_S` | `2` | chu kỳ heartbeat (chỉ dùng khi bật push heartbeat) |
 | `GPUPOOL_PUSH_HEARTBEAT` | `false` | chủ động đẩy heartbeat, cho coordinator cũ chưa có chế độ pull; thường để tắt |
 | `GPUPOOL_RPC_FIREWALL` | `false` | `1` = giới hạn từng cổng RPC bằng iptables, xem [Bảo mật](#bảo-mật); cần root và `NET_ADMIN` |
+| `GPUPOOL_RPC_CACHE_GB` | `100` | giới hạn cache trọng số RPC (`<GPUPOOL_CACHE_DIR>/llama.cpp/rpc`, giúp nạp lại model mà không phải gửi trọng số qua mạng); file ít dùng nhất bị xoá trước, `0` = không giới hạn |
 
 Các biến chương trình có đọc nhưng không nằm trong danh sách thiết lập trên: `GPUPOOL_LOG` (mức log, mặc định
 `INFO`, cho cả hai chương trình), `GPUPOOL_FAKE_DEVICES` (agent: danh sách JSON các GPU giả lập, dùng bởi

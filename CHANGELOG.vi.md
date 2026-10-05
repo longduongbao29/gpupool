@@ -22,6 +22,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Cache trọng số RPC có giới hạn dung lượng (`GPUPOOL_RPC_CACHE_GB`, mặc định 100): cứ 10 phút agent xoá các file
+  tensor ít dùng nhất khi vượt giới hạn. llama.cpp không bao giờ xoá chúng, nên mọi model từng chia sang một máy
+  chủ đều nằm lại trên đĩa máy đó.
+- Router chuyển tiếp nguyên body của request (thêm `"cache_prompt": true` khi thiếu) thay vì parse rồi serialize
+  lại, việc tốn vài mili giây event loop cho mỗi request context dài.
+
 - Image agent build kèm transport RDMA của llama.cpp (RoCE / InfiniBand, qua libibverbs). Mỗi kết nối RPC tự
   thương lượng và quay về TCP ở nơi một trong hai bên không có thiết bị RDMA; để dùng, chạy agent với
   `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.

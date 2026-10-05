@@ -414,3 +414,15 @@ async def test_cold_start_stops_waiting_when_client_disconnects():
                                               (b"content-length", str(len(body)).encode())],
              "server": ("t", 80), "client": ("c", 1), "scheme": "http", "http_version": "1.1", "root_path": ""}
     await asyncio.wait_for(env.app(scope, receive, send), timeout=5)  # far below the 30 s timeout
+
+
+def test_body_is_forwarded_as_received():
+    from gpupool.router.proxy import _with_cache_prompt
+    raw = b'  {"model": "m", "prompt": "h\\u00e9llo",  "x": 1}'
+    out = _with_cache_prompt(raw, json.loads(raw))
+    assert json.loads(out) == {"cache_prompt": True, "model": "m", "prompt": "héllo", "x": 1}
+    assert out.endswith(b'"prompt": "h\\u00e9llo",  "x": 1}')  # client bytes untouched
+    kept = b'{"model":"m","cache_prompt":false}'
+    assert _with_cache_prompt(kept, json.loads(kept)) is kept
+    bom = '﻿{"model": "m"}'.encode("utf-8")
+    assert json.loads(_with_cache_prompt(bom, json.loads(bom))) == {"model": "m", "cache_prompt": True}

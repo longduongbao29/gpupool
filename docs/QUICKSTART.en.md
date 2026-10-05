@@ -658,6 +658,7 @@ when it is built with the conversion toolchain (the default). `docker-compose.co
 | `GPUPOOL_HEARTBEAT_S` | `2` | heartbeat interval (only used with push heartbeats) |
 | `GPUPOOL_PUSH_HEARTBEAT` | `false` | also push heartbeats, for coordinators older than pull mode; normally leave off |
 | `GPUPOOL_RPC_FIREWALL` | `false` | `1` = restrict each RPC port with iptables, see [Security](#security); needs root and `NET_ADMIN` |
+| `GPUPOOL_RPC_CACHE_GB` | `100` | cap on the RPC weight cache (`<GPUPOOL_CACHE_DIR>/llama.cpp/rpc`, lets a model load again without sending its weights over the network); least recently used files go first, `0` = no cap |
 
 Read by the programs but not part of the settings above: `GPUPOOL_LOG` (log level, default `INFO`, both
 programs), `GPUPOOL_FAKE_DEVICES` (agent: JSON list of simulated GPUs, used by `docker-compose.sim.yml`), and

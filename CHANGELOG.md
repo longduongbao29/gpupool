@@ -22,6 +22,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- The RPC weight cache has a size cap (`GPUPOOL_RPC_CACHE_GB`, default 100): the agent deletes the least
+  recently used tensor files above it every 10 minutes. llama.cpp never deletes them, so every model ever split
+  onto a server stayed on its disk.
+- The router forwards the request body as received (adding `"cache_prompt": true` when absent) instead of
+  parsing and re-serializing it, which cost milliseconds of event-loop time per long-context request.
+
 - The agent image builds llama.cpp's RDMA transport (RoCE / InfiniBand, via libibverbs). RPC connections
   negotiate it per connection and fall back to TCP wherever either side has no RDMA device; to use it, run
   the agents with `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.
