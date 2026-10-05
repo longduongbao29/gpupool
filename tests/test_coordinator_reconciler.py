@@ -1966,3 +1966,51 @@ async def test_draft_goes_to_the_heads_gpu_even_when_remote_devices_come_first(m
     hs = next(c[3] for c in client.calls if c[0] == "start" and c[3].kind == "server")
     assert hs.devices == ["RPC0", "CUDA0"] and hs.draft_device == "CUDA0"
     await rec.shutdown()
+
+
+async def test_launch_with_mtp_sends_spec_type_and_draft_tokens(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC.model_copy(update={"speculative": "mtp", "draft_n_max": 3, "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert (hs.spec_type, hs.draft_n_max, hs.draft_model_path) == ("mtp", 3, None)
+    assert client.kinds() == ["ensure", "start"]  # no second file
+    await rec.shutdown()
+
+
+async def test_rpc_engine_that_exits_fails_the_launch_with_its_log(mock_health):
+    class DyingRpc(FakeClient):
+        async def get_engine(self, url, engine_id):
+            st = await super().get_engine(url, engine_id)
+            if st is not None and "-rpc-" in engine_id:
+                st = st.model_copy(update={"state": "failed", "log_tail": ["CUDA error: out of memory"]})
+            return st
+
+    client = DyingRpc()
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "out of memory" in r.error
+    assert not any(c[0] == "start" and c[2].endswith("-head") for c in client.calls)
+    assert client.engines == {}  # rolled back
+
+
+async def test_head_that_exits_before_health_fails_the_launch():
+    client = FakeClient()
+    client.head_state = "exited"
+    with respx.mock(assert_all_called=False) as m:
+        m.get(url__regex=HEALTH).mock(side_effect=httpx.ConnectError("not listening"))
+        rec, store, clock = make_reconciler(client=client)
+        beat(store, clock, node("a"))
+        store.put_model(SPEC)
+        await rec.tick()
+        await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "head engine exited" in r.error
+    assert client.engines == {}

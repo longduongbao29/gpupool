@@ -159,3 +159,29 @@ def test_unified_kv_sizes_swa_layers_for_all_sequences_at_once(tmp_path):
     # one stream: pad(min(32768, 1024 x 4 + 512), 256) = 4608 cells instead of 4 x 1536
     assert layer_kv_bytes(m, 0, 32768, parallel=4, ubatch=512, kv_unified=True) == full * 4608 // 32768
     assert layer_kv_bytes(m, 5, 32768, parallel=4, kv_unified=True) == full  # full layers: same
+
+
+def test_swa_period_from_an_integer_pattern_key(tmp_path):
+    m = write(tmp_path, "gemma3", 8, kv=[("attention.sliding_window", "uint32", 512),
+                                        ("attention.sliding_window_pattern", "uint32", 4)])
+    assert m.swa == [i % 4 < 3 for i in range(8)]
+
+
+def test_pure_mamba_has_state_and_no_kv(tmp_path):
+    kv = [("ssm.conv_kernel", "uint32", 4), ("ssm.inner_size", "uint32", 64),
+          ("ssm.state_size", "uint32", 16), ("ssm.group_count", "uint32", 0)]
+    m = write(tmp_path, "mamba2", 3, kv=kv)
+    assert m.kv_k == [0, 0, 0] and m.state_bytes == [4 * (3 * 64 + 16 * 64)] * 3
+
+
+def test_recurrent_layers_without_ssm_keys_keep_the_old_rule(tmp_path):
+    m = write(tmp_path, "lfm2", 4, heads_kv=[0, 2, 0, 2])
+    full = 2 * 16  # max(head_count_kv) x head_dim: an over-estimate, never an OOM
+    assert m.kv_k == [full, full, full, full] and m.state_bytes is None
+
+
+def test_gemma4_shared_kv_layers_cache_nothing(tmp_path):
+    m = write(tmp_path, "gemma4", 6, kv=[("attention.sliding_window", "uint32", 512),
+                                        ("attention.sliding_window_pattern", "array", [True] * 6),
+                                        ("attention.shared_kv_layers", "uint32", 2)])
+    assert [bool(k) for k in m.kv_k] == [True, True, True, True, False, False]

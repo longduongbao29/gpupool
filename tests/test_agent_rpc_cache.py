@@ -30,3 +30,19 @@ def test_cache_dir_follows_llama_cache(tmp_path, monkeypatch):
     assert rpc_cache_dir(tmp_path) == tmp_path / "rpc"
     monkeypatch.setenv("LLAMA_CACHE", "/elsewhere")
     assert str(rpc_cache_dir(tmp_path)) == "/elsewhere/rpc"
+
+
+def test_prune_skips_files_it_cannot_delete(tmp_path, monkeypatch):
+    import pathlib
+    stuck = _file(tmp_path, "a", 400, age=300)
+    _file(tmp_path, "b", 400, age=200)
+    real_unlink = pathlib.Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.name == "a":
+            raise PermissionError("busy")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    assert prune(tmp_path, 500) == ["b"]  # the stuck file stays, the next oldest goes
+    assert stuck.exists()
