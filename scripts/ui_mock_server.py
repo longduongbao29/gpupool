@@ -163,7 +163,7 @@ def kill(node_id: str) -> None:
         return
     s["alive"] = False
     hit = [m for m in MODELS.values() if any(a["node_id"] == node_id for r in m["replicas"] for a in r["placement"]["assignments"])]
-    add_event("error", "node_offline", f"Server {node_id} went offline (no report for 10 s); {len(hit)} model affected", node_id)
+    add_event("error", "node_offline", f"Server {node_id} went offline (no report for 10 s); {len(hit)} model(s) affected: {', '.join(m['spec']['name'] for m in hit)}" if hit else f"Server {node_id} went offline (no report for 10 s); no model affected", node_id)
     for m in hit:
         add_event("warning", "realloc_started", f"Re-allocating {m['spec']['name']} away from {node_id}", node_id, m["spec"]["name"])
         m["state"], m["replicas"], m["_t"], m["_manual"] = "starting", [], time.time(), False

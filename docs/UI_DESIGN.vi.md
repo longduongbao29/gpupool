@@ -304,9 +304,12 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   với `stream: true` và `stream_options.include_usage`. Trang xác thực bằng admin key đang đăng nhập: khi đã
   đặt API key, `/v1` nhận thêm admin key; khi chưa có API key thì `/v1` vốn đã mở. Coordinator cũ hơn
   Playground trả 401, và trang hiện đúng lỗi đó.
+- **Bố cục**: khung chat bên trái, *Settings* bên phải; hai khung cao đúng bằng cửa sổ (trang không có thanh
+  cuộn), chỉ danh sách tin nhắn cuộn. Đầu khung chat hiện tên model và nút *Clear chat*; ô nhập và nút *Send*
+  cao bằng nhau.
 - **Cột cài đặt**: model (các model đang chạy, và model on-demand đang ngủ kèm ghi chú rằng tin nhắn đầu tiên
-  sẽ nạp nó; model đã dừng hoặc lỗi vẫn hiện nhưng không chọn được), system prompt, temperature, max tokens,
-  nút *New chat*. Phần cài đặt (không phải nội dung chat) được lưu trong `localStorage` (`gpupool.playground`).
+  sẽ nạp nó; model đã dừng hoặc lỗi vẫn hiện nhưng không chọn được), system prompt, temperature, max tokens.
+  Phần cài đặt (không phải nội dung chat) được lưu trong `localStorage` (`gpupool.playground`).
 - **Stream**: câu trả lời được đọc từ luồng SSE bằng `fetch` và hiện ra từng ký tự. Phần chữ đã về nhưng chưa
   hiện được mở ra vài ký tự mỗi khung hình, nhiều hơn khi tồn đọng tăng, nên phần hiển thị không bao giờ trễ
   hơn luồng dữ liệu quá vài khung hình; có con trỏ nhấp nháy khi đang chạy. Delta `reasoning_content` (model
@@ -335,3 +338,8 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   trong placement và mô hình tốc độ hiện tại (đọc weight + các hop mạng + logits qua mạng), đúng tổng mà
   router dùng để đặt trọng số cho replica.
 - **Điện thoại**: các nút ở đầu khung (Check placement / Rebalance now) xuống dòng thay vì tràn ngang.
+- **Hàng đều nhau**: các thẻ model trên một hàng cao bằng nhau, hàng nút nằm sát đáy thẻ.
+- **Dòng làm mờ** (GPU của server offline, sự kiện đã đọc) làm mờ các ô qua một class: dòng bảng có hiệu ứng xuất
+  hiện giữ opacity cuối, hiệu ứng này đè lên style inline đặt trên dòng.
+- **Ô chọn có option sinh động** (model, file trong thư viện, draft) đánh dấu option đang gắn là `:selected`, nên ô
+  luôn hiện đúng giá trị nó giữ kể cả khi option render sau khi giá trị được gán.

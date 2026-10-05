@@ -15,7 +15,7 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill) và replica đã trả lời.
   Tốc độ lấy từ `timings` của chính llama-server khi xong (đếm trong trình duyệt khi đang stream), `reasoning_content`
   của model có suy nghĩ vào một khối thu gọn được, *Stop* để huỷ, model on-demand đang ngủ được nạp (cold start) ở tin
-  nhắn đầu tiên. Nút *Chat* trên thẻ model đang chạy mở Playground. Phần cài đặt (không phải nội dung chat) được nhớ
+  nhắn đầu tiên. Khung chat bên trái, cài đặt bên phải, *Clear chat* ở đầu khung chat. Nút *Chat* trên thẻ model đang chạy mở Playground. Phần cài đặt (không phải nội dung chat) được nhớ
   theo trình duyệt.
 
 - `/v1` nhận thêm admin key khi đã đặt API key (Playground đăng nhập bằng khóa này); `/v1` đang mở (không có API key)
@@ -109,6 +109,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   một commit mỗi 2 s trên chính event loop chuyển tiếp suy luận, không còn fsync mỗi lần.
 
 ### Sửa lỗi
+
+- UI: ô chọn có option sinh động (model của Playground, file thư viện, draft model) có thể hiện option đầu tiên thay
+  vì giá trị nó đang giữ; GPU của server offline và sự kiện đã đọc không được làm mờ (hiệu ứng xuất hiện của dòng đè
+  opacity inline); các thẻ model trên một hàng cao khác nhau.
 
 - UI trên điện thoại: các nút ở đầu khung (Placement health) xuống dòng thay vì tràn ra ngoài màn hình.
 

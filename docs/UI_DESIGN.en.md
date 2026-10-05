@@ -306,9 +306,12 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   replica), with `stream: true` and `stream_options.include_usage`. It authenticates with the admin key it
   is signed in with: once API keys are set, `/v1` also accepts the admin key; with no API key `/v1` is open
   anyway. A coordinator older than the Playground answers 401, shown as such.
+- **Layout**: the chat on the left, *Settings* on the right; both panels are exactly as tall as the window
+  (no page scrollbar), and only the message log scrolls. The chat panel's header shows the model and a
+  *Clear chat* button; the message box and *Send* are the same height.
 - **Settings column**: model (running models, and idle on-demand ones with a note that the first message
-  loads them; stopped or failed models are listed but disabled), system prompt, temperature, max tokens,
-  *New chat*. These settings, not the chat, are kept in `localStorage` (`gpupool.playground`).
+  loads them; stopped or failed models are listed but disabled), system prompt, temperature, max tokens.
+  These settings, not the chat, are kept in `localStorage` (`gpupool.playground`).
 - **Streaming**: the reply is read from the SSE stream with `fetch` and appears character by character. Text
   that has arrived but is not shown yet is revealed a few characters per frame, more when the backlog grows,
   so the display never trails the stream by more than a few frames, with a blinking cursor while it runs.
@@ -337,3 +340,8 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   current speed model (reading weights + network hops + logits over the network), the same sum the router
   weighs replicas by.
 - **Phone**: panel header buttons (Check placement / Rebalance now) wrap instead of overflowing.
+- **Even rows**: model cards in a row share its height, with their action row at the bottom.
+- **Dimmed rows** (a GPU of an offline server, an event already read) dim their cells through a class: table rows
+  play an enter animation that keeps its final opacity, which would override an inline style on the row.
+- **Selects with generated options** (model, library file, draft) mark the bound option `:selected`, so the
+  box shows the value it holds even when the options render after the value is set.

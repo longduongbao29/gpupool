@@ -15,7 +15,7 @@ All notable changes to gpupool are documented here. The format follows
   tokens and total latency; each reply also shows prompt (prefill) tokens and speed and the replica that answered.
   Speeds come from llama-server's own `timings` at the end (counted in the browser while streaming), thinking models'
   `reasoning_content` goes to a collapsible block, *Stop* cancels, idle on-demand models cold-start on the first
-  message. A *Chat* button on running model cards opens it. The settings (not the chat) are remembered per browser.
+  message. Chat on the left, settings on the right, *Clear chat* in the chat header. A *Chat* button on running model cards opens it. The settings (not the chat) are remembered per browser.
 
 - `/v1` accepts the admin key too once API keys are set (the Playground signs in with it); an open `/v1` (no API key)
   stays open. Every proxied response carries `x-gpupool-replica`, the replica that answered.
@@ -110,6 +110,10 @@ All notable changes to gpupool are documented here. The format follows
   every 2 s per server on the event loop that also proxies inference, no longer fsync each time.
 
 ### Fixed
+
+- UI: a select whose options are generated (Playground model, library file, draft model) could show the first option
+  instead of the value it held; GPUs of an offline server and events already read were not dimmed (the rows' enter
+  animation overrode the inline opacity); model cards in a row had different heights.
 
 - UI on phones: panel header buttons (Placement health) wrap instead of overflowing the screen.
 

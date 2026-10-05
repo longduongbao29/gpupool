@@ -381,7 +381,11 @@ def test_ui_polish_markup():
     css = (UI / "styles.css").read_text(encoding="utf-8")
     assert "Replicas desired <b" not in html  # the cryptic duplicate of the Replicas tile is gone
     assert 'class="modal-foot split"' in html and ".foot-group" in css
-    assert re.search(r"\.model-grid \{[^}]*align-items: start", css)
+    # cards in a row share its height; their action row (margin-top: auto) lines up at the bottom
+    assert re.search(r"\.model-grid \{[^}]*align-items: stretch", css)
+    assert re.search(r"\.mc-foot \{[^}]*margin-top: auto", css)
+    # dimmed rows use a class on the cells: tbody rows animate opacity, which overrides an inline style
+    assert "opacity:." not in html and "tbody tr.stale > td" in css and "tbody tr.read > td" in css
     assert re.search(r"\.sc-table \{[^}]*table-layout: fixed", css)
 
 
@@ -1021,6 +1025,8 @@ def test_ui_has_playground():
     html = (UI / "index.html").read_text(encoding="utf-8")
     js = (UI / "app.js").read_text(encoding="utf-8")
     assert "view==='playground'" in html and "go('playground')" in html and "pgOpen(m.spec.name)" in html
+    assert "Clear chat" in html and "New chat" not in html
+    assert html.index('class="panel pg-chat"') < html.index('class="panel pg-side"')  # settings on the right
     for needle in ('"/v1/chat/completions"', "x-gpupool-replica", "timings", "reasoning_content",
                    "stream_options", "AbortController", "predicted_per_second"):
         assert needle in js, needle
