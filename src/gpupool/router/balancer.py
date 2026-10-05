@@ -42,6 +42,17 @@ def _anchor(messages: list) -> list:
     return messages[:-1]
 
 
+def _digest(messages: list) -> str:
+    """sha256 over every message, streamed: string contents are hashed as they are, so a long
+    system prompt or pasted document costs one hash pass, not a JSON re-serialisation."""
+    h = hashlib.sha256()
+    for m in messages:
+        role, content = (m.get("role"), m.get("content")) if isinstance(m, dict) else (None, m)
+        h.update(f"\x00{role}\x00".encode())
+        h.update((content if isinstance(content, str) else _canon(content)).encode("utf-8"))
+    return h.hexdigest()
+
+
 def prefix_key(body: dict) -> str:
     """Stable key for requests that share a prompt prefix.
 
@@ -59,7 +70,7 @@ def prefix_key(body: dict) -> str:
             material = _text(content)[:512]
         elif conversation:
             # uncut: with a system prompt longer than any cap every conversation would share a key
-            material = _canon(anchor)
+            return _digest(anchor)
         else:  # single turn: the system prompt, cut so long shared prompts still meet
             material = _canon(anchor)[:4096]
     else:

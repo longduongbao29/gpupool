@@ -20,15 +20,16 @@ All notable changes to gpupool are documented here. The format follows
 
 - `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
   whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a
-  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool. Only an
-  agent that reports the `kv_unified` feature heads such a model.
+  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool. An
+  older agent ignores the flag (each slot then keeps its own share of the context).
 
 - Speculative decoding `mtp`: GGUFs that ship multi-token-prediction (nextn) layers (Qwen3.5, GLM-4.5 and
   newer, DeepSeek V3...) draft with them through llama.cpp's `--spec-type draft-mtp`, with no extra model
   file. Fewer target passes per token means fewer RPC round trips when the model is split. The API refuses
   `mtp` for a model without such layers, the estimate counts the layers (loaded only in this mode) and their
-  cache, and the Recommend panel suggests it ahead of n-gram and draft models. Only an agent that reports the
-  `spec_mtp` feature (llama.cpp b11342+) heads such a model.
+  cache, and the Recommend panel suggests it ahead of n-gram and draft models. A head whose agent does not report
+  the `spec_mtp` feature (an older agent or llama.cpp build) serves the model without speculation and raises an
+  `mtp_unavailable` warning instead of failing the launch.
 
 ### Changed
 

@@ -85,6 +85,12 @@ def bandwidth_seconds(
     return t
 
 
+def current_tps(bw_s: float, hops: int, logits_s: float) -> float:
+    """Decode tok/s of stored speed parts under the current (learned) speed model."""
+    t = bw_s / _SPEED.eta + hops * _SPEED.hop_s + logits_s
+    return 1.0 / t if t > 0 else 0.0
+
+
 def logits_seconds(meta: ModelMeta) -> float:
     """Network time of one token's logits when the output layer is on another server."""
     return (meta.vocab_size or VOCAB_FALLBACK) * 4 / NET_BYTES_PER_S

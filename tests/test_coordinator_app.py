@@ -317,3 +317,16 @@ def test_measured_speed_does_not_move_routing_weights(routing, monkeypatch):
     # that followed it would reshuffle prefixes every poll. Routing keeps the stable estimate.
     monkeypatch.setattr(Autoscaler, "measured_tps", lambda self, rid: 17.0 if rid == "m-1" else None)
     assert [e.weight for e in cap["get_candidates"]("m")] == [42.5]
+
+
+def test_routing_weight_follows_the_learned_speed_model(routing):
+    from gpupool.scheduler.scoring import set_speed_model
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    rec = put_replica(store, "m-1", now=clock())
+    store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
+        update={"est_decode_tps": 99.0, "est_bw_s": 0.01, "est_hops": 1, "est_logits_s": 0.0})}))
+    # 0.01 / 0.5 + 1 x 0.002 = 22 ms -> 45.45 tok/s (the stored 99 is ignored)
+    assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.022)
+    set_speed_model(0.25, 0.010)  # learned: slower GPUs, slower network
+    assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.05)

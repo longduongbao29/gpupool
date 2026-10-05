@@ -27,7 +27,8 @@ from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
 from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
 from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
 from gpupool.scheduler.scoring import (
-    CUDA_BW_FALLBACK_GBPS, decode_bytes, default_cuda_bw, device_bw, est_decode_tps,
+    CUDA_BW_FALLBACK_GBPS, bandwidth_seconds, decode_bytes, default_cuda_bw, device_bw, est_decode_tps,
+    logits_seconds,
 )
 
 
@@ -269,6 +270,7 @@ class _Scored(NamedTuple):
     tps: float
     reasons: list[str]
     cand: _Cand
+    parts: tuple[float, int, float] = (0.0, 0, 0.0)  # _speed_parts
 
 
 def _fits_single(meta, ctx, ct, pool) -> list[_Dev]:
@@ -332,44 +334,18 @@ def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
     return groups
 
 
-def head_features(spec: ModelSpec) -> set[str]:
-    """Agent features (NodeReport.features) the head's llama-server needs for this spec."""
-    need = set()
-    if spec.speculative == "mtp":
-        need.add("spec_mtp")
-    if spec.kv_unified:
-        need.add("kv_unified")
-    return need
-
-
-def _head_node(c: _Cand) -> NodeReport:
-    return next(d.node for d in c.order if d.node.node_id == c.head_id)
-
-
 def _head_first(c: _Cand) -> _Dev:
     """The head's first local GPU, else its first device (the score tie-break)."""
     head = [d for d in c.order if d.node.node_id == c.head_id]
     return next((d for d in head if d.dev.kind == "cuda"), head[0] if head else c.order[0])
 
 
-def _with_capable_heads(meta, spec, cands: list[_Cand], need: set[str]) -> list[_Cand]:
-    """Candidates whose head's agent has `need`. _solve makes the node holding the most layers
-    the head without looking at features, so a device set whose head lacks them is solved again
-    with each capable node of the set as the head (same devices, same tier)."""
-    out: dict[tuple, _Cand] = {}
-    for c in cands:
-        if need <= set(_head_node(c).features):
-            out.setdefault(_cand_key(c), c)
-            continue
-        for node in {d.node.node_id: d.node for d in c.order}.values():
-            if not need <= set(node.features):
-                continue
-            order = _order(list(c.order), node.node_id)
-            counts = _split(meta, spec.ctx_size, spec.kv_cache_type, order)
-            if counts is not None:
-                alt = _Cand(c.tier, order, counts, node.node_id)
-                out.setdefault(_cand_key(alt), alt)
-    return list(out.values())
+def _speed_parts(meta, c: _Cand, cuda_bw: float) -> tuple[float, int, float]:
+    """(bandwidth seconds at eta 1, RPC hops, logits seconds) of a candidate: what its decode
+    speed is made of, so the router can recompute it as the speed model learns."""
+    bw = bandwidth_seconds(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], cuda_bw)
+    logits = logits_seconds(meta) if c.order[-1].node.node_id != c.head_id else 0.0
+    return bw, _n_rpc(c), logits
 
 
 def _n_rpc(c: _Cand) -> int:
@@ -379,6 +355,7 @@ def _n_rpc(c: _Cand) -> int:
 
 def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
     cuda_bw = default_cuda_bw(nodes)
+    parts = {id(c): _speed_parts(meta, c, cuda_bw) for c in cands}
     tps_of = [
         est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw,
                        remote_last=c.order[-1].node.node_id != c.head_id)
@@ -426,7 +403,7 @@ def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupant
             reasons.append(f"split over {n_dev} GPUs")
         if n_rpc:
             reasons.append(f"{n_rpc} network hop{'s' if n_rpc > 1 else ''} (RPC)")
-        out.append(_Scored(score, tps, reasons[:4], c))
+        out.append(_Scored(score, tps, reasons[:4], c, parts[id(c)]))
     # deterministic: score, then smaller tier, then the head and its first device's name
     out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier], s.cand.head_id,
                             _head_first(s.cand).node.node_id, _head_first(s.cand).dev.device_id))
@@ -488,9 +465,6 @@ def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset(),
         cands, used = _draft_candidates(meta, spec, pool, draft_mb)
     else:
         cands, used = _all_candidates(meta, spec.ctx_size, ct, pool)
-    need = head_features(spec)
-    if need:
-        cands = _with_capable_heads(meta, spec, cands, need)
     if extra_cands:
         # extras are scored in the same pass (scores are relative); their devices also
         # count for the waste normaliser so a lone extra does not divide by a tiny pool
@@ -521,6 +495,7 @@ def _finish(meta, spec, s: _Scored, replica_id, port_alloc, draft_mb: int | None
     pl = _build(meta, spec, replica_id, port_alloc, c.tier, c.order, c.counts, c.head_id, draft_mb)
     pl.score = round(s.score, 1)
     pl.est_decode_tps = round(s.tps, 1)
+    pl.est_bw_s, pl.est_hops, pl.est_logits_s = s.parts
     pl.reasons = s.reasons
     return pl
 
@@ -558,10 +533,6 @@ def _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, d
             need += draft_mb
             draft = (f" (incl. {draft_mb} MB for the draft model, which must fit on one local "
                      "CUDA device of the head node)")
-        missing = head_features(spec)
-        if missing and not any(missing <= set(n.features) for n in nodes if n.node_id not in exclude_nodes):
-            raise NoFit(f"model {spec.name!r} needs an agent with {', '.join(sorted(missing))} as its head "
-                        "(speculative 'mtp' / kv_unified need llama.cpp b11342 or newer): upgrade the agents")
         raise NoFit(
             f"model {spec.name!r} needs about {need} MB at ctx {ctx}{draft}, "
             f"pool has {sum(d.usable_mb for d in pool)} MB usable "
@@ -615,6 +586,7 @@ def _rank(meta, spec, nodes, occupants, limit, extra, draft_meta) -> list[Placem
         if pl is not None:
             out.append(pl.model_copy(update={
                 "score": round(s.score, 1), "est_decode_tps": round(s.tps, 1),
+                "est_bw_s": s.parts[0], "est_hops": s.parts[1], "est_logits_s": s.parts[2],
                 "reasons": s.reasons}, deep=True))
         elif n_cand < limit:
             n_cand += 1

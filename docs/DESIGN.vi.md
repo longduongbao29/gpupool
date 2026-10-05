@@ -113,13 +113,13 @@ coordinator khác phiên bản phải vẫn nói chuyện được, nên mọi f
 | Model | Hướng | Field chính |
 | --- | --- | --- |
 | `Device` | agent tới coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (mức trần đã cấu hình; coordinator còn trừ ước lượng của các replica đang chạy của chính nó vì free memory không cho thấy phần đó), `uuid` / `pci_bus_id` (định danh ổn định), `bandwidth_gbps` (độ rộng bus NVML x xung nhớ; dùng để xếp hạng GPU), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (file GGUF trong cache local), `features` (khả năng theo bản build llama.cpp của agent: `rpc_multi_device`, `spec_mtp`, `kv_unified` từ b11342, không có gì với bản build không rõ; coordinator chỉ dùng khả năng mà agent báo, và chỉ chọn làm head cho model `mtp` hoặc `kv_unified` agent có khả năng đó), telemetry CPU/RAM |
+| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (file GGUF trong cache local), `features` (khả năng theo bản build llama.cpp của agent: `rpc_multi_device`, `spec_mtp`, `kv_unified` từ b11342, không có gì với bản build không rõ; coordinator chỉ dùng khả năng mà agent báo: RPC server chỉ được dùng chung khi cả hai agent đều báo `rpc_multi_device`, và model `mtp` trên head không có `spec_mtp` chạy không speculative (cảnh báo `mtp_unavailable`)), telemetry CPU/RAM |
 | `EngineSpec` | coordinator tới agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: thứ tự = `--device`; rpc: các device một `ggml-rpc-server` phục vụ, theo thứ tự `-d`), `rpc_endpoints` (mỗi RPC server một cái), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: host được phép kết nối) |
 | `EngineStatus` | agent tới coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (tối đa 50 dòng) |
 | `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = dừng), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
 | `AutoscalePolicy` | nằm trong `ModelSpec` | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300 |
 | `ModelMeta` | đọc từ header GGUF | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model`; bố cục cache theo layer `kv_k[i]` / `kv_v[i]` (kích thước hàng được cache), `swa[i]` + `n_swa`, `state_bytes[i]` (state hồi quy mỗi sequence); `n_nextn` / `nextn_bytes` (block MTP chỉ nạp khi `draft-mtp`); `active_bytes[i]` (MoE: số byte mỗi token đọc) |
-| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps`, `reasons`, `draft_est_mb`, `mem_factor` (hệ số calibration đã nhân vào các ước lượng) |
+| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps` (và các thành phần `est_bw_s`, `est_hops`, `est_logits_s`), `reasons`, `draft_est_mb`, `mem_factor` (hệ số calibration đã nhân vào các ước lượng) |
 | `Occupant` | reconciler tới scheduler | một engine đang chiếm GPU: node, device, model, `est_mb`, `busy` (0..1) |
 | `ReplicaRecord` | store | placement + trạng thái `pending`, `launching`, `ready`, `draining`, `stopped`, hoặc `failed` |
 | `LibraryItem` | library | một file GGUF mà coordinator có thể phục vụ dưới dạng `coordinator://<name>` |
@@ -361,7 +361,9 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
 - `mtp`: chính các block dự đoán nhiều token (`nextn`) của model nháp token, trong một context llama.cpp thứ
   hai trên cùng các device. Cờ: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp chỉ nạp các block này ở
   chế độ này, nên ước lượng chỉ cộng chúng (ở đúng vị trí layer trong split), KV của chúng và một compute buffer
-  thứ hai trên device cuối khi có `mtp`. API từ chối `mtp` với GGUF không có `nextn_predict_layers`.
+  thứ hai trên device cuối khi có `mtp`. API từ chối `mtp` với GGUF không có `nextn_predict_layers`. Head có agent không báo
+  `spec_mtp` (agent hoặc bản llama.cpp cũ hơn) chạy model không speculative và phát cảnh báo `mtp_unavailable`: một
+  tối ưu không bao giờ làm launch thất bại.
 - Với llama.cpp b11413 trở lên (agent đọc bản build của `llama-server` của nó), `draft` và `mtp` thêm
   `--spec-draft-sampling probabilistic`: bản nháp được lấy mẫu và kiểm bằng rejection (chấp nhận với `min(1, p/q)`)
   thay vì so với argmax của nó, giữ đúng phân phối đầu ra của model đích và chấp nhận nhiều bản nháp hơn khi
@@ -389,8 +391,9 @@ mọi model có nhiều slot.
   thoại ở cùng KV cache của nó (từ lượt đầu khi không có system prompt: một message đơn luôn lấy khoá theo nội dung). Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
   tự đầu của prompt.
 - Weighted rendezvous hashing chọn replica ưu tiên: `-weight / ln(hash(prefix, replica))` lớn nhất thắng, với
-  `weight` = tok/s decode ước lượng của placement (`Placement.est_decode_tps`; replica không có ước lượng được tính
-  bằng trung bình các replica khác). Không dùng tốc độ đo của llama-server: bộ đếm của nó reset sau mỗi lần đọc
+  `weight` = tok/s decode ước lượng của placement, tính lại ở mỗi request từ các thành phần đã lưu (`est_bw_s`,
+  `est_hops`, `est_logits_s`) với mô hình tốc độ hiện hành đã học (placement cũ: `est_decode_tps`; replica không có
+  cả hai được tính bằng trung bình các replica khác). Không dùng tốc độ đo của llama-server: bộ đếm của nó reset sau mỗi lần đọc
   `/metrics`, nên bằng 0 khi rảnh và thấp hơn khi bận, và mỗi lần trọng số đổi là prefix bị chuyển sang replica không
   có chúng trong KV cache; thay vào đó tốc độ đo được cải thiện ước lượng qua mô hình tốc độ (mục 6.3). Replica nhanh gấp đôi nhận gấp đôi phần prefix (ý tưởng của Helix, ASPLOS'25:
   định tuyến theo năng lực trên GPU không đồng nhất), và khi trọng số bằng nhau thì đúng là rendezvous hashing

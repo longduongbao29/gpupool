@@ -20,15 +20,15 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 - `kv_unified` (llama.cpp `-kvu`): các slot song song dùng chung một vùng KV, nên một request dài có thể dùng cả
   context trong khi các slot khác giữ request ngắn, với cùng lượng bộ nhớ. Có trường API, công tắc trong form
-  triển khai và gợi ý Recommend cho model có nhiều slot; ước lượng tính layer sliding-window theo vùng dùng chung. Chỉ
-  agent báo tính năng `kv_unified` mới làm head cho model như vậy.
+  triển khai và gợi ý Recommend cho model có nhiều slot; ước lượng tính layer sliding-window theo vùng dùng chung. Agent
+  cũ hơn bỏ qua cờ này (khi đó mỗi slot vẫn giữ phần context của riêng nó).
 
 - Speculative decoding `mtp`: GGUF có sẵn layer dự đoán nhiều token (nextn) (Qwen3.5, GLM-4.5 trở lên,
   DeepSeek V3...) nháp bằng chính các layer đó qua `--spec-type draft-mtp` của llama.cpp, không cần file model
   phụ. Model đích chạy ít lượt hơn cho mỗi token nên ít vòng RPC hơn khi model bị chia. API từ chối `mtp` với
   model không có các layer này, ước lượng tính cả các layer (chỉ được nạp ở chế độ này) cùng cache của chúng,
-  và bảng Recommend gợi ý nó trước n-gram và model draft. Chỉ agent báo tính năng `spec_mtp` (llama.cpp b11342+) mới
-  làm head cho model như vậy.
+  và bảng Recommend gợi ý nó trước n-gram và model draft. Head có agent không báo tính năng `spec_mtp` (agent hoặc bản llama.cpp cũ hơn)
+  phục vụ model mà không speculative và phát cảnh báo `mtp_unavailable` thay vì làm launch thất bại.
 
 ### Thay đổi
 

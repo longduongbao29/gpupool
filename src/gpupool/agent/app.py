@@ -126,6 +126,11 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             version_cache["v"] = llama_version(cfg.llama_dir)
         return version_cache["v"]
 
+    def features() -> list[str]:
+        if "features" not in version_cache:
+            version_cache["features"] = features_of(version())
+        return version_cache["features"]
+
     def archs() -> list[str] | None:
         if "archs" not in version_cache:
             version_cache["archs"] = llama_cuda_archs(cfg.llama_dir)
@@ -144,7 +149,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
-            cuda_archs=archs(), features=features_of(version()),
+            cuda_archs=archs(), features=features(),
             models=list_models(cfg.cache_dir), ts=time.time())
 
     async def heartbeat_loop() -> None:
@@ -183,7 +188,9 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
     async def lifespan(app: FastAPI):
         psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
-        pm.llama_build = build_number(version())  # engines' flags follow the build (procs.py)
+        # One source for the build: the features reported and the flags engines get must agree.
+        pm.llama_build = build_number(version())
+        pm._build_probed = True
         prune_task = asyncio.create_task(rpc_cache_loop()) if cfg.rpc_cache_gb > 0 else None
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None

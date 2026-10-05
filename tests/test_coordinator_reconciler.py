@@ -1971,7 +1971,9 @@ async def test_draft_goes_to_the_heads_gpu_even_when_remote_devices_come_first(m
 async def test_launch_with_mtp_sends_spec_type_and_draft_tokens(mock_health):
     client = FakeClient()
     rec, store, clock = make_reconciler(client=client)
-    beat(store, clock, node("a"))
+    capable = node("a")
+    capable.features = ["spec_mtp"]
+    beat(store, clock, capable)
     store.put_model(SPEC.model_copy(update={"speculative": "mtp", "draft_n_max": 3, "replicas": 1}))
     await rec.tick()
     await settle(rec)
@@ -2099,4 +2101,18 @@ async def test_speed_samples_only_from_one_plain_stream(kw):
     rec.autoscaler = _Measured({"m-1": 90.0})
     await rec._learn_speed(rec._node_map(), clock())
     assert (speed_model().eta, store.get_state("speed_model")) == (0.5, None)
+    await rec.shutdown()
+
+
+async def test_mtp_on_a_head_without_it_serves_without_speculation(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))  # an older agent: no features
+    store.put_model(SPEC.model_copy(update={"speculative": "mtp", "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert hs.spec_type == "none"
+    assert any(e.kind == "mtp_unavailable" and e.level == "warning" for e in store.list_events())
     await rec.shutdown()

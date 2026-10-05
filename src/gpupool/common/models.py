@@ -259,6 +259,12 @@ class Placement(BaseModel):
     # Why the scheduler chose this placement (absent on placements made before 0.3).
     score: float | None = None
     est_decode_tps: float | None = None  # bandwidth-based estimate, None when unknown
+    # What est_decode_tps is made of, so it can be recomputed with the current speed model
+    # (scheduler/scoring.py): seconds to stream the weights at full bandwidth, RPC servers on the
+    # way, seconds for logits crossing the network. est_bw_s None: unknown (older placement).
+    est_bw_s: float | None = None
+    est_hops: int = 0
+    est_logits_s: float = 0.0
     reasons: list[str] = Field(default_factory=list)
     # Speculative "draft": the draft model's memory, placed on the head's first local CUDA device
     # (its first local CUDA assignment; the head's GPUs come last in the order); included in that

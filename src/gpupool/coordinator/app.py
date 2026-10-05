@@ -41,6 +41,7 @@ from gpupool.coordinator.store import ServerRecord, Store, gpu_key
 from gpupool.router.balancer import Balancer
 from gpupool.router.proxy import RouterMetrics, make_router, prom_label_escape
 from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
+from gpupool.scheduler.scoring import current_tps
 
 log = logging.getLogger("gpupool.coordinator")
 
@@ -353,11 +354,13 @@ def create_app(
         if cur[0] == v:
             return cur
         names = [m.name for m in store.list_models()]
-        ready: dict[str, list[tuple[str, str, int, float]]] = {}
+        ready: dict[str, list[tuple]] = {}  # (replica, head, port, speed parts or None, est tps)
         for r in store.list_replicas(states={"ready"}):
+            p = r.placement
             ready.setdefault(r.model, []).append(
-                (r.replica_id, r.placement.head_node, r.placement.head_port,
-                 r.placement.est_decode_tps or 0.0))
+                (r.replica_id, p.head_node, p.head_port,
+                 (p.est_bw_s, p.est_hops, p.est_logits_s) if p.est_bw_s else None,
+                 p.est_decode_tps or 0.0))
         nodes = {n.report.node_id: n for n in store.list_nodes()}
         snap = cur = (v, names, ready, nodes)
         return cur
@@ -365,11 +368,12 @@ def create_app(
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
         _, _, ready, nodes = _snapshot()
-        # Weight = the placement's estimated speed. Not llama-server's measured one: that is a rate
-        # over the last scrape interval (its bucket resets on every /metrics read), 0 when idle and
-        # lower when busy, and every change of a weight moves prefixes to a replica without them in
-        # its KV cache. The estimate improves anyway as the speed model learns from those samples.
-        rows = list(ready.get(model, ()))
+        # Weight = the placement's estimated speed, recomputed with the current speed model (which
+        # learns from measured speed). Not llama-server's measured rate itself: it covers the last
+        # scrape interval only (its bucket resets on every /metrics read), 0 when idle and lower when
+        # busy, and every change of a weight moves prefixes away from their KV cache.
+        rows = [(rid, head, port, current_tps(*parts) if parts else tps)
+                for rid, head, port, parts, tps in ready.get(model, ())]
         known = [tps for *_, tps in rows if tps > 0]
         default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []

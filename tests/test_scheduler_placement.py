@@ -563,24 +563,10 @@ def test_remote_gpus_stay_adjacent_ahead_of_that_nodes_cpu():
         ("b", "CUDA0"), ("b", "CUDA1"), ("b", "CPU"), ("a", "CUDA0")]
 
 
-def test_kv_unified_needs_a_head_that_supports_it():
-    meta = make_meta(n_layers=8)
-    spec = SPEC.model_copy(update={"kv_unified": True, "parallel": 2})
-    old = node("old", dev("CUDA0", 20000))
-    new = node("new", dev("CUDA0", 20000))
-    new.features = ["kv_unified"]
-    pl = plan(meta, spec, [old, new], "r", Ports())
-    assert pl.head_node == "new"
-    with pytest.raises(NoFit, match="kv_unified"):
-        plan(meta, spec, [old], "r", Ports())
 
-
-def test_a_capable_node_is_tried_as_head_when_the_biggest_is_not():
+def test_placement_keeps_the_parts_of_its_speed_estimate():
+    from gpupool.scheduler.scoring import current_tps
     meta = make_meta(n_layers=40)
-    spec = SPEC.model_copy(update={"kv_unified": True, "parallel": 2})
-    big = node("big", dev("CUDA0", 3600))  # most VRAM: _solve's natural head, but an old agent
-    small = node("small", dev("CUDA0", 2400))
-    small.features = ["kv_unified"]
-    pl = plan(meta, spec, [big, small], "r", Ports())
-    assert pl.head_node == "small" and pl.tier == "multi_node"
-    assert pl.assignments[-1].node_id == "small"  # the head's GPU last, as always
+    pl = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
+    assert pl.est_bw_s > 0 and pl.est_hops == 1 and pl.est_logits_s == 0.0  # head's GPU last
+    assert current_tps(pl.est_bw_s, pl.est_hops, pl.est_logits_s) == pytest.approx(pl.est_decode_tps, abs=0.05)

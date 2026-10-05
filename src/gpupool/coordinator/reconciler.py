@@ -1200,7 +1200,16 @@ class Reconciler:
                 extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
                              draft_n_max=spec.draft_n_max)
             elif spec.speculative == "mtp":
-                extra.update(draft_n_max=spec.draft_n_max)
+                if "spec_mtp" in nodes[p.head_node].report.features:
+                    extra.update(draft_n_max=spec.draft_n_max)
+                else:
+                    # The head's llama.cpp cannot draft with MTP layers (older build or agent): serve
+                    # without speculation rather than fail the launch over an optimisation.
+                    extra["spec_type"] = "none"
+                    self._emit("warning", "mtp_unavailable",
+                               f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
+                               "--spec-type draft-mtp; serving without speculative decoding. Upgrade "
+                               "the agent to enable it.", node_id=p.head_node, model=spec.name)
 
             head_id = f"{rid}-head"
             created.append((head_url, head_id))

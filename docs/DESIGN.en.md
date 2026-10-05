@@ -116,13 +116,13 @@ change; agent and coordinator of different versions must keep talking, so every 
 | Model | Direction | Key fields |
 | --- | --- | --- |
 | `Device` | agent to coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (configured cap; the coordinator also subtracts the estimates of its own live replicas from it, since free memory does not show their share), `uuid` / `pci_bus_id` (stable identity), `bandwidth_gbps` (NVML bus width x memory clock; ranks GPUs), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (GGUF files in the local cache), `features` (capabilities by the agent's llama.cpp build: `rpc_multi_device`, `spec_mtp`, `kv_unified` from b11342, none for an unknown build; the coordinator uses only what an agent reports, and heads an `mtp` or `kv_unified` model only on an agent that has it), CPU/RAM telemetry |
+| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (GGUF files in the local cache), `features` (capabilities by the agent's llama.cpp build: `rpc_multi_device`, `spec_mtp`, `kv_unified` from b11342, none for an unknown build; the coordinator uses only what an agent reports: RPC servers are shared only between agents that both report `rpc_multi_device`, and an `mtp` model on a head without `spec_mtp` runs without speculation (warning `mtp_unavailable`)), CPU/RAM telemetry |
 | `EngineSpec` | coordinator to agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: order = `--device`; rpc: the devices one `ggml-rpc-server` serves, `-d` order), `rpc_endpoints` (one per RPC server), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: hosts allowed to connect) |
 | `EngineStatus` | agent to coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (at most 50 lines) |
 | `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = stopped), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
 | `AutoscalePolicy` | inside `ModelSpec` | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300 |
 | `ModelMeta` | read from the GGUF header | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model`; per-layer cache layout `kv_k[i]` / `kv_v[i]` (cached row sizes), `swa[i]` + `n_swa`, `state_bytes[i]` (recurrent state per sequence); `n_nextn` / `nextn_bytes` (MTP blocks loaded only for `draft-mtp`); `active_bytes[i]` (MoE: bytes a token reads) |
-| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps`, `reasons`, `draft_est_mb`, `mem_factor` (calibration factor the estimates were multiplied by) |
+| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps` (and its parts `est_bw_s`, `est_hops`, `est_logits_s`), `reasons`, `draft_est_mb`, `mem_factor` (calibration factor the estimates were multiplied by) |
 | `Occupant` | reconciler to scheduler | an engine already on a GPU: node, device, model, `est_mb`, `busy` (0..1) |
 | `ReplicaRecord` | store | placement + state `pending`, `launching`, `ready`, `draining`, `stopped`, or `failed` |
 | `LibraryItem` | library | a GGUF the coordinator can serve as `coordinator://<name>` |
@@ -377,7 +377,8 @@ Fewer target passes mean fewer RPC round trips, which matters most for multi-nod
   context on the same devices. Flags: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp loads those
   blocks only in this mode, so the estimate adds them (at their layer position in the split), their KV and
   a second compute buffer on the last device only with `mtp`. The API refuses `mtp` for a GGUF without
-  `nextn_predict_layers`.
+  `nextn_predict_layers`. A head whose agent does not report `spec_mtp` (older agent or llama.cpp build) launches
+  the model without speculation and raises a `mtp_unavailable` warning: an optimisation never fails a launch.
 - With llama.cpp b11413 or newer (the agent reads the build of its `llama-server`), `draft` and `mtp` add
   `--spec-draft-sampling probabilistic`: the draft is sampled and verified by rejection (accept with
   `min(1, p/q)`) instead of matching its argmax, which keeps the target's output distribution exactly and accepts
@@ -406,8 +407,9 @@ layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_s
   message keys on its content either way). With a single message, its first 512 characters; for `/v1/completions`, the
   first 512 characters of the prompt.
 - Weighted rendezvous hashing picks the preferred replica: the highest `-weight / ln(hash(prefix, replica))`
-  wins, with `weight` = the placement's estimated decode tok/s (`Placement.est_decode_tps`; a replica without
-  one counts as the average of the others). Not llama-server's measured rate: its bucket resets on every
+  wins, with `weight` = the placement's estimated decode tok/s, recomputed on every request from its stored
+  parts (`est_bw_s`, `est_hops`, `est_logits_s`) with the current, learned speed model (older placements:
+  `est_decode_tps`; a replica with neither counts as the average of the others). Not llama-server's measured rate: its bucket resets on every
   `/metrics` read, so it is 0 when idle and lower when busy, and every change of a weight moves prefixes to a
   replica without them in its KV cache; measured speed improves the estimate through the speed model
   (section 6.3) instead. A replica twice as fast gets twice the share of prefixes
