@@ -55,7 +55,8 @@ def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
     ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn,
                                                  "parallel": spec.parallel,
-                                                 "mtp": spec.speculative == "mtp"})
+                                                 "mtp": spec.speculative == "mtp",
+                                                 "kv_unified": spec.kv_unified})
     try:
         yield
     finally:

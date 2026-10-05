@@ -195,7 +195,15 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                                  + (f" Costs about {_mb(extra)} more KV memory." if extra and extra > 0 else ""),
                                  {"parallel": n, "ctx_size": spec.ctx_size * n}, p))
                 break
-    elif per_slot < MIN_CTX_PER_SLOT:
+    if spec.parallel > 1 and not spec.kv_unified:
+        # one shared KV pool: a long request may take the whole context while others are short
+        p = await try_rank(spec.model_copy(update={"kv_unified": True}))
+        if p is not None and _tier(p) <= _tier(best):
+            tips.append(_tip("kv_unified", "fix", "Share the context between the slots",
+                             f"Today each of the {spec.parallel} slots owns {per_slot} tokens. A shared KV "
+                             f"pool lets any one request use up to {spec.ctx_size} tokens while the others "
+                             "are short, at the same memory.", {"kv_unified": True}, p))
+    if spec.parallel > 1 and per_slot < MIN_CTX_PER_SLOT and not spec.kv_unified:
         want = MIN_CTX_PER_SLOT * spec.parallel
         p = await try_rank(spec.model_copy(update={"ctx_size": want}))
         if p is not None and _tier(p) <= _tier(best):

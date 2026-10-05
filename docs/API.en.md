@@ -126,6 +126,7 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | llama.cpp `-fa`. Auto turns it on where the GPU supports it. A quantized `kv_cache_type` needs it (`off` with q8_0/q4_0 is a 422) |
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): prompt tokens per pass. Bigger reads long prompts faster on GPUs with tensor cores (cc 7.0+); the compute buffer, charged on every device, grows with it |
 | `batch` | int 32..16384, 2048 | logical batch (`-b`); raised to `ubatch` when smaller |
+| `kv_unified` | bool, false | `-kvu`: the `parallel` slots share one KV pool, so one request may use up to `ctx_size` tokens while the others are short (false: each slot owns `ctx_size / parallel`); same memory |
 
 Validation applied by `PUT /api/models/{name}` and by `/api/simulate` (the same checks):
 
@@ -389,7 +390,7 @@ Response:
   ranker against the live pool (a tip never needs more GPUs than the request as sent). `apply` holds the
   `PUT /api/models` fields to change; `kind` is `speed`, `throughput` or `fix`; `tier` / `est_*` describe the
   best placement with the tip applied. Ids: `kv_cache`, `smaller_quant` (a smaller quantization of the same
-  model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `ctx_per_slot`,
+  model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `kv_unified` (share the context between slots), `ctx_per_slot`,
   `mtp` (the GGUF has multi-token-prediction layers), `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
   tensor cores (compute capability below 7.0) `flash_attn_old_gpu` / `ubatch_old_gpu`. The GPU generation
   comes from each device's `compute_cap`; `ubatch` is only suggested when every GPU of the placement has

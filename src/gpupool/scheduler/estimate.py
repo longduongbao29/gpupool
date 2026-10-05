@@ -56,10 +56,12 @@ def _main_layers(meta: ModelMeta) -> int:
 
 
 def layer_kv_bytes(meta: ModelMeta, i: int, ctx_size: int, cache_type: str = "f16",
-                   parallel: int = 1, ubatch: int = DEFAULT_UBATCH, mtp: bool = False) -> int:
+                   parallel: int = 1, ubatch: int = DEFAULT_UBATCH, mtp: bool = False,
+                   kv_unified: bool = False) -> int:
     """Cache bytes of layer i: KV rows (sliding-window layers hold only their window) plus the
     recurrent state of every sequence. Mirrors llama.cpp b11342: llama-kv-cache-iswa.cpp sizes a
-    SWA layer at pad(min(n_ctx_seq, n_swa + n_ubatch), 256) cells per sequence stream."""
+    SWA layer at pad(min(n_ctx_seq, n_swa x (unified ? n_seq : 1) + n_ubatch), 256) cells per
+    stream, with one stream per sequence (n_ctx_seq = n_ctx / n_seq) or one unified stream."""
     if i >= _main_layers(meta) and not mtp:
         return 0  # MTP blocks: no cache in the target context
     if meta.kv_k is None or meta.kv_v is None:
@@ -67,8 +69,11 @@ def layer_kv_bytes(meta: ModelMeta, i: int, ctx_size: int, cache_type: str = "f1
     cells = ctx_size
     if meta.swa and meta.swa[i] and meta.n_swa > 0:
         n_seq = max(1, parallel)
-        per_seq = _pad(math.ceil(ctx_size / n_seq))
-        cells = min(cells, n_seq * _pad(min(per_seq, meta.n_swa + ubatch)))
+        if kv_unified:
+            cells = min(cells, _pad(min(_pad(ctx_size), meta.n_swa * n_seq + ubatch)))
+        else:
+            per_seq = _pad(math.ceil(ctx_size / n_seq))
+            cells = min(cells, n_seq * _pad(min(per_seq, meta.n_swa + ubatch)))
     total = cells * (meta.kv_k[i] + meta.kv_v[i]) * _KV_BYTES_PER_ELEM[cache_type]
     if meta.state_bytes:
         total += meta.state_bytes[i] * max(1, parallel)
@@ -85,16 +90,18 @@ def layer_weight_bytes(meta: ModelMeta, i: int, mtp: bool = False) -> int:
 
 
 def kv_total_bytes(meta: ModelMeta, ctx_size: int, cache_type: str = "f16", parallel: int = 1,
-                   ubatch: int = DEFAULT_UBATCH, mtp: bool = False) -> int:
-    return sum(layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp)
+                   ubatch: int = DEFAULT_UBATCH, mtp: bool = False, kv_unified: bool = False) -> int:
+    return sum(layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
                for i in range(meta.n_layers))
 
 
 def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_last: bool,
                    cache_type: str = "f16", ubatch: int = DEFAULT_UBATCH,
-                   flash_attn: str = "auto", parallel: int = 1, mtp: bool = False) -> int:
+                   flash_attn: str = "auto", parallel: int = 1, mtp: bool = False,
+                   kv_unified: bool = False) -> int:
     total = sum(layer_weight_bytes(meta, i, mtp)
-                + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp) for i in layers)
+                + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
+                for i in layers)
     extra_mb = 0
     if is_last:
         total += meta.output_bytes
@@ -106,14 +113,15 @@ def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_
 
 def total_need_mb(meta: ModelMeta, ctx_size: int, cache_type: str = "f16",
                   ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto", parallel: int = 1,
-                  mtp: bool = False) -> int:
+                  mtp: bool = False, kv_unified: bool = False) -> int:
     return device_need_mb(meta, range(meta.n_layers), ctx_size, "cuda", True, cache_type,
-                          ubatch, flash_attn, parallel, mtp)
+                          ubatch, flash_attn, parallel, mtp, kv_unified)
 
 
 def draft_need_mb(draft_meta: ModelMeta, ctx_size: int, cache_type: str = "f16",
-                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto", parallel: int = 1) -> int:
+                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto", parallel: int = 1,
+                  kv_unified: bool = False) -> int:
     """A speculative draft model runs whole on one CUDA device (the head's), with its own
     KV at the same ctx and its own compute buffer / runtime context."""
     return device_need_mb(draft_meta, range(draft_meta.n_layers), ctx_size, "cuda", True, cache_type,
-                          ubatch, flash_attn, parallel)
+                          ubatch, flash_attn, parallel, kv_unified=kv_unified)

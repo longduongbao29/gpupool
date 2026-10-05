@@ -354,7 +354,7 @@ def _perf_fields(body: dict, file: str) -> dict:
     if kv != "f16" and fa == "off":
         raise HTTPException(422, f"KV cache {kv} needs flash attention (auto or on)")
     return {"kv_cache_type": kv, "speculative": spec, "draft": draft, "draft_n_max": n,
-            "flash_attn": fa, "ubatch": ub, "batch": b}
+            "flash_attn": fa, "ubatch": ub, "batch": b, "kv_unified": bool(body.get("kv_unified", False))}
 
 
 def _mock_tips(body: dict, perf: dict, ctx: int, parallel: int, need: int, biggest_gpu: int) -> list[dict]:

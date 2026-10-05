@@ -10,6 +10,10 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
+  whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a
+  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool.
+
 - Speculative decoding `mtp`: GGUFs that ship multi-token-prediction (nextn) layers (Qwen3.5, GLM-4.5 and
   newer, DeepSeek V3...) draft with them through llama.cpp's `--spec-type draft-mtp`, with no extra model
   file. Fewer target passes per token means fewer RPC round trips when the model is split. The API refuses

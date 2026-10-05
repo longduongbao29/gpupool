@@ -126,6 +126,7 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | `-fa` của llama.cpp. Auto bật ở nơi GPU hỗ trợ. `kv_cache_type` lượng tử hóa cần nó (`off` cùng q8_0/q4_0 trả 422) |
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): số token prompt mỗi lượt. Lớn hơn thì đọc prompt dài nhanh hơn trên GPU có tensor core (cc 7.0+); compute buffer, tính trên mọi thiết bị, tăng theo |
 | `batch` | int 32..16384, 2048 | batch logic (`-b`); được nâng lên bằng `ubatch` khi nhỏ hơn |
+| `kv_unified` | bool, false | `-kvu`: các slot `parallel` dùng chung một vùng KV, nên một request có thể dùng tới `ctx_size` token khi các request khác ngắn (false: mỗi slot giữ `ctx_size / parallel`); cùng lượng bộ nhớ |
 
 Kiểm tra do `PUT /api/models/{name}` và `/api/simulate` áp dụng (giống nhau):
 
@@ -388,7 +389,7 @@ Phản hồi:
   ranker trên pool thật (một gợi ý không bao giờ cần nhiều GPU hơn yêu cầu gốc). `apply` chứa các trường của
   `PUT /api/models` cần đổi; `kind` là `speed`, `throughput` hoặc `fix`; `tier` / `est_*` mô tả phương án tốt
   nhất khi áp dụng gợi ý. Các id: `kv_cache`, `smaller_quant` (bản lượng tử hóa nhỏ hơn của cùng model trong thư
-  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `ctx_per_slot`, `mtp` (GGUF có layer dự đoán nhiều
+  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `kv_unified` (dùng chung context giữa các slot), `ctx_per_slot`, `mtp` (GGUF có layer dự đoán nhiều
   token), `draft` (model nhỏ tương thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
   dưới 7.0) là `flash_attn_old_gpu` / `ubatch_old_gpu`. Thế hệ GPU lấy từ `compute_cap` của từng thiết bị;
   `ubatch` chỉ được gợi ý khi mọi GPU của phương án đều có tensor core. Rỗng khi không có gì giúp được.

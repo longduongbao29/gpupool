@@ -1133,7 +1133,8 @@ class Reconciler:
             head_url = agent(p.head_node)
 
             extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
-                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch}
+                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch,
+                           "kv_unified": spec.kv_unified}
             if spec.speculative == "draft":
                 if not spec.draft:
                     raise LaunchError("speculative 'draft' without a draft model")

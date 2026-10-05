@@ -255,7 +255,7 @@ async def test_put_model_create_update_validation(env):
                         "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
                         "preemptible": True, "kv_cache_type": "f16", "speculative": "none",
                         "draft": None, "draft_n_max": 4, "flash_attn": "auto", "batch": 2048,
-                        "ubatch": 512}
+                        "ubatch": 512, "kv_unified": False}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})

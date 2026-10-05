@@ -151,3 +151,11 @@ def test_mtp_placement_reserves_the_nextn_blocks(tmp_path):
     off = plan(m, ModelSpec(name="q", source="x", ctx_size=4096), nodes, "r", lambda n: 9000)
     on = plan(m, ModelSpec(name="q", source="x", ctx_size=4096, speculative="mtp"), nodes, "r", lambda n: 9000)
     assert on.est_total_mb > off.est_total_mb
+
+
+def test_unified_kv_sizes_swa_layers_for_all_sequences_at_once(tmp_path):
+    m = write(tmp_path, "gemma3", 6, kv=[("attention.sliding_window", "uint32", 1024)])
+    full = layer_kv_bytes(m, 5, 32768)
+    # one stream: pad(min(32768, 1024 x 4 + 512), 256) = 4608 cells instead of 4 x 1536
+    assert layer_kv_bytes(m, 0, 32768, parallel=4, ubatch=512, kv_unified=True) == full * 4608 // 32768
+    assert layer_kv_bytes(m, 5, 32768, parallel=4, kv_unified=True) == full  # full layers: same

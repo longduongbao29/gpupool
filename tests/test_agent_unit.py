@@ -98,6 +98,11 @@ def test_build_ngram():
     assert cmd == _BASE + ["--spec-type", "ngram-mod"]
 
 
+def test_build_kv_unified():
+    assert build_command(_srv(kv_unified=True), BINS, "h", "/m.gguf")[-1] == "-kvu"
+    assert "-kvu" not in build_command(_srv(), BINS, "h", "/m.gguf")
+
+
 def test_build_mtp():
     cmd = build_command(_srv(spec_type="mtp", draft_n_max=3), BINS, "h", "/m.gguf")
     assert cmd == _BASE + ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3"]

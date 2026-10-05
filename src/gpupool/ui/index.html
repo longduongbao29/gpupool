@@ -900,8 +900,10 @@
         <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" @input="form.rec = null" style="width:100%"></label>
         <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
       </div>
+      <div class="opt-row" x-show="(parseInt(form.parallel, 10) || 1) > 1" style="margin-bottom:var(--s-2)"><label class="switch"><input type="checkbox" x-model="form.kvu" @change="form.rec = null; form.sim = null" aria-label="Share the context between slots"><span></span></label>
+        <div class="txt"><div>Share the context between slots</div><div class="help">Any one request may use the whole context while the others are short; same memory (llama.cpp <code>-kvu</code>).</div></div></div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)" :class="{warn: ctxPerSlot() < 2048}">
-        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context (context &divide; slots).
+        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context<span x-text="form.kvu && (parseInt(form.parallel, 10) || 1) > 1 ? ' at most, shared with the other slots' : ' (context ÷ slots)'"></span>.
         More slots serve more users at once (continuous batching): total tok/s grows, one request alone slows slightly.</div>
       <div class="row">
         <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" @input="form.sim = null" style="width:100%"></label>

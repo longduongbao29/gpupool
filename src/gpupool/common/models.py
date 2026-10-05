@@ -99,6 +99,7 @@ class EngineSpec(BaseModel):
     draft_n_max: int = 4
     # Optional since 0.5; an older agent ignores them (llama.cpp defaults: auto, 2048, 512).
     flash_attn: FlashAttn = "auto"
+    kv_unified: bool = False  # -kvu (optional since 0.6)
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
     # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
@@ -172,6 +173,9 @@ class ModelSpec(BaseModel):
     # Measured on a GTX 1650 (Qwen2.5-3B + 0.5B draft): 4 drafted tokens +5 %, 8 slower than none.
     draft_n_max: int = Field(default=4, ge=1, le=16)
     flash_attn: FlashAttn = "auto"
+    # llama.cpp -kvu: the slots share one KV pool, so one request may use the whole ctx_size while
+    # the others are short (False: each slot owns ctx_size / parallel). Same memory either way.
+    kv_unified: bool = False
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)  # -b, never below ubatch at launch
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)  # -ub; sizes the compute buffer
 

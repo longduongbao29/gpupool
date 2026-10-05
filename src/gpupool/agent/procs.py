@@ -105,6 +105,8 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
     # Only non-defaults, so a default spec launches exactly as before these options existed.
     if spec.flash_attn != "auto":
         cmd += ["-fa", spec.flash_attn]
+    if spec.kv_unified:
+        cmd += ["-kvu"]
     batch = max(spec.batch, spec.ubatch)  # llama.cpp caps ubatch at batch; keep what was asked
     if batch != DEFAULT_BATCH:
         cmd += ["-b", str(batch)]

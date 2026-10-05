@@ -177,3 +177,12 @@ async def test_mtp_capable_model_gets_the_mtp_tip_instead_of_ngram():
     assert "mtp" in ids(tips) and "ngram" not in ids(tips)
     t = next(t for t in tips if t["id"] == "mtp")
     assert t["apply"] == {"speculative": "mtp", "draft_n_max": 3}
+
+
+async def test_several_slots_get_the_shared_context_tip():
+    spec = SPEC.model_copy(update={"parallel": 4, "ctx_size": 4096})
+    tips = await run(spec, meta(), pl(), lambda s: pl())
+    t = next(t for t in tips if t["id"] == "kv_unified")
+    assert t["apply"] == {"kv_unified": True}
+    tips = await run(spec.model_copy(update={"kv_unified": True}), meta(), pl(), lambda s: pl())
+    assert not {"kv_unified", "ctx_per_slot"} & set(ids(tips))  # each request may use all 4096
