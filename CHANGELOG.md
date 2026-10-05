@@ -8,6 +8,30 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Launch settings for speed, in the model form and `PUT /api/models`: flash attention (`flash_attn`
+  auto/on/off, llama.cpp `-fa`), micro-batch (`ubatch`, `-ub`) and batch (`batch`, `-b`). They are typed,
+  validated fields sent to the agent, not free-form llama-server flags (the agent still refuses `extra_args`).
+  The memory estimate charges the compute buffer for the chosen micro-batch (and the attention scores when
+  flash attention is off), so a bigger micro-batch never overcommits a GPU. A quantized KV cache with flash
+  attention off is rejected (422): llama.cpp refuses a quantized V cache without it.
+- Suggested settings: "Recommend placement & settings" in the model form (`tips` in `POST /api/recommend`)
+  lists changes that make the model faster or serve more users, each checked against the live pool and never
+  needing more GPUs than today, with an Apply button: a quantized KV cache, a smaller quantization of the same
+  model or a smaller context to fit on one GPU instead of several (layers on several GPUs run one after
+  another, so a split never decodes faster); parallel slots that keep the context per request; a compatible
+  draft model from the library or n-gram speculative decoding; a bigger micro-batch for long prompts.
+- GPU generation awareness: the agent reports each GPU's compute capability (`compute_cap`, shown as e.g.
+  "Ampere · cc 8.6" on the GPUs page) and the CUDA architectures its llama.cpp was built for
+  (`cuda_archs`, from `cuda-archs.txt` written by the agent image, or `GPUPOOL_CUDA_ARCHS`). Suggestions
+  follow it: a bigger micro-batch is only suggested where every GPU has tensor cores (Volta, cc 7.0+), forcing
+  flash attention on or a big micro-batch on Pascal is flagged, and drafts propose fewer tokens there.
+- A GPU the agent's llama.cpp has no kernels for (every built architecture newer than the card) is reported
+  with `kernels_ok: false` and usable memory 0, so nothing is placed on it, instead of every launch failing
+  with "no kernel image is available". The GPUs page marks it "No kernels in this build".
+- The model form shows the context each request gets (context ÷ parallel slots).
+
 ## [0.4.2] - 2026-10-05
 
 ### Fixed
