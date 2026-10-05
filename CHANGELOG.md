@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-05
+
 ### Changed
 
 - Layer split across GPUs follows bandwidth, not only free memory. After a split that fits, layers move
@@ -178,7 +180,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
