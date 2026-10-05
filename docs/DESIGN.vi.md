@@ -374,8 +374,9 @@ mọi model có nhiều slot.
   cùng KV cache của nó. Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
   tự đầu của prompt.
 - Weighted rendezvous hashing chọn replica ưu tiên: `-weight / ln(hash(prefix, replica))` lớn nhất thắng, với
-  `weight` = tốc độ decode ước lượng của replica (`Placement.est_decode_tps`; replica không có ước lượng được tính
-  bằng trung bình các replica khác). Replica nhanh gấp đôi nhận gấp đôi phần prefix (ý tưởng của Helix, ASPLOS'25:
+  `weight` = tốc độ sinh token của replica: số đo của llama-server (`llamacpp:predicted_tokens_seconds` trong lần
+  scrape còn mới của autoscaler) khi nó đã sinh token, nếu không thì ước lượng của placement
+  (`Placement.est_decode_tps`); replica không có cả hai được tính bằng trung bình các replica khác. Replica nhanh gấp đôi nhận gấp đôi phần prefix (ý tưởng của Helix, ASPLOS'25:
   định tuyến theo năng lực trên GPU không đồng nhất), và khi trọng số bằng nhau thì đúng là rendezvous hashing
   thường. Nếu tải của replica ưu tiên vượt replica rảnh nhất hơn 2 thì dùng replica rảnh nhất; tải là số request
   đang chờ x (trọng số nhanh nhất / trọng số của nó), nên replica chậm đầy sớm hơn.

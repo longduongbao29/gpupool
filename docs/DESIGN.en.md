@@ -389,8 +389,9 @@ layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_s
   stays with its KV cache. With a single message, its first 512 characters; for `/v1/completions`, the
   first 512 characters of the prompt.
 - Weighted rendezvous hashing picks the preferred replica: the highest `-weight / ln(hash(prefix, replica))`
-  wins, with `weight` = the replica's estimated decode tok/s (`Placement.est_decode_tps`; a replica without
-  one counts as the average of the others). A replica twice as fast gets twice the share of prefixes
+  wins, with `weight` = the replica's generation speed: measured by llama-server
+  (`llamacpp:predicted_tokens_seconds` from the autoscaler's fresh scrape) once it has generated, else the
+  placement's estimate (`Placement.est_decode_tps`); a replica with neither counts as the average of the others. A replica twice as fast gets twice the share of prefixes
   (the idea of Helix, ASPLOS'25: route by capacity on heterogeneous GPUs), and with equal weights it is plain
   rendezvous hashing. If the preferred replica's load exceeds the least-loaded one's by more than 2, the
   least-loaded one is used; load is outstanding requests x (fastest weight / own weight), so a slow

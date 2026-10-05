@@ -23,7 +23,7 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 ### Thay đổi
 
 - Router chia request giữa các replica của một model theo tốc độ của chúng: weighted rendezvous hashing với trọng
-  số là tok/s decode ước lượng của placement, và phép kiểm tra quá tải tính số request theo năng lực. Replica bị chia
+  số là tốc độ sinh token của từng replica (số đo của llama-server khi đã sinh token, nếu không thì ước lượng), và phép kiểm tra quá tải tính số request theo năng lực. Replica bị chia
   qua mạng chạy 10 tok/s không còn nhận phần bằng replica một GPU chạy 50 tok/s. Replica cùng tốc độ định tuyến y
   như trước.
 

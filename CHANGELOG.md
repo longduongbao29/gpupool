@@ -22,8 +22,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
-- The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with the
-  placement's estimated decode tok/s as weight, and the overload check counts requests relative to capacity.
+- The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with each
+  replica's generation speed as weight (measured by llama-server once it has generated, else estimated), and the overload check counts requests relative to capacity.
   A replica split over the network at 10 tok/s no longer gets the same share as a single-GPU one at 50 tok/s.
   Replicas of equal speed route exactly as before.
 

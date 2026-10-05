@@ -365,7 +365,9 @@ def create_app(
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
         _, _, ready, nodes = _snapshot()
-        rows = ready.get(model, ())
+        # Weight = generation speed: measured by llama-server when it has generated, else estimated.
+        rows = [(rid, head, port, autoscaler.measured_tps(rid) or tps)
+                for rid, head, port, tps in ready.get(model, ())]
         known = [tps for *_, tps in rows if tps > 0]
         default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []

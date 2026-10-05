@@ -187,6 +187,16 @@ class Autoscaler:
         out = self.outstanding(rec.replica_id)
         return min(1.0, out / parallel), out > parallel
 
+    def measured_tps(self, replica_id: str) -> float | None:
+        """The replica's measured generation speed (llama-server's predicted_tokens_seconds: tokens per
+        second of generation, averaged since start), from a fresh scrape; None before it has generated
+        anything or when the scrape is stale."""
+        sc = self._scrapes.get(replica_id)
+        if (sc is None or not sc.ok or not sc.tps or sc.tps <= 0
+                or self.clock() - sc.ts > self.FRESH_POLLS * self.cfg.poll_s):
+            return None
+        return sc.tps
+
     def _model_busy(self, spec: ModelSpec, ready: list[ReplicaRecord], now: float) -> tuple[float | None, bool]:
         if not ready:
             return None, False
