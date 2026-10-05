@@ -89,13 +89,26 @@ async def stop_head_first(pairs, stop) -> None:
             await asyncio.gather(*(stop(a, b) for a, b in group))
 
 
+def rpc_servers(p: Placement) -> list[tuple[str, list[DeviceAssignment]]]:
+    """(endpoint, its assignments in device order) per RPC server of a placement, in --rpc order.
+    Several devices share an endpoint when one server process serves them all."""
+    out: dict[str, list[DeviceAssignment]] = {}
+    for a in p.assignments:
+        if a.rpc_endpoint:
+            out.setdefault(a.rpc_endpoint, []).append(a)
+    return list(out.items())
+
+
+def rpc_engine_id(replica_id: str, devices: list[DeviceAssignment]) -> str:
+    return f"{replica_id}-rpc-{devices[0].device_id}"
+
+
 def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
     """(node_id, engine_id) for every engine this replica owns."""
     p = rec.placement
     out = [(p.head_node, f"{rec.replica_id}-head")]
-    for a in p.assignments:
-        if a.rpc_endpoint:
-            out.append((a.node_id, f"{rec.replica_id}-rpc-{a.device_id}"))
+    for _, devs in rpc_servers(p):
+        out.append((devs[0].node_id, rpc_engine_id(rec.replica_id, devs)))
     return out
 
 
@@ -1151,7 +1164,7 @@ class Reconciler:
             await self.client.start_engine(head_url, EngineSpec(
                 engine_id=head_id, kind="server", port=p.head_port,
                 devices=[a.llama_device for a in p.assignments],
-                rpc_endpoints=[a.rpc_endpoint for a in p.assignments if a.rpc_endpoint],
+                rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
                 tensor_split=p.tensor_split, model=spec.name, model_path=path,
                 ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
             await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health")
@@ -1206,14 +1219,12 @@ class Reconciler:
         """Start every RPC engine of `p`, then wait until all of them listen. Each one is added to
         `created` before its start call, so a failure anywhere rolls back what may already run."""
         rpc_ids: list[tuple[str, str]] = []
-        for a in p.assignments:
-            if not a.rpc_endpoint:
-                continue
-            eid = f"{rid}-rpc-{a.device_id}"
-            url = agent(a.node_id)
+        for endpoint, devs in rpc_servers(p):
+            eid = rpc_engine_id(rid, devs)
+            url = agent(devs[0].node_id)
             created.append((url, eid))
             await self.client.start_engine(url, EngineSpec(
-                engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id],
+                engine_id=eid, kind="rpc", port=_port_of(endpoint), devices=[a.device_id for a in devs],
                 allowed_peers=[head_host]))  # only the head connects to an RPC engine
             rpc_ids.append((url, eid))
         for url, eid in rpc_ids:

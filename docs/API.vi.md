@@ -572,8 +572,8 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | POST | `/models/ensure` | đảm bảo file model có trong cache cục bộ |
 
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` hoặc
-`"<replica_id>-rpc-<device_id>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: đúng một thiết bị
-cục bộ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
+`"<replica_id>-rpc-<device_id đầu tiên>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: một hoặc nhiều
+thiết bị cục bộ khác nhau, do một process phục vụ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
 `rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1),
 `extra_args`, `cache_type` (`f16`), `spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max`
 (4), `flash_attn` (`auto`, `-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với

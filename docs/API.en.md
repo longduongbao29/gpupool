@@ -573,8 +573,8 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | DELETE | `/engines/{engine_id}` | stop an engine, returns its `EngineStatus` |
 | POST | `/models/ensure` | make sure a model file is in the local cache |
 
-**`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<device_id>"`),
-`kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: exactly one local device; server: ordered list such as
+**`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<first device_id>"`),
+`kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: one or more distinct local devices, served by one process; server: ordered list such as
 `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF on the head), `rpc_endpoints` (`"host:port"`, order of
 `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
 `spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),

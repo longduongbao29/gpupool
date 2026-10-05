@@ -79,7 +79,7 @@ class Device(BaseModel):
 class EngineSpec(BaseModel):
     """Coordinator -> agent: start one llama.cpp process."""
 
-    engine_id: str  # "<replica_id>-head" | "<replica_id>-rpc-<device_id>"
+    engine_id: str  # "<replica_id>-head" | "<replica_id>-rpc-<first device_id it serves>"
     kind: EngineKind
     port: int
     # rpc: exactly one local device. server: full ordered list, e.g. ["CUDA0", "RPC0", "RPC1"].
@@ -130,6 +130,10 @@ class NodeReport(BaseModel):
     cuda_archs: list[str] | None = None
     models: list[str]  # GGUF file names present in the local cache
     ts: float
+    # What this agent can do beyond the 0.5 baseline; the coordinator only uses a capability the
+    # agent reports, so a coordinator can be upgraded before its agents.
+    #   "rpc_multi_device": one ggml-rpc-server process serves several devices (-d CUDA0,CUDA1).
+    features: list[str] = Field(default_factory=list)
     # Optional host telemetry for the UI.
     cpu_pct: float | None = None
     ram_used_mb: int | None = None

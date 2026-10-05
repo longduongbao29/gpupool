@@ -300,8 +300,31 @@ def _is_local(d: _Dev, head_id: str) -> bool:
     return d.node.node_id == head_id and d.dev.kind == "cuda"
 
 
+RPC_MULTI_DEVICE = "rpc_multi_device"  # NodeReport.features
+
+
+def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
+    """Indices into `order` per ggml-rpc-server: one server for each run of consecutive remote
+    devices of one node (and kind), when that node's agent can serve several devices from one
+    process; one per device otherwise. Within a server llama.cpp copies activations from one
+    device to the next itself; between servers they go through the head."""
+    groups: list[list[int]] = []
+    for i, d in enumerate(order):
+        if _is_local(d, head_id):
+            continue
+        if groups and groups[-1][-1] == i - 1:
+            prev = order[i - 1]
+            if (prev.node.node_id == d.node.node_id and prev.dev.kind == d.dev.kind
+                    and RPC_MULTI_DEVICE in d.node.features):
+                groups[-1].append(i)
+                continue
+        groups.append([i])
+    return groups
+
+
 def _n_rpc(c: _Cand) -> int:
-    return sum(1 for d in c.order if not _is_local(d, c.head_id))
+    """Network hops per token: one per RPC server the graph passes through."""
+    return len(rpc_groups(c.order, c.head_id))
 
 
 def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
@@ -658,7 +681,7 @@ def _multi_node_subsets(meta, ctx, ct, pool, node_ids: list[str]):
                 continue
             min_size = min_size or size
             order, counts, head = solved
-            n_rpc = sum(1 for d in order if not (d.node.node_id == head and d.dev.kind == "cuda"))
+            n_rpc = len(rpc_groups(order, head))
             tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw)
             found.append((tps, subset, solved))
     found.sort(key=lambda f: (-f[0], f[1]))
@@ -693,16 +716,23 @@ def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id,
     ctx, ct = spec.ctx_size, spec.kv_cache_type
     head_port = port_alloc(head_id)
     assignments: list[DeviceAssignment] = []
+    # One endpoint per RPC server. llama.cpp names the devices of the servers in --rpc order
+    # RPC0, RPC1, ... (a server's own devices consecutively, in its -d order), which is `order`.
+    endpoint_of: dict[int, str] = {}
+    for group in rpc_groups(order, head_id):
+        node = order[group[0]].node
+        ep = f"{node.host}:{port_alloc(node.node_id)}"
+        endpoint_of.update({i: ep for i in group})
     start, rpc_i = 0, 0
     for i, (d, c) in enumerate(zip(order, counts)):
         est = _need(meta, ctx, ct, d, start, c, i == len(order) - 1)
         if i == 0 and draft_mb is not None:
             est += draft_mb  # the draft lives on the first (head-local CUDA) device
-        if d.node.node_id == head_id and d.dev.kind == "cuda":
+        if i not in endpoint_of:
             llama_dev, endpoint = d.dev.device_id, None
         else:
             llama_dev = f"RPC{rpc_i}"
-            endpoint = f"{d.node.host}:{port_alloc(d.node.node_id)}"
+            endpoint = endpoint_of[i]
             rpc_i += 1
         assignments.append(
             DeviceAssignment(

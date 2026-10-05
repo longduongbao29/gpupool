@@ -499,3 +499,39 @@ def test_split_unchanged_when_bandwidth_equal_or_unknown():
         finally:
             placement._favor_fast = orig
         assert [a.layers for a in pl.assignments] == [a.layers for a in base.assignments]
+
+
+def _two_gpu_remote(features):
+    a = node("a", dev("CUDA0", 3000))  # the head: most capacity
+    b = node("b", dev("CUDA0", 1200), dev("CUDA1", 1200))
+    b.features = list(features)
+    return [a, b]
+
+
+def test_one_rpc_server_serves_every_gpu_of_a_node_that_supports_it():
+    meta = make_meta(n_layers=40)
+    nodes = _two_gpu_remote(["rpc_multi_device"])
+    ports = Ports()
+    pl = plan(meta, SPEC, nodes, "r", ports)
+    check(meta, pl, nodes)
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len(remote) == 2 and len({a.rpc_endpoint for a in remote}) == 1
+    assert [a.llama_device for a in remote] == ["RPC0", "RPC1"]  # one server: its devices in -d order
+    assert ports.calls.count(remote[0].node_id) == 1  # one port for the server
+    assert "1 network hop (RPC)" in pl.reasons
+
+
+def test_old_agents_keep_one_rpc_server_per_gpu():
+    meta = make_meta(n_layers=40)
+    nodes = _two_gpu_remote([])
+    pl = plan(meta, SPEC, nodes, "r", Ports())
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len({a.rpc_endpoint for a in remote}) == 2
+    assert "2 network hops (RPC)" in pl.reasons
+
+
+def test_fewer_rpc_servers_estimate_faster_decode():
+    meta = make_meta(n_layers=40)
+    new = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
+    old = plan(meta, SPEC, _two_gpu_remote([]), "r", Ports())
+    assert new.est_decode_tps > old.est_decode_tps

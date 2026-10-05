@@ -1908,3 +1908,37 @@ async def test_failed_rpc_start_cancels_the_download_and_rolls_back(mock_health)
     assert client.cancelled and client.engines == {}
     assert not any(c[0] == "start" and c[2].endswith("-head") for c in client.calls)
     await rec.shutdown()
+
+
+async def test_launch_starts_one_rpc_engine_for_a_shared_endpoint(mock_health):
+    from gpupool.common.models import DeviceAssignment, Placement
+    from gpupool.coordinator.reconciler import engine_ids
+
+    def planner(meta, spec, nodes, rid, port_alloc, **kw):
+        port = port_alloc("b")
+        ep = f"10.0.0.2:{port}"
+        asg = [DeviceAssignment(node_id="a", device_id="CUDA0", llama_device="CUDA0", layers=2, est_mb=10),
+               DeviceAssignment(node_id="b", device_id="CUDA0", llama_device="RPC0", rpc_endpoint=ep,
+                                layers=2, est_mb=10),
+               DeviceAssignment(node_id="b", device_id="CUDA1", llama_device="RPC1", rpc_endpoint=ep,
+                                layers=2, est_mb=10)]
+        return Placement(model=spec.name, replica_id=rid, tier="multi_node", head_node="a",
+                         head_port=port_alloc("a"), assignments=asg, tensor_split=[2.0] * 3, est_total_mb=30)
+
+    client = FakeClient()
+    rec, store, clock = make_reconciler(planner=planner, client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "ready"
+    starts = [c[3] for c in client.calls if c[0] == "start"]
+    rpc = [s for s in starts if s.kind == "rpc"]
+    head = next(s for s in starts if s.kind == "server")
+    assert len(rpc) == 1 and rpc[0].devices == ["CUDA0", "CUDA1"]
+    assert rpc[0].engine_id == f"{r.replica_id}-rpc-CUDA0"
+    assert head.rpc_endpoints == [r.placement.assignments[1].rpc_endpoint]  # listed once
+    assert head.devices == ["CUDA0", "RPC0", "RPC1"]
+    assert engine_ids(r) == [("a", f"{r.replica_id}-head"), ("b", f"{r.replica_id}-rpc-CUDA0")]
+    await rec.shutdown()

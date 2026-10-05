@@ -18,6 +18,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Mỗi máy chủ và replica chỉ chạy một `ggml-rpc-server` phục vụ mọi GPU của replica trên máy đó (`-d CUDA0,CUDA1`)
+  thay vì mỗi GPU một process. llama.cpp khi đó copy activation giữa các GPU này ngay trong server; với mỗi GPU một
+  process, mỗi ranh giới phải đi server → head → server, hai lần truyền mạng cho mỗi token. Placement tính một hop
+  mạng cho mỗi RPC server nên các cách chia như vậy cũng được chấm điểm cao hơn. Agent báo khả năng này
+  (`features: ["rpc_multi_device"]`); agent cũ vẫn chạy mỗi GPU một server.
+
 - Ước lượng bộ nhớ theo đúng bố cục cache từng layer của llama.cpp. Layer sliding-window (Gemma 2/3/4,
   gpt-oss, Cohere2, OLMo2) chỉ cache cửa sổ của nó, model MLA (DeepSeek, Kimi, GLM-DSA) chỉ cache K latent,
   model lai (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) chỉ có KV ở layer attention cộng một state hồi quy nhỏ

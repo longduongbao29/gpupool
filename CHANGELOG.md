@@ -18,6 +18,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- One `ggml-rpc-server` per server and replica serves all of the replica's GPUs on that server
+  (`-d CUDA0,CUDA1`) instead of one process per GPU. llama.cpp then copies activations between those GPUs
+  inside the server; with a process per GPU each boundary went server → head → server, two network transfers
+  per token. Placement counts one network hop per RPC server, so such splits also score better. Agents
+  report the capability (`features: ["rpc_multi_device"]`); older agents keep one server per GPU.
+
 - Memory estimates follow llama.cpp's real cache layout per layer. Sliding-window layers (Gemma 2/3/4,
   gpt-oss, Cohere2, OLMo2) cache only their window, MLA models (DeepSeek, Kimi, GLM-DSA) cache only the latent
   K, hybrid models (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) cache KV only on attention layers plus a small

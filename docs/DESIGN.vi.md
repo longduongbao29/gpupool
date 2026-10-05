@@ -21,7 +21,7 @@ Tài liệu này mô tả hệ thống đúng như trong code hiện tại. Tài
 | Tên binary RPC | `rpc-server` | `ggml-rpc-server` (b11342) | Upstream đã đổi tên; agent tìm cả hai. |
 | Bản llama.cpp | build từ source | cố định b11342; build sẵn hoặc tự build, truyền qua `llama_dir`; image Docker đã kèm sẵn | Driver trên máy dev hỗ trợ CUDA 13.3 nên build `cuda-13.4` không chạy; dùng `cuda-12.4`. |
 | Thứ tự device | ngầm định | luôn truyền `--device` + `--tensor-split` cùng thứ tự, và `--rpc` trước `--device` | llama.cpp liệt kê device local trước rồi mới tới RPC; nó phân giải tên device ngay khi parse đối số, nên `RPC0` chỉ tồn tại sau khi `--rpc` đã đăng ký các server. |
-| Device từ xa | 1 rpc-server mỗi node | 1 rpc-server mỗi device | Có cổng riêng, tên `RPCi` xác định, dừng được riêng lẻ. |
+| Device từ xa | 1 rpc-server mỗi node | 1 rpc-server mỗi node và replica, phục vụ các device liền nhau của replica trên node đó (`-d CUDA0,CUDA1`); 1 cái mỗi device với agent cũ hơn 0.6 | Activation giữa hai GPU của cùng server được copy ngay trong server (`RPC_CMD_COPY_TENSOR`) thay vì đi server → head → server; mỗi replica một cổng riêng, tên `RPCi` xác định (device của một server được đánh số liên tiếp theo thứ tự `-d`). |
 | Nguồn model | URL | URL, đường dẫn tuyệt đối trên máy, hoặc `coordinator://<file>` | Các server thấy nhau nhưng có thể không có internet. |
 | Kiểm tra sống của agent | agent đẩy heartbeat mỗi 2 s | coordinator **kéo** `GET /report` từ mọi agent đã đăng ký (`poll_s` = 2 s) | Với push, server đã xóa trên UI sẽ tự xuất hiện lại ở nhịp tiếp theo. Push vẫn còn (`push_heartbeat`) cho cấu hình cũ, nhưng chỉ nhận server đã đăng ký. |
 | Đăng ký server | coordinator biết agent qua config | agent tự đăng ký (`POST /internal/join`, chạy bởi `--join "<url>#<token>"`); UI cũng thêm được bằng URL | Một lệnh cho mỗi server. Coordinator thăm dò `/report` trước, nên chỉ agent truy cập được và đúng token mới đăng ký được; server đã xóa trên UI nhận 403 để việc xóa có hiệu lực lâu dài. |
@@ -79,8 +79,10 @@ llama.cpp chia model **theo layer** lên các device (`--split-mode layer`). GPU
 - Activation đi qua mạng một lần cho mỗi token mỗi chặng (hop), nên chia qua RPC là đổi tốc độ lấy dung
   lượng. Scheduler mô hình hóa việc này bằng chi phí cố định mỗi hop (mục 6.3) và chỉ dùng placement
   multi-node khi không có GPU đơn hay node đơn nào chứa vừa.
-- Mỗi device một `ggml-rpc-server`, bind vào `host` của agent trên một cổng trong `port_range` (9000-9999) do
-  coordinator cấp, nên cổng không bao giờ đụng nhau giữa các replica.
+- Mỗi node và replica một `ggml-rpc-server`, phục vụ mọi device liền nhau của replica trên node đó (agent báo
+  tính năng `rpc_multi_device`; agent cũ hơn nhận một server mỗi device), bind vào `host` của agent trên một cổng
+  trong `port_range` (9000-9999) do coordinator cấp, nên cổng không bao giờ đụng nhau giữa các replica. Bộ lập
+  lịch tính một hop mạng cho mỗi server, không phải mỗi device.
 - Device CPU của head, nếu được mở (`include_cpu`), cũng được truy cập qua một rpc-server (`-d CPU`), nên nó
   cũng là device `RPCi`.
 

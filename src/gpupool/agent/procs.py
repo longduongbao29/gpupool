@@ -76,8 +76,11 @@ def llama_cuda_archs(llama_dir: Path) -> list[str] | None:
 def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
                   model_path: str | None) -> list[str]:
     if spec.kind == "rpc":
+        # One process for every device of the replica on this server: llama.cpp then copies
+        # activations between them inside the server (RPC_CMD_COPY_TENSOR) instead of through the
+        # head, which a process per device forces (two network transfers per boundary).
         return [str(bins["rpc"]), "-H", bind_host, "-p", str(spec.port),
-                "-d", spec.devices[0], "-c", *spec.extra_args]
+                "-d", ",".join(spec.devices), "-c", *spec.extra_args]
     if not model_path:
         raise ValueError("server engine needs a model_path")
     cmd = [str(bins["server"]), "-m", model_path, "--host", bind_host, "--port", str(spec.port),

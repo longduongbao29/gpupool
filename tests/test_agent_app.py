@@ -306,3 +306,19 @@ async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
             assert (await c.get("/engines/m1/memory", headers=H)).json()["devices"] == {}
     finally:
         pm.stop_all()
+
+
+async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(ProcessManager, "start", lambda self, spec, mp=None: seen.append(spec) or
+                        procs.EngineStatus(engine_id=spec.engine_id, kind=spec.kind, state="starting",
+                                           port=spec.port))
+    app = create_app(cfg, start_heartbeat=False)
+    async with client(app) as c:
+        two = {"engine_id": "e1", "kind": "rpc", "port": 9123, "devices": ["CUDA0", "CUDA1"]}
+        assert (await c.post("/engines", json=two, headers=H)).status_code == 200
+        for bad in ([], ["CUDA0", "CUDA0"]):
+            r = await c.post("/engines", json={**two, "engine_id": "e2", "devices": bad}, headers=H)
+            assert r.status_code == 422, bad
+        assert "rpc_multi_device" in (await c.get("/report", headers=H)).json()["features"]
+    assert seen[0].devices == ["CUDA0", "CUDA1"]

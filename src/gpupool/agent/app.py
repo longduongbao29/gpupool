@@ -81,6 +81,9 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
             delay = min(delay * 2, 60.0)
 
 
+FEATURES = ("rpc_multi_device",)  # NodeReport.features
+
+
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall,
@@ -127,7 +130,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
-            cuda_archs=archs(),
+            cuda_archs=archs(), features=list(FEATURES),
             models=list_models(cfg.cache_dir), ts=time.time())
 
     async def heartbeat_loop() -> None:
@@ -203,8 +206,8 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                 if not Path(spec.draft_model_path).is_file():
                     raise HTTPException(
                         422, f"draft model file not found: {spec.draft_model_path}")
-        elif len(spec.devices) != 1:
-            raise HTTPException(422, "rpc engine needs exactly one device")
+        elif not spec.devices or len(set(spec.devices)) != len(spec.devices):
+            raise HTTPException(422, "rpc engine needs one or more distinct devices")
         try:
             return pm.start(spec, spec.model_path)
         except EngineExists:

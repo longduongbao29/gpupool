@@ -21,7 +21,7 @@ This document describes the system as it is in the code. Related documents:
 | RPC binary name | `rpc-server` | `ggml-rpc-server` (b11342) | Renamed upstream; the agent looks for both. |
 | llama.cpp build | build from source | pin b11342; prebuilt or self-built, passed via `llama_dir`; Docker images carry it | The dev driver supports CUDA 13.3, so the `cuda-13.4` build does not run; use `cuda-12.4`. |
 | Device order | implicit | always pass `--device` + `--tensor-split` in the same order, and `--rpc` before `--device` | llama.cpp lists local devices first, then RPC; it resolves device names while parsing arguments, so `RPC0` exists only after `--rpc` registered the servers. |
-| Remote devices | 1 rpc-server per node | 1 rpc-server per device | Own port, deterministic `RPCi` name, can be stopped individually. |
+| Remote devices | 1 rpc-server per node | 1 rpc-server per node and replica, serving that replica's consecutive devices on the node (`-d CUDA0,CUDA1`); 1 per device for agents older than 0.6 | Activations between two GPUs of one server are copied inside it (`RPC_CMD_COPY_TENSOR`) instead of going server → head → server; own port per replica, deterministic `RPCi` names (a server's devices are numbered consecutively in `-d` order). |
 | Model source | URL | URL, absolute local path, or `coordinator://<file>` | Servers reach each other but may have no internet. |
 | Agent liveness | agent pushes a heartbeat every 2 s | the coordinator **pulls** `GET /report` from every registered agent (`poll_s` = 2 s) | With push, a server deleted in the UI would re-appear on its next beat. Push stays available (`push_heartbeat`) for old setups, but only registered servers are accepted. |
 | Server registration | coordinator knows its agents from config | an agent self-registers (`POST /internal/join`, driven by `--join "<url>#<token>"`); the UI can also add by URL | One command per server. The coordinator probes `/report` first, so only a reachable, correctly-tokened agent registers; a server removed in the UI gets 403 so removal sticks. |
@@ -80,8 +80,10 @@ another device: the head's `llama-server` is started with `--rpc host:port,...` 
 - Activations cross the network once per token per hop, so a split over RPC trades speed for
   capacity. The scheduler models this as a fixed per-hop cost (section 6.3) and uses multi-node
   placements only when no single GPU or single node fits.
-- One `ggml-rpc-server` per device, bound to the agent's `host` on a port from `port_range`
-  (9000-9999) that the coordinator allocates, so ports never collide across replicas.
+- One `ggml-rpc-server` per node and replica, serving every consecutive device of the replica on that
+  node (agents report the `rpc_multi_device` feature; older agents get one server per device), bound to
+  the agent's `host` on a port from `port_range` (9000-9999) that the coordinator allocates, so ports
+  never collide across replicas. The scheduler counts one network hop per server, not per device.
 - The head's own CPU device, if exposed (`include_cpu`), is also reached through an rpc-server
   (`-d CPU`), so it is an `RPCi` device too.
 

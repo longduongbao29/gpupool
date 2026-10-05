@@ -41,6 +41,12 @@ def test_build_rpc():
         "ggml-rpc-server", "-H", "10.0.0.5", "-p", "9001", "-d", "CUDA0", "-c"]
 
 
+def test_build_rpc_serves_several_devices_from_one_process():
+    spec = EngineSpec(engine_id="r-rpc-CUDA0", kind="rpc", port=9001, devices=["CUDA0", "CUDA1"])
+    cmd = build_command(spec, BINS, "10.0.0.5", None)
+    assert cmd[cmd.index("-d") + 1] == "CUDA0,CUDA1"
+
+
 def test_build_server_single():
     spec = EngineSpec(engine_id="r-head", kind="server", port=9000, devices=["CUDA0"],
                       model="m", ctx_size=2048, parallel=2, extra_args=["--foo"])
