@@ -2,12 +2,22 @@
 # Images are pushed to GHCR only for version tags (v*), e.g. `git tag v0.2.0 && git push --tags`.
 name: docker
 
+# Docs-only changes build nothing. README.md, LICENSE and THIRD_PARTY_NOTICES.md are not ignored: the
+# images copy them. Path filters never apply to tag pushes, so releases always build.
 on:
   push:
     branches: [master]
     tags: ["v*"]
+    paths-ignore: ["docs/**", "*.vi.md", "CHANGELOG.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md", ".github/ISSUE_TEMPLATE/**", ".github/pull_request_template.md"]
   pull_request:
+    paths-ignore: ["docs/**", "*.vi.md", "CHANGELOG.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md", ".github/ISSUE_TEMPLATE/**", ".github/pull_request_template.md"]
   workflow_dispatch:
+
+# A new push to a PR cancels that PR's older run. master and tags are never cancelled: every
+# commit there gets a full run, and a tag run publishes images.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

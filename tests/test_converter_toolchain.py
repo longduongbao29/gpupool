@@ -336,7 +336,9 @@ async def test_run_tool_cancel_kills_process_tree(tmp_path):
         await task
     await asyncio.sleep(0.3)
     assert not psutil.pid_exists(parent)
-    assert not psutil.pid_exists(kid)
+    # The grandchild is reparented to PID 1 once its parent dies. Under an init that does not
+    # reap (some container runtimes) it stays a zombie: killed, but its pid still exists.
+    assert not psutil.pid_exists(kid) or psutil.Process(kid).status() == psutil.STATUS_ZOMBIE
 
 
 async def test_run_tool_survives_broken_callback():
