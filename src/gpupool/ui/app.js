@@ -1133,6 +1133,15 @@ function app() {
       for (var i = this.pg.msgs.length - 1; i >= 0; i--) if (this.pg.msgs[i].role === "assistant") return this.pg.msgs[i];
       return null;
     },
+    // The placement's estimate for the replica that answered, to set beside the measured speed.
+    pgEst: function (a) {
+      var id = a && a.m && a.m.replica;
+      if (!id) return null;
+      var hit = null;
+      this.models().forEach(function (m) { (m.replicas || []).forEach(function (r) { if (r.replica_id === id) hit = r; }); });
+      var t = hit && hit.placement && hit.placement.est_decode_tps;
+      return t ? t : null;
+    },
     pgMs: function (ms) { return ms == null ? this.dash : (ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s"); },
     pgRate: function (r) { return r == null || !isFinite(r) ? this.dash : (r >= 100 ? Math.round(r) : r.toFixed(1)) + " tok/s"; },
     pgScroll: function (force) {

@@ -321,7 +321,8 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
 - **Numbers**: a strip above the log shows the last reply's *Time to first token* (from sending to the first
   token: queueing, a cold start, prompt processing and network), *Generation* (tok/s), *Tokens* and *Total
   latency*, updated live while it streams. Under each reply, chips repeat them and add the prompt (prefill)
-  tokens and speed and the replica that answered (`x-gpupool-replica` response header), plus *cut at max
+  tokens and speed, the placement's estimate for that replica (*est.*, to compare with the measured speed) and the
+  replica that answered (`x-gpupool-replica` response header), plus *cut at max
   tokens* or *stopped*. While streaming, speed is counted in the browser (llama-server sends one token per
   chunk); at the end llama-server's own `timings` (`predicted_per_second`, `prompt_per_second`) replace it,
   and the line under the chips says which source was used.

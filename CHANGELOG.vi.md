@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.6.0] - 2026-10-05
+
 ### Thêm
 
 - UI: các khung lớn (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, các mục
@@ -16,7 +18,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 - **Playground** trong UI: chat với model đã deploy qua `/v1/chat/completions` (router, balancer và replica, đúng như
   client). Câu trả lời stream từng ký tự, kèm dải số đo trực tiếp: thời gian tới token đầu, token/giây khi sinh, số
-  token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill) và replica đã trả lời.
+  token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill), tốc độ placement ước tính đặt cạnh tốc độ đo được,
+  và replica đã trả lời.
   Tốc độ lấy từ `timings` của chính llama-server khi xong (đếm trong trình duyệt khi đang stream), `reasoning_content`
   của model có suy nghĩ vào một khối thu gọn được, *Stop* để huỷ, model on-demand đang ngủ được nạp (cold start) ở tin
   nhắn đầu tiên. Khung chat bên trái, cài đặt bên phải, *Clear chat* ở đầu khung chat. Nút *Chat* trên thẻ model đang chạy mở Playground. Phần cài đặt (không phải nội dung chat) được nhớ
@@ -303,7 +306,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2

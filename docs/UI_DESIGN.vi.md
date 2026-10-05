@@ -319,7 +319,8 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
 - **Số đo**: dải phía trên khung chat hiện của câu trả lời gần nhất: *Time to first token* (từ lúc gửi đến
   token đầu: xếp hàng, cold start, xử lý prompt và mạng), *Generation* (tok/s), *Tokens* và *Total latency*,
   cập nhật trực tiếp khi đang stream. Dưới mỗi câu trả lời, các chip nhắc lại các số đó, thêm số token và tốc
-  độ xử lý prompt (prefill), replica đã trả lời (header phản hồi `x-gpupool-replica`), và *cut at max tokens*
+  độ xử lý prompt (prefill), tốc độ placement ước tính cho replica đó (*est.*, để so với tốc độ đo được), replica đã
+  trả lời (header phản hồi `x-gpupool-replica`), và *cut at max tokens*
   hoặc *stopped*. Khi đang stream, tốc độ được đếm trong trình duyệt (llama-server gửi mỗi chunk một token);
   khi xong, `timings` của chính llama-server (`predicted_per_second`, `prompt_per_second`) thay vào, và dòng
   dưới các chip ghi rõ nguồn đo.

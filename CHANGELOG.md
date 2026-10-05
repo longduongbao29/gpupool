@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-05
+
 ### Added
 
 - UI: large panels (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, Settings
@@ -16,7 +18,8 @@ All notable changes to gpupool are documented here. The format follows
 
 - **Playground** in the UI: chat with a deployed model through `/v1/chat/completions` (router, balancer and replica, as a
   client would). Replies stream character by character with a live strip of time to first token, generation tokens/s,
-  tokens and total latency; each reply also shows prompt (prefill) tokens and speed and the replica that answered.
+  tokens and total latency; each reply also shows prompt (prefill) tokens and speed, the placement's estimated speed beside the measured one, and
+  the replica that answered.
   Speeds come from llama-server's own `timings` at the end (counted in the browser while streaming), thinking models'
   `reasoning_content` goes to a collapsible block, *Stop* cancels, idle on-demand models cold-start on the first
   message. Chat on the left, settings on the right, *Clear chat* in the chat header. A *Chat* button on running model cards opens it. The settings (not the chat) are remembered per browser.
@@ -305,7 +308,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2

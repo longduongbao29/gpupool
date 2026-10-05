@@ -625,6 +625,7 @@
                     <div class="pg-meta" x-show="!a.streaming || a.m.ttft != null">
                       <span class="chip" title="Time to first token" x-show="a.m.ttft != null" x-text="'TTFT ' + pgMs(a.m.ttft)"></span>
                       <span class="chip" title="Generation speed" x-show="a.m.tps != null" x-text="pgRate(a.m.tps)"></span>
+                      <span class="chip" title="What the placement estimated for this replica (the speed the scheduler and the router rank it by)" x-show="!a.streaming && a.m.tps != null && pgEst(a)" x-text="'est. ' + pgRate(pgEst(a))"></span>
                       <span class="chip" x-show="a.m.n" x-text="a.m.n + ' tokens'"></span>
                       <span class="chip" title="Total time, sending to last token" x-show="!a.streaming && a.m.total != null" x-text="pgMs(a.m.total) + ' total'"></span>
                       <span class="chip" title="Prompt processing (prefill): tokens read and llama-server's speed" x-show="a.m.pn != null" x-text="'Prompt ' + a.m.pn + ' tok' + (a.m.ptps ? ' · ' + pgRate(a.m.ptps) : '')"></span>
