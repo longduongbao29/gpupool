@@ -238,6 +238,14 @@ dùng chung một `ggml-rpc-server` khi agent của nó báo `rpc_multi_device` 
 giữa chúng ngay trong server đó. Số hạng logits tính giá cho layer đầu ra nằm ở server khác (placement tạo trước khi GPU
 của head được đặt cuối): khi đó logits đi qua mạng ở mỗi token, giả định 1 Gbit/s.
 
+**Mô hình tốc độ tự học.** 0.5 và 2 ms là giá trị khởi đầu. Cứ 60 s reconciler lấy mỗi replica đang ready mà tốc
+độ đo được là một luồng decode thuần (`parallel` 1, không speculative decoding; nhiều luồng chia băng thông và việc
+nháp làm tăng số token) cùng `llamacpp:predicted_tokens_seconds` mới của nó: replica trên một server cho
+`eta = số giây băng thông x tok/s đo được`, replica bị chia (đã biết eta) cho
+`(1 / đo được - số giây băng thông / eta - số hạng logits) / số_hop_rpc` giây mỗi hop. Mỗi giá trị dịch theo EMA trọng
+số 0.2, bị kẹp trong eta 0.15..0.95 và 0.1..50 ms, được lưu trong `control_state` (`speed_model`) và hiển thị ở
+`GET /api/state`. Mỗi thứ một giá trị cho cả cụm.
+
 Điểm của một ứng viên (cao hơn thắng):
 
 | Thành phần | Trọng số | Ý nghĩa |
@@ -536,6 +544,7 @@ chuyển tiếp suy luận, mà FULL thì fsync từng lần. Các bảng: `node
 | Cooldown preemption và tập nạn nhân, backoff crash-loop, move đang chạy | `control_state` khóa `preempted`, `backoff`, `move` | có |
 | Số lượng mong muốn, request cuối, quyết định cuối của autoscaler | `control_state` khóa `autoscaler:<model>` | có (bộ đếm thì không) |
 | Hệ số hiệu chỉnh | `model_calibration` | có, cho tới khi phiên bản bộ ước lượng đổi (mục 12) |
+| Mô hình tốc độ (eta, giây mỗi hop RPC) | khoá `control_state` là `speed_model` | có |
 | Bộ đếm `_last_rebalance` | bộ nhớ | không, cố ý (báo cáo cũ sau khi khởi động) |
 
 Control state được ghi ngay mỗi khi đổi (đây là các sự kiện hiếm) và thời gian là giờ đồng hồ thật nên có cùng ý

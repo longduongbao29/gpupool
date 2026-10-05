@@ -10,6 +10,11 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- The decode-speed model learns from measured speed: eta (fraction of peak bandwidth) from replicas on one server
+  and the time per RPC hop from split ones, both from llama-server's measured generation speed of replicas that
+  run one plain stream. Persisted, shown as `speed_model` in `GET /api/state`; placements then rank by the
+  cluster's real network and GPUs instead of constants measured on one GTX 1650.
+
 - `llama_version_mismatch` warning event (and webhook) when live servers report different llama.cpp builds, once
   per change: a model split over servers needs the same RPC protocol on its head and every RPC server.
 

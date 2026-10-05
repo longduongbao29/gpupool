@@ -161,7 +161,7 @@ async def test_state_shape_and_summary(env):
     store.upsert_node(node("a", devices=[dev("CUDA0"), dev("CUDA1")]), clock())  # ...except a
     st = (await c.get("/api/state")).json()
     assert set(st) == {"summary", "servers", "models", "library", "settings", "events", "unread_events",
-                      "rebalance"}
+                      "rebalance", "speed_model"}
     assert [s["node_id"] for s in st["servers"]] == ["a", "b", "c", "never"]
     never = st["servers"][3]
     assert never["alive"] is False and never["report"] is None and never["last_seen"] == 0.0
@@ -876,3 +876,11 @@ async def test_put_model_mtp_needs_nextn_blocks(env):
     r = await put(draft_n_max=3)
     assert r.status_code == 200
     assert (r.json()["speculative"], r.json()["draft"], r.json()["draft_n_max"]) == ("mtp", None, 3)
+
+
+async def test_state_shows_the_speed_model(env):
+    from gpupool.scheduler.scoring import set_speed_model
+    c, *_ = env
+    assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.5, "hop_ms": 2.0}
+    set_speed_model(0.62, 0.0007)
+    assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.62, "hop_ms": 0.7}

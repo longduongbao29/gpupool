@@ -36,6 +36,9 @@ from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store, gpu_key, planning_factor
 from gpupool.scheduler.estimate import CONTEXT_MB
 from gpupool.scheduler.placement import NoFit, plan, rank
+from gpupool.scheduler.scoring import (
+    bandwidth_seconds, default_cuda_bw, logits_seconds, set_speed_model, speed_model,
+)
 
 log = logging.getLogger("gpupool.reconciler")
 
@@ -131,6 +134,8 @@ class Reconciler:
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
     CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
+    SPEED_SAMPLE_S = 60.0  # how often ready replicas feed the speed model
+    SPEED_ALPHA = 0.2  # EMA weight of one speed sample (one per replica per SPEED_SAMPLE_S)
     CAL_EVENT_DELTA = 0.05  # emit `calibrated` when the planning factor moves by more than this
 
     def __init__(
@@ -163,6 +168,7 @@ class Reconciler:
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
         self._versions_seen: tuple[str, ...] = ()  # llama.cpp builds of live servers at the last check
+        self._last_speed_sample = float("-inf")
         self._realloc: dict[str, _Realloc] = {}
         self._preempted: dict[str, tuple[float, set[str]]] = {}  # model -> (when, victim replica ids)
         self._wake = asyncio.Event()
@@ -184,6 +190,9 @@ class Reconciler:
             self._preempted = {m: (float(v[0]), set(v[1])) for m, v in pre.items()}
             bo = self.store.get_state("backoff") or {}
             self._backoff = {m: (int(v[0]), float(v[1])) for m, v in bo.items()}
+            sm = self.store.get_state("speed_model")
+            if sm:
+                set_speed_model(float(sm["eta"]), float(sm["hop_s"]))
             saved = self.store.get_state("move")
             if saved:
                 mv = saved["move"]
@@ -805,6 +814,7 @@ class Reconciler:
             await self._advance_move(now)
             await self._enforce_counts(nodes, now)
             await self._rebalance_if_due(now)
+            await self._learn_speed(nodes, now)
             self.store.prune_replicas(self.KEEP_TERMINAL_PER_MODEL)
 
     async def run(self) -> None:
@@ -1273,6 +1283,61 @@ class Reconciler:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ------------------------------------------------------------------ speed model
+    async def _learn_speed(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """Refine the decode-speed model (eta, seconds per RPC hop) from what replicas measure.
+
+        Only replicas whose measured speed is one plain decode stream count: parallel 1 and no
+        speculative decoding (several streams share the bandwidth; drafting multiplies tokens).
+        A single-server replica measures eta: tok/s = eta / bandwidth_seconds. A split one, with
+        eta known, measures the time its RPC servers add per token. Each is an EMA, clamped."""
+        if self.autoscaler is None or now - self._last_speed_sample < self.SPEED_SAMPLE_S:
+            return
+        self._last_speed_sample = now
+        reports = [n.report for n in nodes.values()]
+        cuda_default = default_cuda_bw(reports)
+        sm = speed_model()
+        eta, hop = sm.eta, sm.hop_s
+        n_eta = n_hop = 0
+        for rec in self.store.list_replicas(states={"ready"}):
+            spec = self.store.get_model(rec.model)
+            measured = self.autoscaler.measured_tps(rec.replica_id)
+            if spec is None or not measured or spec.parallel != 1 or spec.speculative != "none":
+                continue
+            p = rec.placement
+            devs = []
+            for a in p.assignments:
+                n = nodes.get(a.node_id)
+                d = _find_device(n.report.devices, a) if n is not None else None
+                if d is None:
+                    break
+                devs.append((d, a.layers))
+            else:
+                try:
+                    meta = await self.meta_for(spec)
+                except Exception:
+                    continue
+                t_bw = bandwidth_seconds(meta, devs, cuda_default)
+                if t_bw <= 0:
+                    continue
+                n_rpc = len(rpc_servers(p))
+                if n_rpc == 0:
+                    eta += self.SPEED_ALPHA * (t_bw * measured - eta)
+                    n_eta += 1
+                    continue
+                rest = 1.0 / measured - t_bw / eta
+                if p.assignments and p.assignments[-1].node_id != p.head_node:
+                    rest -= logits_seconds(meta)
+                hop += self.SPEED_ALPHA * (rest / n_rpc - hop)
+                n_hop += 1
+        if not (n_eta or n_hop):
+            return
+        set_speed_model(eta, hop)
+        sm = speed_model()
+        self._save("speed_model", {"eta": sm.eta, "hop_s": sm.hop_s})
+        log.info("speed model: eta %.3f, %.2f ms per RPC hop (%d single-server, %d split samples)",
+                 sm.eta, sm.hop_s * 1000, n_eta, n_hop)
 
     # ------------------------------------------------------------------ calibration
     @staticmethod

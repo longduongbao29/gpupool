@@ -10,6 +10,11 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thêm
 
+- Mô hình tốc độ decode tự học từ tốc độ đo được: eta (tỉ lệ băng thông đỉnh) từ replica trên một server và thời gian
+  mỗi hop RPC từ replica bị chia, đều lấy từ tốc độ sinh token đo được của llama-server ở các replica chạy một luồng
+  thuần. Được lưu lại, hiển thị là `speed_model` trong `GET /api/state`; placement khi đó xếp hạng theo mạng và GPU thật
+  của cụm thay vì hằng số đo trên một GTX 1650.
+
 - Sự kiện cảnh báo `llama_version_mismatch` (kèm webhook) khi các server đang sống báo bản llama.cpp khác nhau, một
   lần cho mỗi thay đổi: model bị chia qua nhiều server cần cùng giao thức RPC trên head và mọi RPC server.
 

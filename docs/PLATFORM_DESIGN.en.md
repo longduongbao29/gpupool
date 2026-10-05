@@ -435,9 +435,9 @@ Decided:
 
 Still open:
 
-- **η per GPU architecture.** The only numbers come from one GTX 1650 and the code uses a fixed η = 0.5. The
-  measured decode speed is collected, so per-model η self-calibration is possible, but it is not
-  implemented. Datacenter GPUs may differ a lot, so it should be done before relying on tok/s ranking there.
+- **η per GPU architecture.** η and `t_hop` now learn from measured decode speed (one cluster-wide value each,
+  DESIGN section 6.3), starting from the GTX 1650 numbers. A value per GPU architecture would need samples per
+  architecture and is not implemented; datacenter GPUs may differ from consumer ones.
 - **Calibration on large models.** The mechanism exists, but a real ≥ 7B model over several GPUs has not been
   run through it yet; the clamp 0.9–2.0 and weight 0.5 are untuned.
 - **Prefill** is compute-bound (SMs × clock), not bandwidth-bound. Models that mostly take long prompts may

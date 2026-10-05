@@ -481,6 +481,7 @@ Toàn bộ những gì web UI hiển thị, trong một lời gọi (admin key).
 | `events[]` | 50 event mới nhất |
 | `unread_events` | số event chưa đọc |
 | `rebalance` | `{"in_progress": {...} hoặc null, "next_run_ts": thời gian unix hoặc null}` |
+| `speed_model` | `{"eta": float, "hop_ms": float}`: mô hình tốc độ decode scheduler dùng để xếp hạng (tỉ lệ băng thông bộ nhớ đỉnh, mili giây mỗi RPC server mỗi token), học từ tốc độ đo được |
 
 Mục trong `models[]`:
 

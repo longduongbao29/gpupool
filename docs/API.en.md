@@ -483,6 +483,7 @@ Everything the web UI shows, in one call (admin key).
 | `events[]` | the 50 newest events |
 | `unread_events` | count of unread events |
 | `rebalance` | `{"in_progress": {...} or null, "next_run_ts": unix time or null}` |
+| `speed_model` | `{"eta": float, "hop_ms": float}`: the decode-speed model the scheduler ranks with (fraction of peak memory bandwidth, milliseconds per RPC server per token), learned from measured speed |
 
 `models[]` entry:
 

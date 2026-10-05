@@ -2034,3 +2034,69 @@ async def test_mixed_llama_builds_raise_one_warning_per_change():
     assert len(ev) == 1 and ev[0].level == "warning"
     assert "b11342: b" in ev[0].message and "b11413: a" in ev[0].message
     await rec.shutdown()
+
+
+# ---------------------------------------------------------------- speed model
+class _Measured:
+    def __init__(self, tps):
+        self.tps = tps
+
+    def measured_tps(self, rid):
+        return self.tps.get(rid)
+
+
+def _speed_rig(planner=None, **spec_kw):
+    from gpupool.common.models import ModelMeta
+    meta = ModelMeta(arch="llama", n_layers=4, n_embd=64, n_head=4, n_head_kv=4, head_dim=16,
+                     layer_bytes=[250_000_000] * 4, other_bytes=0, output_bytes=0, vocab_size=100_000)
+    rec, store, clock = make_reconciler(planner=planner)
+
+    async def meta_for(spec):
+        return meta
+
+    rec.meta_for = meta_for
+    gpu = dev().model_copy(update={"bandwidth_gbps": 100.0})
+    beat(store, clock, node("a", devices=[gpu]), node("b", devices=[gpu]))
+    store.put_model(SPEC.model_copy(update={"replicas": 0, **spec_kw}))
+    return rec, store, clock
+
+
+async def test_single_server_replicas_teach_eta():
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig()
+    put_replica(store, "m-1", now=clock())  # its 2 layers (0.5 GB) on a/CUDA0 at 100 GB/s: 5 ms at eta 1
+    rec.autoscaler = _Measured({"m-1": 140.0})  # 140 tok/s -> eta 0.7
+    nodes = rec._node_map()
+    await rec._learn_speed(nodes, clock())
+    assert speed_model().eta == pytest.approx(0.5 + 0.2 * (0.7 - 0.5))
+    await rec._learn_speed(nodes, clock() + 1)  # within SPEED_SAMPLE_S: no second sample
+    assert speed_model().eta == pytest.approx(0.54)
+    assert store.get_state("speed_model")["eta"] == pytest.approx(0.54)
+    rec2, *_ = make_reconciler(store=store)  # a restarted coordinator starts from the saved model
+    assert speed_model().eta == pytest.approx(0.54)
+    await rec.shutdown()
+
+
+async def test_split_replicas_teach_the_hop_cost():
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig()
+    r = put_replica(store, "m-1", rpc_node="b", now=clock())  # 2 + 2 layers, a local + b over RPC
+    # bandwidth time at eta 0.5: 1 GB / 100 GB/s / 0.5 = 20 ms; measured 1 / 22 ms -> 2 ms on the hop
+    # put_replica's last device is remote: the logits (100k x 4 B at 125 MB/s = 3.2 ms) are added too
+    rec.autoscaler = _Measured({"m-1": 1 / (0.020 + 0.0032 + 0.010)})  # 10 ms really spent on the hop
+    await rec._learn_speed(rec._node_map(), clock())
+    assert r.placement.assignments[-1].node_id == "b"
+    assert speed_model().hop_s == pytest.approx(0.002 + 0.2 * (0.010 - 0.002))
+    assert speed_model().eta == 0.5  # split replicas never move eta
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("kw", [{"parallel": 4}, {"speculative": "ngram"}])
+async def test_speed_samples_only_from_one_plain_stream(kw):
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig(**kw)
+    put_replica(store, "m-1", now=clock())
+    rec.autoscaler = _Measured({"m-1": 90.0})
+    await rec._learn_speed(rec._node_map(), clock())
+    assert (speed_model().eta, store.get_state("speed_model")) == (0.5, None)
+    await rec.shutdown()

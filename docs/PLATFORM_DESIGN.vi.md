@@ -434,9 +434,9 @@ Mỗi giai đoạn được kiểm trên cụm thật, ít nhất 2 server và 2
 
 Vẫn còn mở:
 
-- **η theo kiến trúc GPU.** Số hiện có chỉ từ một GTX 1650 và code dùng η = 0.5 cố định. Tốc độ decode đo
-  được đã được thu thập, nên có thể tự hiệu chỉnh η theo từng model, nhưng chưa triển khai. GPU datacenter
-  có thể khác nhiều, nên cần làm trước khi dựa vào xếp hạng tok/s ở đó.
+- **η theo kiến trúc GPU.** η và `t_hop` giờ tự học từ tốc độ decode đo được (mỗi thứ một giá trị cho cả cụm,
+  DESIGN mục 6.3), bắt đầu từ số của GTX 1650. Mỗi kiến trúc GPU một giá trị thì cần mẫu theo từng kiến trúc và chưa
+  triển khai; GPU datacenter có thể khác GPU phổ thông.
 - **Hiệu chỉnh trên model lớn.** Cơ chế đã có, nhưng chưa chạy một model ≥ 7B thật chia nhiều GPU qua nó;
   mức kẹp 0.9–2.0 và trọng số 0.5 chưa được chỉnh.
 - **Prefill** bị giới hạn bởi compute (SM × clock), không phải băng thông. Model chủ yếu nhận prompt dài

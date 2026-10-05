@@ -21,6 +21,7 @@ from gpupool.coordinator.store import ServerRecord, gpu_key, planning_factor
 from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
+from gpupool.scheduler.scoring import speed_model
 
 log = logging.getLogger("gpupool.api")
 
@@ -297,6 +298,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "events": [e.model_dump(mode="json") for e in store.list_events(limit=50)],
             "unread_events": store.unread_count(),
             "rebalance": reconciler.rebalance_state(),
+            # decode-speed model the scheduler ranks with, refined from measured speed
+            "speed_model": {"eta": round(speed_model().eta, 3), "hop_ms": round(speed_model().hop_s * 1000, 3)},
         }
 
     # ------------------------------------------------------------------ servers

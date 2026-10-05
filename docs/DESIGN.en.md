@@ -248,6 +248,14 @@ consecutive devices of one node share one `ggml-rpc-server` when its agent repor
 the output layer on another server (placements made before the head's GPUs were put last): the logits then
 cross the network every token, at an assumed 1 Gbit/s.
 
+**Learned speed model.** 0.5 and 2 ms are starting values. Every 60 s the reconciler takes each ready replica
+whose measured speed is one plain decode stream (`parallel` 1, no speculative decoding; several streams share
+the bandwidth and drafting multiplies tokens) and its fresh `llamacpp:predicted_tokens_seconds`: a replica on one
+server gives `eta = bandwidth seconds x measured tok/s`, a split one (eta known) gives
+`(1 / measured - bandwidth seconds / eta - logits term) / n_rpc_hops` seconds per hop. Each moves by an EMA of
+weight 0.2, clamped to eta 0.15..0.95 and 0.1..50 ms, is saved in `control_state` (`speed_model`) and shown in
+`GET /api/state`. One value each for the whole cluster.
+
 Score of a candidate (higher wins):
 
 | Term | Weight | Meaning |
@@ -561,6 +569,7 @@ that also proxies inference, which FULL would fsync each time. Tables: `nodes`, 
 | Preemption cooldowns and victim sets, crash-loop backoffs, the move in flight | `control_state` keys `preempted`, `backoff`, `move` | yes |
 | Autoscaler desired count, last request, last decision | `control_state` key `autoscaler:<model>` | yes (timers are not) |
 | Calibration factors | `model_calibration` | yes, until the estimator version changes (section 12) |
+| Speed model (eta, seconds per RPC hop) | `control_state` key `speed_model` | yes |
 | `_last_rebalance` timer | memory | no, on purpose (stale reports after boot) |
 
 Control state is written through on every change (these are rare events) and times are wall-clock, so
