@@ -606,21 +606,23 @@ class Reconciler:
                 continue
             ranker = self._ranker_for(s, draft)
             for _ in range(max(0, missing)):
-                ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                # rankings run off the event loop, like rank_for (the store is thread-safe)
+                ranked = await asyncio.to_thread(ranker, meta, s, reports, occupants=occ, limit=1)
                 if not ranked and len(active_of(s.name)) + started < min(wanted[s.name], self._floor(s)):
                     cands = self._candidates(by_name, [r for r in live if r.replica_id not in gone], s.name)
-                    victims = (preemption.find_victims(meta, s, reports, occ, cands, ranker,
-                                                         disabled=self._disabled(reports))
+                    victims = (await asyncio.to_thread(
+                                   preemption.find_victims, meta, s, reports, occ, cands, ranker,
+                                   disabled=self._disabled(reports))
                                if cands else None)
                     if victims:
                         for v in victims:
                             out["preempt"].append({"replica_id": v.replica_id, "model": v.model,
                                                    "priority": by_name[v.model].priority, "for_model": s.name})
                         release(victims)
-                        ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                        ranked = await asyncio.to_thread(ranker, meta, s, reports, occupants=occ, limit=1)
                 if not ranked:
-                    out["unplaced"].append({"model": s.name, "missing": missing - started,
-                                            "why": self._why_unplaced(meta, s, reports, occ, draft)})
+                    why = await asyncio.to_thread(self._why_unplaced, meta, s, reports, occ, draft)
+                    out["unplaced"].append({"model": s.name, "missing": missing - started, "why": why})
                     break
                 p = ranked[0]
                 out["start"].append({"model": s.name, "tier": p.tier, "est_decode_tps": p.est_decode_tps,
@@ -670,9 +672,11 @@ class Reconciler:
                 draft = await self.draft_meta_for(spec)
                 reports = self.available_reports()
                 self._apply_pins(spec, reports)  # a move stays within the model's pins
-                ranked = self._ranker()(meta, spec, reports, limit=5, extra=[r.placement],
-                                        occupants=[o for o in occ_all if o.replica_id != r.replica_id],
-                                        **self._pkw(spec.name, draft))
+                # off the event loop, like rank_for: one ranking per ready replica
+                ranked = await asyncio.to_thread(
+                    self._ranker(), meta, spec, reports, limit=5, extra=[r.placement],
+                    occupants=[o for o in occ_all if o.replica_id != r.replica_id],
+                    **self._pkw(spec.name, draft))
             except Exception:
                 log.exception("scoring a rebalance for %s failed", r.replica_id)
                 continue

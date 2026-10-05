@@ -207,8 +207,8 @@ mô phỏng và rebalancing.
    một device là một phép trừ trên tổng cộng dồn theo layer (weight + cache, tính một lần cho mỗi lượt xếp
    chỗ); dời một layer giữa hai device chỉ kiểm lại các device có dải layer bị dịch; bước ưu tiên tốc độ
    tiếp tục dời trên cùng một cặp khi còn có lợi. Cụm 8 máy, mỗi máy 5 device, xếp xong trong khoảng
-   0,3 s, và các lượt xếp hạng của Recommend chạy trong thread riêng nên không làm khựng phản hồi đang
-   stream.
+   0,3 s. Các lượt xếp hạng của Recommend, mô phỏng và chấm điểm rebalance chạy trong thread riêng nên
+   không làm khựng phản hồi đang stream.
 6. **Head** = node giữ nhiều layer nhất (tìm bằng điểm bất động: sắp xếp lại, chia lại, lặp). **Thứ tự
    device**: mọi node khác theo tổng usable giảm dần (device trong một node theo usable giảm dần), rồi CPU của
    head, rồi các device CUDA của head **ở cuối**. Device cuối giữ layer đầu ra, và llama-server đọc `n_vocab x 4`

@@ -213,8 +213,8 @@ display, simulation and rebalancing.
    `tensor_split` = layer counts. Cost: a device's need is one subtraction from per-layer prefix sums
    (weights + cache, built once per planning call); moving a layer between two devices re-checks only
    the devices whose layer ranges shift; the speed pass keeps moving along one pair while it helps. A
-   pool of 8 servers with 5 devices each plans in about 0.3 s, and Recommend's rankings run in a worker
-   thread so they never stall streamed responses.
+   pool of 8 servers with 5 devices each plans in about 0.3 s. Recommend, simulation and rebalance
+   scoring rank in a worker thread, so they never stall streamed responses.
 6. **Head** = the node holding the most layers (found as a fixed point: re-order, re-split, repeat).
    **Device order**: every other node by total usable descending (devices within a node by usable
    descending), then the head's CPU, then the head's CUDA devices **last**. The last device holds the output
