@@ -33,6 +33,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- Placement is about 10x faster on large pools (8 servers with 5 devices each: 3.0 s → 0.27 s; 4 servers:
+  256 → 29 ms), with the same placements (checked on 400 random clusters). Each device's need is one
+  subtraction from per-layer prefix sums instead of a loop over its layers; moving a layer between two devices
+  re-checks only the devices whose layer ranges shift; the speed pass keeps moving along a pair of devices while it
+  helps instead of rescanning every pair after each layer. Recommend's rankings run in a worker thread, so they
+  no longer stall streamed responses.
+
 - Draft and MTP speculative decoding sample the draft and verify it by rejection (`--spec-draft-sampling
   probabilistic`, llama.cpp b11413+): same output distribution, more drafts accepted at temperature > 0
   (+4-8 % throughput in llama.cpp's measurements). Agents on an older llama.cpp build keep greedy drafting.

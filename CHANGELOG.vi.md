@@ -32,6 +32,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Xếp chỗ nhanh hơn khoảng 10 lần trên cụm lớn (8 máy, mỗi máy 5 thiết bị: 3,0 s → 0,27 s; 4 máy: 256 → 29 ms),
+  cho ra đúng các phương án như trước (đã đối chiếu trên 400 cụm ngẫu nhiên). Nhu cầu bộ nhớ của mỗi thiết bị là
+  một phép trừ trên tổng cộng dồn theo layer thay vì vòng lặp qua từng layer; dời một layer giữa hai thiết bị chỉ
+  kiểm tra lại các thiết bị có dải layer bị dịch; bước ưu tiên GPU nhanh tiếp tục dời trên cùng một cặp thiết bị
+  khi còn có lợi thay vì quét lại mọi cặp sau mỗi layer. Các lượt xếp hạng của Recommend chạy trong thread riêng
+  nên không còn làm khựng các phản hồi đang stream.
+
 - Speculative decoding kiểu draft và MTP lấy mẫu bản nháp và kiểm bằng rejection (`--spec-draft-sampling
   probabilistic`, llama.cpp b11413+): cùng phân phối đầu ra, nhiều bản nháp được chấp nhận hơn khi temperature > 0
   (+4-8 % throughput theo số đo của llama.cpp). Agent dùng bản llama.cpp cũ hơn vẫn nháp kiểu greedy.

@@ -208,7 +208,13 @@ display, simulation and rebalancing.
 5. **Layer split** per device set: proportional to capacity (usable minus overhead), at least one
    layer each, then a repair pass moves one layer at a time from the most overfull device to the one
    with most slack, checked with exact per-layer bytes, until every device has `est_mb <= usable_mb`.
-   `tensor_split` = layer counts.
+   When the devices' bandwidths differ, a speed pass then moves layers from slower to faster devices
+   while they fit and the estimated decode time drops (every device keeps at least one layer).
+   `tensor_split` = layer counts. Cost: a device's need is one subtraction from per-layer prefix sums
+   (weights + cache, built once per planning call); moving a layer between two devices re-checks only
+   the devices whose layer ranges shift; the speed pass keeps moving along one pair while it helps. A
+   pool of 8 servers with 5 devices each plans in about 0.3 s, and Recommend's rankings run in a worker
+   thread so they never stall streamed responses.
 6. **Head** = the node holding the most layers (found as a fixed point: re-order, re-split, repeat).
    **Device order**: every other node by total usable descending (devices within a node by usable
    descending), then the head's CPU, then the head's CUDA devices **last**. The last device holds the output

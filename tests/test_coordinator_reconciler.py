@@ -722,6 +722,18 @@ async def test_plan_for_passes_occupants_to_the_planner(mock_health):
     await rec.shutdown()
 
 
+async def test_rank_for_ranks_off_the_event_loop(mock_health):
+    # ranking a big pool is CPU-bound: on the loop it would stall every streamed response
+    import threading
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000)]))
+    where = []
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: where.append(threading.get_ident()) or []
+    await rec.rank_for(SPEC, 3)
+    assert where and where[0] != threading.get_ident()
+    await rec.shutdown()
+
+
 async def test_rank_for_applies_pins_and_available_reports(mock_health):
     rec, store, clock = make_reconciler()
     beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000), dev("CUDA1", usable=6000)]),

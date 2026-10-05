@@ -5,7 +5,8 @@ import pytest
 
 from gpupool.common.models import ModelMeta
 from gpupool.scheduler.estimate import (
-    device_need_mb, kv_bytes_per_layer, kv_total_bytes, layer_kv_bytes, total_need_mb,
+    device_need_mb, kv_bytes_per_layer, kv_total_bytes, layer_kv_bytes, layer_prefix_bytes,
+    total_need_mb,
 )
 from gpupool.scheduler.gguf_meta import read_meta
 from gpupool.scheduler.scoring import est_decode_tps
@@ -185,3 +186,17 @@ def test_gemma4_shared_kv_layers_cache_nothing(tmp_path):
                                         ("attention.sliding_window_pattern", "array", [True] * 6),
                                         ("attention.shared_kv_layers", "uint32", 2)])
     assert [bool(k) for k in m.kv_k] == [True, True, True, True, False, False]
+
+
+@pytest.mark.parametrize("kw", [{}, {"parallel": 4}, {"parallel": 4, "kv_unified": True},
+                                {"mtp": True}, {"cache_type": "q8_0", "ubatch": 2048}])
+def test_prefix_sums_give_the_same_need_as_summing_layers(tmp_path, kw):
+    kv = [("attention.sliding_window", "uint32", 1024), ("nextn_predict_layers", "uint32", 1)]
+    tensors = [(f"blk.{i}.attn_q.weight", 4 + i) for i in range(12)]
+    m = write(tmp_path, "gemma3", 12, kv=kv, tensors=tensors)
+    p = layer_prefix_bytes(m, 32768, **kw)
+    assert p[-1] == sum(p[i + 1] - p[i] for i in range(12))
+    for a, b in [(0, 12), (0, 5), (3, 9), (11, 12), (4, 4)]:
+        for last in (False, True):
+            want = device_need_mb(m, range(a, b), 32768, "cuda", last, **kw)
+            assert device_need_mb(m, range(a, b), 32768, "cuda", last, **kw, prefix=p) == want

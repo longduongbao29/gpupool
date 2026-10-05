@@ -25,6 +25,7 @@ from gpupool.common.models import (
 from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
 from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
 from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
+from gpupool.scheduler.estimate import layer_prefix_bytes
 from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
 from gpupool.scheduler.scoring import (
     CUDA_BW_FALLBACK_GBPS, bandwidth_seconds, decode_bytes, default_cuda_bw, device_bw, est_decode_tps,
@@ -51,9 +52,16 @@ _MEM_FACTOR: ContextVar[float] = ContextVar("gpupool_mem_factor", default=1.0)
 _COMPUTE: ContextVar[dict] = ContextVar("gpupool_compute", default={})
 
 
+# Per-call cache of layer_prefix_bytes, keyed by (id(meta), ctx, cache type). Fresh for each
+# plan / rank call, so a later call never sees sizes from different spec settings. The entry
+# keeps the meta itself and is used only for that very object (an id alone could be reused).
+_PREFIX: ContextVar[dict | None] = ContextVar("gpupool_layer_prefix", default=None)
+
+
 @contextlib.contextmanager
 def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
+    ptok = _PREFIX.set({})
     ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn,
                                                  "parallel": spec.parallel,
                                                  "mtp": spec.speculative == "mtp",
@@ -62,6 +70,7 @@ def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
         yield
     finally:
         _COMPUTE.reset(ctok)
+        _PREFIX.reset(ptok)
         _MEM_FACTOR.reset(tok)
 
 
@@ -88,8 +97,22 @@ def overhead_mb(meta, kind, ctx_size: int = 0) -> int:
                             **{k: v for k, v in c.items() if k in ("ubatch", "flash_attn")})
 
 
+def _prefix(meta, ctx, ct) -> list[int] | None:
+    cache = _PREFIX.get()
+    if cache is None:
+        return None
+    hit = cache.get((id(meta), ctx, ct))
+    if hit is None or hit[0] is not meta:
+        c = _COMPUTE.get()
+        hit = (meta, layer_prefix_bytes(
+            meta, ctx, ct, **{k: v for k, v in c.items() if k not in ("flash_attn",)}))
+        cache[(id(meta), ctx, ct)] = hit
+    return hit[1]
+
+
 def _need(meta, ctx, ct, d: _Dev, start: int, count: int, is_last: bool) -> int:
-    return device_need_mb(meta, range(start, start + count), ctx, d.dev.kind, is_last, ct)
+    return device_need_mb(meta, range(start, start + count), ctx, d.dev.kind, is_last, ct,
+                          prefix=_prefix(meta, ctx, ct))
 
 
 def _check(meta, ctx, ct, order: list[_Dev], counts: list[int]) -> list[int]:
@@ -147,6 +170,19 @@ def _decode_s(meta: ModelMeta, bws: list[float], counts: list[int]) -> float:
     return t
 
 
+def _fits_between(meta, ctx, ct, order: list[_Dev], counts: list[int], lo: int, hi: int) -> bool:
+    """Whether devices lo..hi fit. Moving one layer between devices lo and hi shifts the layer
+    ranges of those two and of every device between them; the others keep theirs, so their
+    (already feasible) slack is unchanged and need not be recomputed."""
+    start = sum(counts[:lo])
+    last = len(order) - 1
+    for i in range(lo, hi + 1):
+        if _need(meta, ctx, ct, order[i], start, counts[i], i == last) > order[i].dev.usable_mb:
+            return False
+        start += counts[i]
+    return True
+
+
 def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: list[int]) -> list[int]:
     """Move layers from slower to faster devices while they fit and decode gets faster.
 
@@ -169,12 +205,18 @@ def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: l
             for src in reversed(fast_first):
                 if bws[src] >= bws[dst] or counts[src] <= 1:
                     continue
-                trial = counts.copy()
-                trial[src] -= 1
-                trial[dst] += 1
-                t = _decode_s(meta, bws, trial)
-                if t < cur * (1 - 1e-9) and min(_check(meta, ctx, ct, order, trial)) >= 0:
+                # keep moving along this pair while it helps: rescanning every pair after each
+                # single-layer move made the search quadratic in the number of layers moved
+                while counts[src] > 1:
+                    trial = counts.copy()
+                    trial[src] -= 1
+                    trial[dst] += 1
+                    t = _decode_s(meta, bws, trial)
+                    if not (t < cur * (1 - 1e-9) and _fits_between(
+                            meta, ctx, ct, order, trial, min(src, dst), max(src, dst))):
+                        break
                     counts, cur, moved = trial, t, True
+                if moved:
                     break
             if moved:
                 break

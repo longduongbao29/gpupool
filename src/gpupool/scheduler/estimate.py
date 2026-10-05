@@ -95,13 +95,30 @@ def kv_total_bytes(meta: ModelMeta, ctx_size: int, cache_type: str = "f16", para
                for i in range(meta.n_layers))
 
 
+def layer_prefix_bytes(meta: ModelMeta, ctx_size: int, cache_type: str = "f16", parallel: int = 1,
+                       ubatch: int = DEFAULT_UBATCH, mtp: bool = False,
+                       kv_unified: bool = False) -> list[int]:
+    """Cumulative weight + cache bytes: layers a..b-1 hold p[b] - p[a]. A split search checks
+    thousands of candidate layer counts; with this each device's need is one subtraction instead
+    of a Python loop over its layers."""
+    out = [0]
+    for i in range(meta.n_layers):
+        out.append(out[-1] + layer_weight_bytes(meta, i, mtp)
+                   + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified))
+    return out
+
+
 def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_last: bool,
                    cache_type: str = "f16", ubatch: int = DEFAULT_UBATCH,
                    flash_attn: str = "auto", parallel: int = 1, mtp: bool = False,
-                   kv_unified: bool = False) -> int:
-    total = sum(layer_weight_bytes(meta, i, mtp)
-                + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
-                for i in layers)
+                   kv_unified: bool = False, prefix: list[int] | None = None) -> int:
+    """prefix: layer_prefix_bytes for the same arguments, when the caller has it."""
+    if prefix is not None and layers.step == 1 and layers.start <= layers.stop:
+        total = prefix[layers.stop] - prefix[layers.start]
+    else:
+        total = sum(layer_weight_bytes(meta, i, mtp)
+                    + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
+                    for i in layers)
     extra_mb = 0
     if is_last:
         total += meta.output_bytes

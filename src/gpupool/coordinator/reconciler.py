@@ -381,8 +381,12 @@ class Reconciler:
         draft = await self.draft_meta_for(spec)
         reports = self.available_reports()
         self._apply_pins(spec, reports)
-        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit,
-                              **self._pkw(spec.name, draft))
+        occupants, kw = self.occupants(), self._pkw(spec.name, draft)  # store reads stay here
+        # Ranking is pure CPU (hundreds of ms on a large pool) and Recommend ranks a dozen
+        # variants: on the event loop that would stall every streamed response for as long.
+        # Its inputs are private copies, so a worker thread can have them.
+        return await asyncio.to_thread(self._ranker(), meta, spec, reports, occupants=occupants,
+                                       limit=limit, **kw)
 
     async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
         """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
