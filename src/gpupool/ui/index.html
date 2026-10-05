@@ -120,8 +120,8 @@
 
     <!-- ============ servers (overview + servers) ============ -->
     <div class="cols view" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
-      <div class="panel">
-        <div class="panel-head"><h2>Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
+      <div :class="{folded: folded('servers')}" class="panel">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('servers')}" @click="toggleFold('servers')" :aria-expanded="String(!folded('servers'))" :title="folded('servers') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Servers" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('servers')">Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
         <div class="empty" x-show="filteredServers().length === 0">No servers yet. Click <b>Add Server</b> to register an agent.</div>
         <template x-for="s in filteredServers()" :key="s.node_id">
           <div class="server" :class="{offline: !s.alive}">
@@ -245,8 +245,8 @@
     </div>
 
     <!-- ============ GPUs ============ -->
-    <div class="panel view" x-show="view==='gpus'">
-      <div class="panel-head"><h2>All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
+    <div :class="{folded: folded('gpus')}" class="panel view" x-show="view==='gpus'">
+      <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('gpus')}" @click="toggleFold('gpus')" :aria-expanded="String(!folded('gpus'))" :title="folded('gpus') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand All GPUs" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('gpus')">All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
       <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
       <div class="tbl-scroll tall" x-show="allGpuRows().length > 0">
       <table>
@@ -278,8 +278,8 @@
         <div class="grow" x-show="rbMove()">Moving replica <b x-text="rbMove() && rbMove().old"></b> of <b x-text="rbMove() && rbMove().model"></b>
           &rarr; <b x-text="rbMove() && rbMove().new"></b>, started <span x-text="rbMove() && ago(rbMove().since)"></span></div>
       </div>
-      <div class="panel">
-        <div class="panel-head wrap"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
+      <div :class="{folded: folded('library')}" class="panel">
+        <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('library')}" @click="toggleFold('library')" :aria-expanded="String(!folded('library'))" :title="folded('library') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Model library" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('library')">Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
           <div class="row right wrap" style="gap:var(--s-2)">
             <button class="btn" @click="openConvert()" title="Turn a Hugging Face model or a folder of weights into a GGUF file"><span x-html="icon('swap')"></span> Convert a model</button>
             <button class="btn primary" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div></div>
@@ -312,8 +312,8 @@
 
 
       <!-- ============ conversions ============ -->
-      <div class="panel mt" id="conversions">
-        <div class="panel-head wrap"><h2>Conversions</h2><span class="muted small">Hugging Face or folder to GGUF</span>
+      <div :class="{folded: folded('conversions')}" class="panel mt" id="conversions">
+        <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('conversions')}" @click="toggleFold('conversions')" :aria-expanded="String(!folded('conversions'))" :title="folded('conversions') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Conversions" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('conversions')">Conversions</h2><span class="muted small">Hugging Face or folder to GGUF</span>
           <button class="btn right" @click="openConvert()"><span x-html="icon('plus')"></span> Convert a model</button></div>
         <div class="notice warn" style="margin:var(--s-3) var(--s-4) 0" x-show="convOpts.loaded && !convOpts.available" role="alert">
           <b>Conversion is not available.</b> <span x-text="convOpts.problem || 'The conversion toolchain is not installed on this coordinator.'"></span>
@@ -413,8 +413,8 @@
         </div>
       </div>
 
-      <div class="panel mt">
-        <div class="panel-head"><h2>Placement health</h2><span class="muted small" x-text="rbNextText()"></span>
+      <div :class="{folded: folded('placement')}" class="panel mt">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('placement')}" @click="toggleFold('placement')" :aria-expanded="String(!folded('placement'))" :title="folded('placement') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Placement health" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('placement')">Placement health</h2><span class="muted small" x-text="rbNextText()"></span>
           <div class="row right">
             <button class="btn" @click="runRebalance(true)" :disabled="rb.busy"><span x-html="icon('search')"></span> Check placement</button>
             <button class="btn primary" @click="runRebalance(false)" :disabled="rb.busy || !!rbMove()" :title="rbMove() ? 'A replica is already being moved' : 'Start moving the replica with the biggest gain'"><span x-html="icon('swap')"></span> Rebalance now</button>
@@ -435,8 +435,8 @@
         </div>
       </div>
 
-      <div class="panel mt">
-        <div class="panel-head"><h2>Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
+      <div :class="{folded: folded('deployments')}" class="panel mt">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('deployments')}" @click="toggleFold('deployments')" :aria-expanded="String(!folded('deployments'))" :title="folded('deployments') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Deployments" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('deployments')">Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
           <button class="btn primary right" @click="openForm(null)" :disabled="readyLibrary().length === 0" :title="readyLibrary().length === 0 ? 'Add a model to the library first' : ''"><span x-html="icon('plus')"></span> New model</button></div>
         <div class="empty" x-show="filteredModels().length === 0">No deployments. Pick a file from the library and press <b>Deploy</b>.</div>
         <div class="model-grid" x-show="filteredModels().length > 0">
@@ -559,8 +559,8 @@
     </div>
 
     <!-- ============ Events ============ -->
-    <div class="panel view" x-show="view==='events'">
-      <div class="panel-head"><h2>Events</h2>
+    <div :class="{folded: folded('events')}" class="panel view" x-show="view==='events'">
+      <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('events')}" @click="toggleFold('events')" :aria-expanded="String(!folded('events'))" :title="folded('events') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Events" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('events')">Events</h2>
         <div class="row right">
           <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
           <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div></div>
@@ -669,7 +669,7 @@
     </div>
 
     <div class="view" x-show="view==='settings'">
-      <div class="panel"><div class="panel-head"><h2>API</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-api')}" class="panel"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-api')}" @click="toggleFold('set-api')" :aria-expanded="String(!folded('set-api'))" :title="folded('set-api') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand API" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-api')">API</h2></div><div class="panel-body">
         <div class="muted small">OpenAI-compatible base URL</div>
         <div class="cmd" style="margin:6px 0 16px"><span x-text="endpoint()"></span><button class="btn sm" @click="copy(endpoint())">Copy</button></div>
         <div class="muted small">curl</div>
@@ -679,14 +679,14 @@
         <div class="muted small" x-show="!settings().api_keys_set">API key: no key required (no API keys are configured, the OpenAI endpoint is open).</div>
         <div class="muted small" x-show="settings().api_keys_set">API key: use one of the configured keys as the Bearer token.</div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Add a GPU server</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-agent')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-agent')}" @click="toggleFold('set-agent')" :aria-expanded="String(!folded('set-agent'))" :title="folded('set-agent') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Add a GPU server" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-agent')">Add a GPU server</h2></div><div class="panel-body">
         <div class="muted small">Run on each GPU server; it appears under Servers within a few seconds.</div>
         <div class="muted small" style="margin-top:10px">Docker</div>
         <div class="cmd" style="margin-top:6px"><span x-text="agentCmd()"></span><button class="btn sm" @click="copy(agentCmd())">Copy</button></div>
         <div class="muted small" style="margin-top:12px">Without Docker (uv)</div>
         <div class="cmd" style="margin-top:6px"><span x-text="agentCmdUv()"></span><button class="btn sm" @click="copy(agentCmdUv())">Copy</button></div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Appearance</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-look')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-look')}" @click="toggleFold('set-look')" :aria-expanded="String(!folded('set-look'))" :title="folded('set-look') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Appearance" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-look')">Appearance</h2></div><div class="panel-body">
         <div class="row wrap" style="justify-content:space-between">
           <div><div style="font-weight:500">Theme</div><div class="muted small">System follows your operating system setting.</div></div>
           <div class="seg" role="group" aria-label="Theme">
@@ -695,7 +695,7 @@
             <button type="button" :class="{active: theme==='light'}" @click="setTheme('light')">Light</button>
           </div></div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Session</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-session')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-session')}" @click="toggleFold('set-session')" :aria-expanded="String(!folded('set-session'))" :title="folded('set-session') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Session" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-session')">Session</h2></div><div class="panel-body">
         <div class="row" style="margin-bottom:14px"><label class="switch"><input type="checkbox" :checked="desktop" @change="toggleDesktop($event.target.checked)"><span></span></label>
           <div><div>Enable desktop alerts</div><div class="muted small">System notification for warnings and errors while this tab is in the background.</div></div></div>
         <button class="btn" @click="logout()"><span x-html="icon('logout')"></span> Log out</button>

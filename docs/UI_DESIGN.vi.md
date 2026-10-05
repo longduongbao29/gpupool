@@ -339,6 +339,11 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   router dùng để đặt trọng số cho replica.
 - **Điện thoại**: các nút ở đầu khung (Check placement / Rebalance now) xuống dòng thay vì tràn ngang.
 - **Hàng đều nhau**: các thẻ model trên một hàng cao bằng nhau, hàng nút nằm sát đáy thẻ.
+- **Khung thu gọn được**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events và các
+  mục trong Settings có mũi tên ở đầu khung (bấm vào tiêu đề cũng được) để thu khung lại chỉ còn phần đầu, nên một khung
+  quá dài (nhiều conversion hay deployment) không đẩy các khung khác ra khỏi màn hình. Mọi khung mặc định mở; khung đã
+  thu gọn được nhớ theo trình duyệt (`localStorage` `gpupool.folded`). Các nút ở đầu khung (Add model, Rebalance
+  now...) vẫn dùng được khi đã thu gọn, và mọi phần đầu khung cao bằng nhau nên các khung thu gọn thẳng hàng.
 - **Dòng làm mờ** (GPU của server offline, sự kiện đã đọc) làm mờ các ô qua một class: dòng bảng có hiệu ứng xuất
   hiện giữ opacity cuối, hiệu ứng này đè lên style inline đặt trên dòng.
 - **Ô chọn có option sinh động** (model, file trong thư viện, draft) đánh dấu option đang gắn là `:selected`, nên ô

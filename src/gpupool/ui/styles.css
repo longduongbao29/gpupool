@@ -250,7 +250,8 @@ input[type=checkbox] { accent-color: var(--accent-solid); width: 16px; height: 1
 
 /* ---------- surfaces ---------- */
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-panel); box-shadow: var(--shadow-sm); }
-.panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--border); min-height: 60px; }
+/* one header height whether or not it holds buttons (36px controls + padding): folded panels line up */
+.panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--border); min-height: 68px; }
 .panel-head h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; }
 .panel-body { padding: var(--s-4) var(--s-5); }
 .empty { padding: var(--s-8); text-align: center; color: var(--text-muted); }
@@ -709,3 +710,16 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
   .pg-log { padding: var(--s-4); }
 }
 @media (prefers-reduced-motion: reduce) { .pg-text.typing > span:first-child::after { animation: none; } }
+
+/* ---------- collapsible panels ---------- */
+/* a folded panel keeps only its header; open by default, the state is remembered per browser */
+.panel.folded > :not(.panel-head) { display: none !important; }
+.panel.folded > .panel-head { border-bottom: 0; }
+.fold { flex: none; display: inline-grid; place-items: center; width: 26px; height: 26px; margin-left: calc(-1 * var(--s-2)); padding: 0;
+  border: 0; border-radius: var(--r-control); background: none; color: var(--text-muted); cursor: pointer; transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.fold:hover { background: var(--hover); color: var(--text); }
+.fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.fold .ic, .fold svg { transition: transform var(--t-base) var(--ease); }
+.fold.open .ic, .fold.open svg { transform: rotate(90deg); }
+.fold-title { cursor: pointer; user-select: none; }
+@media (prefers-reduced-motion: reduce) { .fold .ic, .fold svg { transition: none; } }

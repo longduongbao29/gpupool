@@ -63,6 +63,12 @@ var EV_KIND = {
   rebalance_failed: { cls: "amber", icon: "alert" }
 };
 
+// Collapsed panels, remembered per browser: every panel starts open.
+var FOLD_STORE = "gpupool.folded";
+function foldSaved() {
+  try { var v = JSON.parse(localStorage.getItem(FOLD_STORE) || "{}"); return v && typeof v === "object" ? v : {}; } catch (e) { return {}; }
+}
+
 // Playground settings remembered per browser (model, system prompt, sampling); never the chat itself.
 var PG_STORE = "gpupool.playground";
 function pgSaved() {
@@ -187,6 +193,7 @@ function app() {
     // Playground: chat with a deployed model through the same /v1 route clients use
     pg: Object.assign({ input: "", msgs: [], busy: false, ctrl: null, raf: 0 }, pgSaved()),
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
+    fold: foldSaved(), // panel id -> true when collapsed (all open by default), remembered per browser
 
     // ================= lifecycle =================
     init: function () {
@@ -1087,6 +1094,14 @@ function app() {
       if (hops) bits.push(hops + (hops === 1 ? " network hop " : " network hops ") + net.toFixed(1) + " ms");
       if (lg >= 0.05) bits.push("logits over the network " + lg.toFixed(1) + " ms");
       return "Per token about " + (w + net + lg).toFixed(1) + " ms: " + bits.join(" + ");
+    },
+    // ================= collapsible panels =================
+    folded: function (id) { return !!this.fold[id]; },
+    toggleFold: function (id) {
+      var f = Object.assign({}, this.fold);
+      if (f[id]) delete f[id]; else f[id] = true;
+      this.fold = f;
+      try { localStorage.setItem(FOLD_STORE, JSON.stringify(f)); } catch (e) { /* storage blocked */ }
     },
     // ================= playground =================
     // Models a chat can go to: running ones, and idle on-demand ones (the first request loads them).

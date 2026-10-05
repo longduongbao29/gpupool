@@ -10,6 +10,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thêm
 
+- UI: các khung lớn (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, các mục
+  Settings) thu gọn được còn phần đầu bằng mũi tên hoặc bấm vào tiêu đề. Mặc định đều mở; khung đã thu gọn được nhớ theo
+  trình duyệt.
+
 - **Playground** trong UI: chat với model đã deploy qua `/v1/chat/completions` (router, balancer và replica, đúng như
   client). Câu trả lời stream từng ký tự, kèm dải số đo trực tiếp: thời gian tới token đầu, token/giây khi sinh, số
   token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill) và replica đã trả lời.

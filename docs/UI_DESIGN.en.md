@@ -341,6 +341,11 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   weighs replicas by.
 - **Phone**: panel header buttons (Check placement / Rebalance now) wrap instead of overflowing.
 - **Even rows**: model cards in a row share its height, with their action row at the bottom.
+- **Collapsible panels**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events and
+  the Settings sections have a chevron in their header (a click on the title works too) that folds the panel down to
+  its header, so a long one (many conversions or deployments) does not push the others off screen. Every panel starts
+  open; folded ones are remembered per browser (`localStorage` `gpupool.folded`). Header buttons (Add model, Rebalance
+  now...) keep working while folded, and every header has the same height, so folded panels line up.
 - **Dimmed rows** (a GPU of an offline server, an event already read) dim their cells through a class: table rows
   play an enter animation that keeps its final opacity, which would override an inline style on the row.
 - **Selects with generated options** (model, library file, draft) mark the bound option `:selected`, so the

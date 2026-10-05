@@ -10,6 +10,10 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- UI: large panels (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, Settings
+  sections) collapse to their header from a chevron or a click on the title. All start open; folded ones are remembered
+  per browser.
+
 - **Playground** in the UI: chat with a deployed model through `/v1/chat/completions` (router, balancer and replica, as a
   client would). Replies stream character by character with a live strip of time to first token, generation tokens/s,
   tokens and total latency; each reply also shows prompt (prefill) tokens and speed and the replica that answered.

@@ -1033,3 +1033,16 @@ def test_ui_has_playground():
     # model output is untrusted: rendered as text only
     pg = html[html.index("<!-- ============ playground"):html.index("<!-- ============", html.index("<!-- ============ playground") + 10)]
     assert re.findall(r'x-html="(?!icon\()', pg) == []
+
+
+def test_ui_large_panels_collapse_and_start_open():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    ids = re.findall(r"toggleFold\('([a-z-]+)'\)\" :aria-expanded", html)
+    assert {"servers", "gpus", "library", "conversions", "placement", "deployments", "events"} <= set(ids)
+    for fid in ids:  # each foldable panel is bound to its own state
+        assert f":class=\"{{folded: folded('{fid}')}}\"" in html, fid
+    # open unless the viewer folded it: the saved map only lists folded panels
+    assert "function foldSaved()" in js and "if (f[id]) delete f[id]; else f[id] = true;" in js
+    assert re.search(r"\.panel\.folded > :not\(\.panel-head\) \{ display: none", css)
