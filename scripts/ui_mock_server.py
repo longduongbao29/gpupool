@@ -940,7 +940,7 @@ REPOS: dict[str, dict] = {
     "acme/novelnet-7b": dict(
         repo="acme/NovelNet-7B", arch="NovelNetForCausalLM", model_type="novelnet", params=7_000_000_000, layers=32, ctx=4096,
         files=[("config.json", 700), ("tokenizer.model", 500_000), ("model.safetensors", 14_000_000_000)], skipped=[], supported=False,
-        warnings=["Architecture NovelNetForCausalLM is not known to the pinned llama.cpp converter (b11342)."]),
+        warnings=["Architecture NovelNetForCausalLM is not known to the pinned llama.cpp converter (b11413)."]),
     "meta-llama/llama-3.1-8b-instruct": dict(
         repo="meta-llama/Llama-3.1-8B-Instruct", arch="LlamaForCausalLM", model_type="llama", params=8_030_261_248, layers=32, ctx=131072,
         files=[("config.json", 855), ("tokenizer.json", 9_085_657)] + [(f"model-0000{i}-of-00004.safetensors", b) for i, b in

@@ -22,6 +22,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- llama.cpp b11342 → b11413 trong cả hai image (cùng giao thức RPC 7.0.0; vẫn nâng mọi agent cùng lúc như trước).
+  Mang lại: draft n-gram không còn bị từ chối khi temperature > 0, lấy mẫu draft theo xác suất cho draft và MTP, sửa
+  lỗi bộ nhớ CUDA với MoE nhiều expert, gộp shared expert và matmul f16/bf16 batch nhỏ nhanh hơn trên CUDA, sửa flash
+  attention trên Volta, và `llama-imatrix --nextn`, mà gpupool giờ truyền cho model có layer MTP để các loại lượng tử
+  cần importance matrix lượng tử hoá được chúng.
+
 - Router chia request giữa các replica của một model theo tốc độ của chúng: weighted rendezvous hashing với trọng
   số là tốc độ sinh token của từng replica (số đo của llama-server khi đã sinh token, nếu không thì ước lượng), và phép kiểm tra quá tải tính số request theo năng lực. Replica bị chia
   qua mạng chạy 10 tok/s không còn nhận phần bằng replica một GPU chạy 50 tok/s. Replica cùng tốc độ định tuyến y

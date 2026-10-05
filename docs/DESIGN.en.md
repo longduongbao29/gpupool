@@ -3,7 +3,7 @@
 > English version. Vietnamese version: [DESIGN.vi.md](DESIGN.vi.md). Keep both in sync.
 
 gpupool pools scattered free VRAM across many servers and serves several LLMs through one
-OpenAI-compatible API. The engine is llama.cpp (`llama-server` + `ggml-rpc-server`, build b11342);
+OpenAI-compatible API. The engine is llama.cpp (`llama-server` + `ggml-rpc-server`, build b11413);
 what we write is the control plane: an **agent** on every GPU server, and a **coordinator** that
 holds the scheduler, the reconciler, the autoscaler, the router and the web UI.
 
@@ -19,7 +19,7 @@ This document describes the system as it is in the code. Related documents:
 | --- | --- | --- | --- |
 | Control-plane language | Go or Rust | Python 3.12, installed with `uv` | `uv` is one user-space binary that fetches its own Python, so there is no dependency on the server's Python or sudo. |
 | RPC binary name | `rpc-server` | `ggml-rpc-server` (b11342) | Renamed upstream; the agent looks for both. |
-| llama.cpp build | build from source | pin b11342; prebuilt or self-built, passed via `llama_dir`; Docker images carry it | The dev driver supports CUDA 13.3, so the `cuda-13.4` build does not run; use `cuda-12.4`. |
+| llama.cpp build | build from source | pin b11413; prebuilt or self-built, passed via `llama_dir`; Docker images carry it | The dev driver supports CUDA 13.3, so the `cuda-13.4` build does not run; use `cuda-12.4`. |
 | Device order | implicit | always pass `--device` + `--tensor-split` in the same order, and `--rpc` before `--device` | llama.cpp lists local devices first, then RPC; it resolves device names while parsing arguments, so `RPC0` exists only after `--rpc` registered the servers. |
 | Remote devices | 1 rpc-server per node | 1 rpc-server per node and replica, serving that replica's consecutive devices on the node (`-d CUDA0,CUDA1`); 1 per device for agents older than 0.6 | Activations between two GPUs of one server are copied inside it (`RPC_CMD_COPY_TENSOR`) instead of going server → head → server; own port per replica, deterministic `RPCi` names (a server's devices are numbered consecutively in `-d` order). |
 | Model source | URL | URL, absolute local path, or `coordinator://<file>` | Servers reach each other but may have no internet. |
@@ -895,7 +895,9 @@ exactly that reason, and a fresh checkout would have refused every matrix job wi
 exception for the package folder; see TEST_REPORT.)
 
 **The run.** `llama-imatrix -m intermediate -f calibration.txt -o imatrix.gguf --chunks N -c 512 --no-ppl -ngl 0
-[-t threads]`. `N` is `advanced.imatrix_chunks`, default 100; the context is 512 tokens because short sequences keep
+[-t threads] [--nextn -b 512]`. `--nextn` (b11413) is added when the intermediate has MTP (`nextn`) layers that
+llama.cpp loads only on request: without it those tensors get no matrix and a type that needs one cannot quantize
+them; it needs one sequence per batch, hence `-b 512`. `N` is `advanced.imatrix_chunks`, default 100; the context is 512 tokens because short sequences keep
 a CPU run feasible; `--no-ppl` skips the perplexity pass, which only costs time. With `--no-ppl` the tool prints no
 per-chunk lines (in b11342 they are inside the perplexity branch), so progress is estimated from the time of the first
 pass and the ETA it prints, advanced once a second (never reaching 100 % from the clock alone: the file is written

@@ -10,15 +10,15 @@ ends up in an image layer.
 
 ## 1. llama.cpp source (agent image and coordinator image)
 
-Download the GitHub tag archive for the pinned tag (`LLAMA_CPP_REF`, default `b11342`) on any machine
+Download the GitHub tag archive for the pinned tag (`LLAMA_CPP_REF`, default `b11413`) on any machine
 that can reach GitHub, and save it under exactly this name:
 
 ```bash
-curl -L -o vendor/llama.cpp-b11342.tar.gz \
-  https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz     # ~37 MB
+curl -L -o vendor/llama.cpp-b11413.tar.gz \
+  https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz     # ~37 MB
 ```
 
-It must be the `archive/refs/tags` tarball: one top-level directory (`llama.cpp-b11342/`), which the build
+It must be the `archive/refs/tags` tarball: one top-level directory (`llama.cpp-b11413/`), which the build
 strips. The build picks the source in this order: this tarball, then `git clone`, then `curl` of
 `LLAMA_CPP_URL` (build arg; point it at an internal mirror of the same archive).
 
@@ -82,14 +82,14 @@ Dành cho server chặn git / GitHub. Mọi thứ ở đây đều tuỳ chọn:
 
 ## 1. Mã nguồn llama.cpp (image agent và image coordinator)
 
-Trên một máy ra được GitHub, tải bản nén của tag đã ghim (`LLAMA_CPP_REF`, mặc định `b11342`) và lưu đúng tên:
+Trên một máy ra được GitHub, tải bản nén của tag đã ghim (`LLAMA_CPP_REF`, mặc định `b11413`) và lưu đúng tên:
 
 ```bash
-curl -L -o vendor/llama.cpp-b11342.tar.gz \
-  https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz     # ~37 MB
+curl -L -o vendor/llama.cpp-b11413.tar.gz \
+  https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz     # ~37 MB
 ```
 
-Phải là tarball `archive/refs/tags`: một thư mục gốc (`llama.cpp-b11342/`), build sẽ bỏ nó đi. Thứ tự chọn
+Phải là tarball `archive/refs/tags`: một thư mục gốc (`llama.cpp-b11413/`), build sẽ bỏ nó đi. Thứ tự chọn
 nguồn: tarball này, rồi `git clone`, rồi `curl` tới `LLAMA_CPP_URL` (build arg; trỏ tới bản mirror nội bộ
 của cùng file nén).
 

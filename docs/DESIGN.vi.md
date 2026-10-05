@@ -3,7 +3,7 @@
 > Bản tiếng Việt. Bản tiếng Anh: [DESIGN.en.md](DESIGN.en.md). Hai bản phải được cập nhật cùng nhau.
 
 gpupool gom VRAM rảnh rải rác trên nhiều server thành một pool và phục vụ nhiều LLM qua một API tương
-thích OpenAI. Engine là llama.cpp (`llama-server` + `ggml-rpc-server`, build b11342); phần chúng ta viết là
+thích OpenAI. Engine là llama.cpp (`llama-server` + `ggml-rpc-server`, build b11413); phần chúng ta viết là
 control plane: một **agent** trên mỗi server GPU, và một **coordinator** chứa scheduler, reconciler,
 autoscaler, router và web UI.
 
@@ -19,7 +19,7 @@ Tài liệu này mô tả hệ thống đúng như trong code hiện tại. Tài
 | --- | --- | --- | --- |
 | Ngôn ngữ control plane | Go hoặc Rust | Python 3.12, cài bằng `uv` | `uv` là một binary user-space tự tải Python riêng, nên không phụ thuộc Python của server hay sudo. |
 | Tên binary RPC | `rpc-server` | `ggml-rpc-server` (b11342) | Upstream đã đổi tên; agent tìm cả hai. |
-| Bản llama.cpp | build từ source | cố định b11342; build sẵn hoặc tự build, truyền qua `llama_dir`; image Docker đã kèm sẵn | Driver trên máy dev hỗ trợ CUDA 13.3 nên build `cuda-13.4` không chạy; dùng `cuda-12.4`. |
+| Bản llama.cpp | build từ source | cố định b11413; build sẵn hoặc tự build, truyền qua `llama_dir`; image Docker đã kèm sẵn | Driver trên máy dev hỗ trợ CUDA 13.3 nên build `cuda-13.4` không chạy; dùng `cuda-12.4`. |
 | Thứ tự device | ngầm định | luôn truyền `--device` + `--tensor-split` cùng thứ tự, và `--rpc` trước `--device` | llama.cpp liệt kê device local trước rồi mới tới RPC; nó phân giải tên device ngay khi parse đối số, nên `RPC0` chỉ tồn tại sau khi `--rpc` đã đăng ký các server. |
 | Device từ xa | 1 rpc-server mỗi node | 1 rpc-server mỗi node và replica, phục vụ các device liền nhau của replica trên node đó (`-d CUDA0,CUDA1`); 1 cái mỗi device với agent cũ hơn 0.6 | Activation giữa hai GPU của cùng server được copy ngay trong server (`RPC_CMD_COPY_TENSOR`) thay vì đi server → head → server; mỗi replica một cổng riêng, tên `RPCi` xác định (device của một server được đánh số liên tiếp theo thứ tự `-d`). |
 | Nguồn model | URL | URL, đường dẫn tuyệt đối trên máy, hoặc `coordinator://<file>` | Các server thấy nhau nhưng có thể không có internet. |
@@ -866,7 +866,9 @@ lúc chạy; lần commit đầu đã bỏ sót nó vì đúng lý do này, và 
 tắc ignore nay có ngoại lệ cho thư mục của package; xem TEST_REPORT.)
 
 **Lần chạy.** `llama-imatrix -m bản-trung-gian -f calibration.txt -o imatrix.gguf --chunks N -c 512 --no-ppl -ngl 0
-[-t luồng]`. `N` là `advanced.imatrix_chunks`, mặc định 100; ngữ cảnh 512 token vì chuỗi ngắn giúp lần chạy trên CPU
+[-t luồng] [--nextn -b 512]`. `--nextn` (b11413) được thêm khi bản trung gian có layer MTP (`nextn`) mà llama.cpp
+chỉ nạp khi được yêu cầu: thiếu nó các tensor đó không có ma trận và loại lượng tử cần ma trận không lượng tử hoá được
+chúng; nó cần mỗi batch một sequence, nên có `-b 512`. `N` là `advanced.imatrix_chunks`, mặc định 100; ngữ cảnh 512 token vì chuỗi ngắn giúp lần chạy trên CPU
 khả thi; `--no-ppl` bỏ lượt tính perplexity, vốn chỉ tốn thời gian. Với `--no-ppl` công cụ không in dòng nào theo từng
 chunk (ở b11342 các dòng đó nằm trong nhánh tính perplexity), nên tiến độ được ước lượng từ thời gian của lượt đầu và
 ETA mà nó in ra, cập nhật mỗi giây (không bao giờ chạm 100 % chỉ nhờ đồng hồ: tệp được ghi sau chunk cuối); nếu phiên

@@ -47,8 +47,9 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10
 FROM ${UV_IMAGE} AS uv
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama
-# Pinned: the RPC protocol must match on every server, and gpupool was tested on b11342.
-ARG LLAMA_CPP_REF=b11342
+# Pinned: the RPC protocol must match on every server (upgrade every agent together). b11413 since
+# gpupool 0.6; the GPU measurements in docs/TEST_REPORT were taken on b11342 (same RPC protocol 7.0.0).
+ARG LLAMA_CPP_REF=b11413
 # Compute capabilities to compile kernels for. 61 Pascal, 70 Volta, 75 Turing, 80/86 Ampere,
 # 89 Ada, 90 Hopper, 120 Blackwell (RTX 5090/5080, RTX PRO 6000; needs CUDA >= 12.8, and
 # llama.cpp turns it into 120a for the FP4 tensor cores). Fewer archs = much faster build.
@@ -91,7 +92,7 @@ WORKDIR /src
 # Without .git, llama.cpp's CMake cannot derive the build number (a --depth 1 clone would report 1
 # too), so pass it explicitly: tag bNNNN -> build number NNNN. `llama-server --version` prints it
 # and the agent reports it as llama_version. LLAMA_BUILD_NUMBER / LLAMA_BUILD_COMMIT are honoured
-# by CMakeLists.txt (`if (NOT DEFINED ...)`), verified against tag b11342.
+# by CMakeLists.txt (`if (NOT DEFINED ...)`), verified against tag b11413.
 # --allow-shlib-undefined: libcuda.so comes from the host driver at run time, only a stub
 # exists in the build image.
 RUN num="${LLAMA_CPP_REF#b}"; \

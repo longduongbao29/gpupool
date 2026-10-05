@@ -76,8 +76,8 @@ RUN uv sync --frozen --no-dev --no-editable
 # Built in a throw-away stage so no compiler or cache reaches the final image. Same base image as
 # `base`, so the venv's python symlink (/usr/local/bin/python3.12) resolves in the final image too.
 FROM docker.io/library/python:3.12-slim AS convert-build
-# Pinned: gpupool was tested on b11342 (same tag as docker/agent.Dockerfile).
-ARG LLAMA_CPP_REF=b11342
+# Pinned: the same tag as docker/agent.Dockerfile (b11413 adds llama-imatrix --nextn for MTP layers).
+ARG LLAMA_CPP_REF=b11413
 # Last-resort source download, used when there is no vendored tarball and git cannot reach GitHub.
 # Must serve the GitHub tag archive layout (one top-level directory, stripped on extract).
 ARG LLAMA_CPP_URL=https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF}.tar.gz

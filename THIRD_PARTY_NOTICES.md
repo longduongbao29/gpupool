@@ -34,9 +34,9 @@ all others) are separate works with their own licenses and acceptable-use polici
 
 | Component | Version | License | Link |
 | --- | --- | --- | --- |
-| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11342` | MIT (per upstream) | <https://github.com/ggml-org/llama.cpp> |
+| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11413` | MIT (per upstream) | <https://github.com/ggml-org/llama.cpp> |
 
-- The **agent image** (`docker/agent.Dockerfile`) compiles llama.cpp b11342 with CUDA and includes the binaries.
+- The **agent image** (`docker/agent.Dockerfile`) compiles llama.cpp b11413 with CUDA and includes the binaries.
 - The **coordinator image** built with `WITH_CONVERT=1` (`docker/coordinator.Dockerfile`) compiles the CPU tools
   `llama-quantize`, `llama-tokenize`, `llama-simple`, `llama-imatrix`, and copies `convert_hf_to_gguf.py`,
   `conversion/` and `gguf-py/` from the same tag into `/opt/llama.cpp`, together with the upstream `LICENSE`
@@ -93,7 +93,7 @@ MIT, MIT and BSD-2-Clause respectively (verified).
 ## Conversion environment (coordinator image with `WITH_CONVERT=1`)
 
 The image contains a separate virtual environment, `/opt/convert-venv`, installed from llama.cpp's
-`requirements/requirements-convert_hf_to_gguf.txt` at tag b11342 (CPU wheel of PyTorch). These packages are not
+`requirements/requirements-convert_hf_to_gguf.txt` at tag b11413 (CPU wheel of PyTorch). These packages are not
 installed in this repository's environment, so their licenses are given per upstream; check the exact set inside the
 image with `docker run --rm --entrypoint /opt/convert-venv/bin/python <image> -m pip list` if you need to be sure.
 

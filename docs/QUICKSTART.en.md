@@ -125,7 +125,7 @@ weights are already on the server's disk.
    server** (absolute path of a folder with `config.json`, the tokenizer files and the weights; host paths are
    translated like library paths, see [Using model files already on the server](#using-model-files-already-on-the-server)).
 2. **Inspect**. Nothing is downloaded: gpupool reads the config and the file listing. You see the architecture and
-   whether the pinned converter (llama.cpp b11342) supports it, parameters, layers, context length, download
+   whether the pinned converter (llama.cpp b11413) supports it, parameters, layers, context length, download
    size, and warnings (gated repo, already quantized, ships custom code, ready-made GGUF builds).
 3. Pick a **quantization type** (next section). Each row shows the estimated file size and VRAM, whether it fits
    one GPU or only the pool, and which type is recommended, with the reasons.
@@ -327,7 +327,7 @@ architecture is supported, and starting a job returns HTTP 503 with an explanati
 `llama-imatrix` alone is optional: a coordinator without it converts every type that needs no matrix as usual.
 Where `download.pytorch.org` is blocked, build with a mirror of the PyTorch CPU wheel index
 (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`; `docker-compose.coordinator.yml` reads
-`TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11342.tar.gz` when it is
+`TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11413.tar.gz` when it is
 there, like the agent image, see [Building without GitHub](#building-without-github). Outside Docker set
 `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` and `GPUPOOL_LLAMA_TOOLS_DIR` (see Settings).
 
@@ -401,7 +401,7 @@ git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # prints the same admin key and join command
 ```
 
-GPU server (needs [uv](https://docs.astral.sh/uv/) and a llama.cpp build with CUDA and RPC, b11342):
+GPU server (needs [uv](https://docs.astral.sh/uv/) and a llama.cpp build with CUDA and RPC, b11413):
 
 ```bash
 uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /path/to/llama.cpp/build/bin
@@ -539,7 +539,7 @@ What you still have to set up yourself on every machine that runs Docker:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `docker pull` / `FROM` step: `i/o timeout`, `TLS handshake timeout`, `connection refused` | the daemon has no proxy | step 1 (daemon proxy), restart docker |
-| Build step `git clone` hangs or `Failed to connect to github.com` | GitHub blocked even through the proxy | put `vendor/llama.cpp-b11342.tar.gz` in the repo, or set `LLAMA_CPP_URL` |
+| Build step `git clone` hangs or `Failed to connect to github.com` | GitHub blocked even through the proxy | put `vendor/llama.cpp-b11413.tar.gz` in the repo, or set `LLAMA_CPP_URL` |
 | `uv sync`: `Failed to download ... cpython-3.12` | python-build-standalone is hosted on GitHub | set `UV_PYTHON_INSTALL_MIRROR` (see below) |
 | `failed to resolve source metadata for ghcr.io/astral-sh/uv` | ghcr.io unreachable | set `UV_IMAGE` to a mirror; coordinator: `UV_FROM_PYPI=1` |
 | `apt-get` or `pip` fails inside the build | proxy build args missing | pass `--build-arg http_proxy=... https_proxy=...` or use compose / `config.json` |
@@ -557,7 +557,7 @@ is needed when the proxy lets GitHub through.
    `vendor/` of this repo and copy the repo to the server:
 
    ```bash
-   curl -L -o vendor/llama.cpp-b11342.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz
+   curl -L -o vendor/llama.cpp-b11413.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz
    ```
 
    The build uses that file first, then `git clone`, then `curl` of `LLAMA_CPP_URL` (an internal mirror of the
@@ -695,7 +695,7 @@ described above. HTTP API: [API.en.md](API.en.md). Internals: [DESIGN.en.md](DES
 | --- | --- |
 | Server never appears in the UI | `docker logs gpupool-agent`: "connection refused" → port 8080 blocked or wrong address in the join command (use the coordinator's LAN IP); "wrong cluster token" → copy the join command again |
 | Agent log says the server was removed | it was deleted in the UI; add it again there (Servers → Add Server → agent URL `http://<server-ip>:7070`) |
-| Convert: inspect or the job says the architecture is not supported ("not supported by llama.cpp b11342's converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
+| Convert: inspect or the job says the architecture is not supported ("not supported by the pinned llama.cpp converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
 | Convert: HTTP 503 "conversion is not set up ..." | the image was built with `WITH_CONVERT=0`, or `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` are missing or wrong outside Docker. Use the full image or fix the paths; the message names what is missing |
 | Convert: HTTP 507 "not enough free disk space ..." when starting the job | the disk obviously cannot hold *uncached download + 16-bit intermediate + output* (see *Disk, RAM and time*). Nothing was queued. Free space, or point `GPUPOOL_MODELS_DIR` at a bigger disk, and start again |
 | Convert: a job *failed* with "not enough free disk space ..." | the first check passed but a later stage found less room (another job or process used the disk). The job's `failed_stage` says where. Free space, then **Retry** (finished downloads are reused) |

@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=gpupool)
-[![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
+[![llama.cpp b11413](https://img.shields.io/badge/llama.cpp-b11413-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11413)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.en.md)
 
 [Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [What fits](#what-fits-where) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
@@ -297,7 +297,7 @@ From the "still to do" and open-question lists in the [test report](docs/TEST_RE
   multi-GPU server and RDMA over a real network
 - [ ] Per-client API keys and quotas, `/v1/embeddings`, TLS
 - [ ] Zero-downtime model swap
-- [ ] Upgrade llama.cpp
+- [x] Upgrade llama.cpp (b11342 → b11413)
 - [ ] Decode-speed model per GPU architecture (today a single fixed efficiency of 0.5) and a separate prefill score
 - [ ] Importance matrices on GPU servers; distributing conversion jobs over several machines
 - [ ] LoRA adapters and vision projectors (`mmproj`) in conversion
@@ -338,7 +338,7 @@ newer (RTX 50-series cards need 570 or newer). GPU servers need Docker and the N
 
 Yes: `uv run gpupool coordinator`, and on each GPU server
 `uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir <llama.cpp build/bin>`.
-The agent needs a llama.cpp b11342 build with CUDA and RPC. See "Without Docker" in the
+The agent needs a llama.cpp b11413 build with CUDA and RPC. See "Without Docker" in the
 [quick start](docs/QUICKSTART.en.md).
 
 </details>
@@ -347,7 +347,7 @@ The agent needs a llama.cpp b11342 build with CUDA and RPC. See "Without Docker"
 <summary><b>Can I serve safetensors models?</b></summary>
 
 Yes, by converting them to GGUF in the coordinator (UI or `/api/convert`). Support depends on the pinned converter
-(llama.cpp b11342): an unsupported architecture is reported at the inspect step. LoRA adapters and vision projectors
+(llama.cpp b11413): an unsupported architecture is reported at the inspect step. LoRA adapters and vision projectors
 are not converted yet.
 
 </details>

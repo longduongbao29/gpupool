@@ -37,8 +37,8 @@ body:
     id: llama
     attributes:
       label: llama.cpp build / Bản build llama.cpp
-      description: "Shown in the UI and as `llama_version` in the agent report (the images use b11342). / Hiển thị trên UI và trong báo cáo agent."
-      placeholder: "b11342"
+      description: "Shown in the UI and as `llama_version` in the agent report (the images use b11413). / Hiển thị trên UI và trong báo cáo agent."
+      placeholder: "b11413"
   - type: textarea
     id: steps
     attributes:

@@ -53,6 +53,7 @@ from gpupool.converter.quant import (
 from gpupool.converter.source import HfClient, inspect_source, local_files, select_files
 from gpupool.converter.toolchain import IMATRIX_NOT_INSTALLED, ImatrixProgress, Toolchain, run_tool
 from gpupool.converter.validate import validate
+from gpupool.scheduler.gguf_meta import read_meta
 
 log = logging.getLogger(__name__)
 
@@ -318,7 +319,7 @@ class ConvertManager:
             supported_architectures=await self.toolchain.supported_architectures())
         if insp.supported is False:
             raise ConvertError(
-                f"architecture {insp.architecture} is not supported by llama.cpp b11342's converter",
+                f"architecture {insp.architecture} is not supported by the pinned llama.cpp converter",
                 422)
         if insp.prequantized and insp.prequant_supported is False:
             hint = (f"; convert its base model {insp.base_model} instead" if insp.base_model
@@ -766,8 +767,9 @@ class ConvertManager:
         text = work / "calibration.txt"
         await self._thread(ctx, self._stage_calibration, adv.calibration_path, text)
         out = work / "imatrix.gguf"
+        nextn = await self._thread(ctx, _has_nextn, model)
         cmd = self.toolchain.imatrix_cmd(model, text, out, chunks=adv.imatrix_chunks or _DEFAULT_CHUNKS,
-                                         threads=adv.threads or self.threads)
+                                         threads=adv.threads or self.threads, nextn=nextn)
         await self._tool(job, ctx, cmd, "llama-imatrix", imatrix=ImatrixProgress())
         if not out.is_file() or out.stat().st_size == 0:
             raise ConvertError("llama-imatrix finished but wrote no importance matrix")
@@ -940,3 +942,10 @@ class ConvertManager:
         detail = "\n".join(lines[-12:])
         return f"{label} failed (exit code {code}): {key}\n--- last output ---\n{detail}"[:4000]
 
+
+def _has_nextn(model: Path) -> bool:
+    """True when the converted model carries MTP (nextn) layers llama.cpp loads only on request."""
+    try:
+        return read_meta(str(model)).n_nextn > 0
+    except (OSError, ValueError):
+        return False

@@ -412,3 +412,33 @@ def test_imatrix_progress_parsing():
     assert h.fraction(1.0 + 3750 / 2) == pytest.approx(0.5, abs=0.01)
     h.feed("[3]5.1234,[4]5.0001,", 1.0)  # per-chunk entries (perplexity on) win when present
     assert h.fraction(5.0) == pytest.approx(0.4)
+
+
+def test_imatrix_cmd_collects_mtp_layers_on_request(tmp_path):
+    tc = make_toolkit(tmp_path)
+    cmd = tc.imatrix_cmd(Path("m"), Path("c"), Path("o"), nextn=True)
+    # --nextn needs one sequence per batch: the batch is capped at the 512-token context
+    assert cmd[cmd.index("--nextn"):cmd.index("--nextn") + 3] == ["--nextn", "-b", "512"]
+    assert "--nextn" not in tc.imatrix_cmd(Path("m"), Path("c"), Path("o"))
+
+
+def test_has_nextn_reads_the_converted_header(tmp_path):
+    import gguf
+    import numpy as np
+    from gpupool.converter.jobs import _has_nextn
+    for arch, nextn, want in (("qwen35", 1, True), ("llama", 0, False)):
+        path = tmp_path / f"{arch}.gguf"
+        w = gguf.GGUFWriter(str(path), arch)
+        w.add_block_count(2)
+        w.add_embedding_length(8)
+        w.add_head_count(2)
+        if nextn:
+            w.add_uint32(f"{arch}.nextn_predict_layers", nextn)
+        w.add_tensor("blk.0.attn_q.weight", np.zeros((2, 8), dtype=np.float32))
+        w.add_tensor("blk.1.attn_q.weight", np.zeros((2, 8), dtype=np.float32))
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+        assert _has_nextn(path) is want
+    assert _has_nextn(tmp_path / "missing.gguf") is False

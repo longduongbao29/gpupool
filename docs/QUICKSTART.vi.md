@@ -122,7 +122,7 @@ kê các bản GGUF đã được phát hành của model (`gguf_alternatives`, 
    server** (đường dẫn tuyệt đối của thư mục có `config.json`, các file tokenizer và trọng số; đường dẫn trên máy
    chủ được dịch giống đường dẫn thư viện, xem [Dùng file model có sẵn trên server](#dùng-file-model-có-sẵn-trên-server)).
 2. **Inspect**. Chưa tải gì cả: gpupool chỉ đọc config và danh sách file. Bạn thấy kiến trúc và việc bộ chuyển đổi
-   được ghim (llama.cpp b11342) có hỗ trợ hay không, số tham số, số lớp, độ dài ngữ cảnh, dung lượng tải về, cùng các
+   được ghim (llama.cpp b11413) có hỗ trợ hay không, số tham số, số lớp, độ dài ngữ cảnh, dung lượng tải về, cùng các
    cảnh báo (repo gated, đã lượng tử hoá sẵn, kèm mã tuỳ biến, đã có bản GGUF).
 3. Chọn **loại lượng tử hoá** (mục kế tiếp). Mỗi dòng cho biết dung lượng file và VRAM ước lượng, vừa một GPU hay
    chỉ vừa pool, và loại nào được đề xuất kèm lý do.
@@ -320,7 +320,7 @@ trợ không, và bắt đầu job trả về HTTP 503 kèm lời giải thích 
 Riêng `llama-imatrix` là tuỳ chọn: coordinator thiếu nó vẫn chuyển đổi bình thường mọi loại không cần ma trận. Nơi `download.pytorch.org`
 bị chặn, hãy build với mirror của chỉ mục wheel PyTorch CPU (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`;
 `docker-compose.coordinator.yml` đọc `TORCH_INDEX_URL` từ môi trường). Mã nguồn llama.cpp lấy từ
-`vendor/llama.cpp-b11342.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
+`vendor/llama.cpp-b11413.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
 Ngoài Docker, đặt `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` và `GPUPOOL_LLAMA_TOOLS_DIR` (xem Thiết lập).
 
 ## Thử trên một máy (cụm 3 server giả lập)
@@ -393,7 +393,7 @@ git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # in ra cùng admin key và lệnh join
 ```
 
-Server GPU (cần [uv](https://docs.astral.sh/uv/) và bản build llama.cpp có CUDA và RPC, b11342):
+Server GPU (cần [uv](https://docs.astral.sh/uv/) và bản build llama.cpp có CUDA và RPC, b11413):
 
 ```bash
 uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /path/to/llama.cpp/build/bin
@@ -530,7 +530,7 @@ Những việc bạn vẫn phải tự làm trên mỗi máy chạy Docker:
 | Hiện tượng | Nguyên nhân | Cách sửa |
 | --- | --- | --- |
 | `docker pull` / bước `FROM`: `i/o timeout`, `TLS handshake timeout`, `connection refused` | daemon chưa có proxy | bước 1 (proxy của daemon), restart docker |
-| Bước build `git clone` treo hoặc `Failed to connect to github.com` | GitHub bị chặn kể cả qua proxy | đặt `vendor/llama.cpp-b11342.tar.gz` vào repo, hoặc đặt `LLAMA_CPP_URL` |
+| Bước build `git clone` treo hoặc `Failed to connect to github.com` | GitHub bị chặn kể cả qua proxy | đặt `vendor/llama.cpp-b11413.tar.gz` vào repo, hoặc đặt `LLAMA_CPP_URL` |
 | `uv sync`: `Failed to download ... cpython-3.12` | python-build-standalone đặt trên GitHub | đặt `UV_PYTHON_INSTALL_MIRROR` (xem bên dưới) |
 | `failed to resolve source metadata for ghcr.io/astral-sh/uv` | không vào được ghcr.io | đặt `UV_IMAGE` là bản mirror; coordinator: `UV_FROM_PYPI=1` |
 | `apt-get` hoặc `pip` lỗi trong lúc build | thiếu build arg proxy | truyền `--build-arg http_proxy=... https_proxy=...` hoặc dùng compose / `config.json` |
@@ -548,7 +548,7 @@ phép đi qua GitHub thì không cần phần này.
    rồi chép repo sang server:
 
    ```bash
-   curl -L -o vendor/llama.cpp-b11342.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz
+   curl -L -o vendor/llama.cpp-b11413.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz
    ```
 
    Build dùng file này trước, rồi `git clone`, rồi `curl` tới `LLAMA_CPP_URL` (mirror nội bộ của cùng file nén).
@@ -685,7 +685,7 @@ arg ở trên. API HTTP: [API.vi.md](API.vi.md). Thiết kế bên trong: [DESIG
 | --- | --- |
 | Server không bao giờ hiện trên UI | `docker logs gpupool-agent`: "connection refused" → port 8080 bị chặn hoặc sai địa chỉ trong lệnh join (dùng IP LAN của coordinator); "wrong cluster token" → copy lại lệnh join |
 | Log agent báo server đã bị xoá | server đã bị xoá trên UI; thêm lại ở đó (Servers → Add Server → agent URL `http://<ip-server>:7070`) |
-| Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by llama.cpp b11342's converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
+| Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by the pinned llama.cpp converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
 | Chuyển đổi: HTTP 503 "conversion is not set up ..." | image được build với `WITH_CONVERT=0`, hoặc ngoài Docker thì `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` thiếu hoặc sai. Dùng image đầy đủ hoặc sửa đường dẫn; thông báo nêu rõ thiếu gì |
 | Chuyển đổi: HTTP 507 "not enough free disk space ..." ngay khi gửi job | đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản trung gian 16 bit + đầu ra* (xem *Đĩa, RAM và thời gian*). Chưa có gì được xếp hàng. Giải phóng dung lượng, hoặc trỏ `GPUPOOL_MODELS_DIR` sang đĩa lớn hơn, rồi gửi lại |
 | Chuyển đổi: job *failed* với "not enough free disk space ..." | lần kiểm tra đầu qua được nhưng một giai đoạn sau thấy ít chỗ hơn (job hoặc tiến trình khác đã dùng đĩa). `failed_stage` của job cho biết ở đâu. Giải phóng dung lượng, rồi **Retry** (bản tải đã xong được dùng lại) |

@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=gpupool)
-[![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
+[![llama.cpp b11413](https://img.shields.io/badge/llama.cpp-b11413-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11413)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
 
 [Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [Vừa ở đâu](#model-nào-vừa-ở-đâu) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
@@ -297,7 +297,7 @@ Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo c�
   server nhiều GPU và RDMA qua mạng thật
 - [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
 - [ ] Đổi model không gián đoạn (zero-downtime)
-- [ ] Nâng cấp llama.cpp
+- [x] Nâng cấp llama.cpp (b11342 → b11413)
 - [ ] Mô hình tốc độ decode theo từng kiến trúc GPU (hiện là một hiệu suất cố định 0,5) và điểm prefill riêng
 - [ ] Importance matrix trên server GPU; phân tán các job chuyển đổi sang nhiều máy
 - [ ] LoRA adapter và vision projector (`mmproj`) khi chuyển đổi
@@ -338,7 +338,7 @@ cần driver 570 trở lên). Server GPU cần Docker và NVIDIA Container Toolk
 
 Được: `uv run gpupool coordinator`, và trên mỗi server GPU
 `uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir <llama.cpp build/bin>`.
-Agent cần bản build llama.cpp b11342 có CUDA và RPC. Xem mục "Không dùng Docker" trong
+Agent cần bản build llama.cpp b11413 có CUDA và RPC. Xem mục "Không dùng Docker" trong
 [hướng dẫn bắt đầu nhanh](docs/QUICKSTART.vi.md).
 
 </details>
@@ -347,7 +347,7 @@ Agent cần bản build llama.cpp b11342 có CUDA và RPC. Xem mục "Không dù
 <summary><b>Serve được model safetensors không?</b></summary>
 
 Được, bằng cách chuyển chúng sang GGUF trong coordinator (UI hoặc `/api/convert`). Việc hỗ trợ phụ thuộc converter đã
-ghim (llama.cpp b11342): kiến trúc chưa được hỗ trợ sẽ được báo ở bước inspect. LoRA adapter và vision projector chưa
+ghim (llama.cpp b11413): kiến trúc chưa được hỗ trợ sẽ được báo ở bước inspect. LoRA adapter và vision projector chưa
 được chuyển đổi.
 
 </details>

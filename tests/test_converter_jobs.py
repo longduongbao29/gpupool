@@ -248,7 +248,7 @@ async def test_submit_unsupported_architecture_422(env, monkeypatch):
         await env.mgr.submit(hf_req())
     assert ei.value.status == 422
     assert ei.value.message == ("architecture FooForCausalLM is not supported by "
-                                "llama.cpp b11342's converter")
+                                "the pinned llama.cpp converter")
 
 
 async def test_submit_unsupported_prequant_suggests_base_model(env, monkeypatch):

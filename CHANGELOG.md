@@ -22,6 +22,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- llama.cpp b11342 → b11413 in both images (same RPC protocol, 7.0.0; upgrade every agent together as always).
+  Brings: n-gram drafts no longer rejected at temperature > 0, probabilistic draft sampling for draft and MTP,
+  a CUDA memory fault with many-expert MoE fixed, fused shared experts and faster small-batch f16/bf16 matmul on
+  CUDA, Volta flash-attention fixes, and `llama-imatrix --nextn`, which gpupool now passes for models with MTP
+  layers so importance-matrix types can quantize them.
+
 - The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with each
   replica's generation speed as weight (measured by llama-server once it has generated, else estimated), and the overload check counts requests relative to capacity.
   A replica split over the network at 10 tok/s no longer gets the same share as a single-GPU one at 50 tok/s.
