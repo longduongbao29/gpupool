@@ -18,6 +18,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Image agent build kèm transport RDMA của llama.cpp (RoCE / InfiniBand, qua libibverbs). Mỗi kết nối RPC tự
+  thương lượng và quay về TCP ở nơi một trong hai bên không có thiết bị RDMA; để dùng, chạy agent với
+  `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.
+- Công cụ chuyển đổi trong image coordinator (llama-quantize, llama-imatrix) được build với AVX2/FMA/F16C ghi rõ,
+  thay vì dựa vào mặc định CMake mà môi trường build có `SOURCE_DATE_EPOCH` sẽ tắt đi.
+
 - Mỗi máy chủ và replica chỉ chạy một `ggml-rpc-server` phục vụ mọi GPU của replica trên máy đó (`-d CUDA0,CUDA1`)
   thay vì mỗi GPU một process. llama.cpp khi đó copy activation giữa các GPU này ngay trong server; với mỗi GPU một
   process, mỗi ranh giới phải đi server → head → server, hai lần truyền mạng cho mỗi token. Placement tính một hop

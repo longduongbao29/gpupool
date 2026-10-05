@@ -12,6 +12,10 @@
 #   on the server's own IP. --pid host: NVML reports host PIDs; without it GPU process names
 #   would be looked up in the container's PID namespace and come out wrong.
 #
+# RDMA (RoCE / InfiniBand) between RPC servers and the head: add --device /dev/infiniband
+#   --cap-add IPC_LOCK --ulimit memlock=-1 on every server; llama.cpp then negotiates RDMA per
+#   connection and stays on TCP wherever either side lacks it (GGML_RPC_NO_RDMA=1 forces TCP).
+#
 # CUDA 12.8 is the first toolkit that builds for Blackwell (RTX 50-series, sm_120). It runs on
 # drivers >= 525 through CUDA minor-version compatibility; RTX 50-series cards themselves need a
 # driver >= 570. For older drivers rebuild with a lower CUDA_VERSION (and without 120 in CUDA_ARCHS).
@@ -54,8 +58,11 @@ ARG CUDA_ARCHS="61;70;75;80;86;89;90;120"
 ARG LLAMA_CPP_URL=https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF}.tar.gz
 # The llama-server web UI is fetched from Hugging Face during the build; failure is only a warning.
 ARG LLAMA_USE_PREBUILT_UI=ON
+# libibverbs-dev: ggml-rpc builds its RDMA transport (RoCE / InfiniBand) when libibverbs is found.
+# It is negotiated per connection and falls back to TCP when either side has no RDMA device, so
+# the same image serves both kinds of network.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git curl ca-certificates libssl-dev libgomp1 \
+        build-essential cmake git curl ca-certificates libssl-dev libgomp1 libibverbs-dev \
     && rm -rf /var/lib/apt/lists/*
 # Fetch the source. The vendor/ bind mount is read-only and never becomes a layer.
 # The short commit goes to /src/.gpupool-commit for the build step: a tarball has no .git (GitHub
@@ -91,7 +98,7 @@ RUN num="${LLAMA_CPP_REF#b}"; \
     case "$num" in ''|*[!0-9]*) num=0 ;; esac; \
     commit="$(cat /src/.gpupool-commit)"; \
     cmake -B build -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_RPC=ON \
-        -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+        -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_RPC_RDMA=ON \
         -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
         -DLLAMA_BUILD_NUMBER="$num" -DLLAMA_BUILD_COMMIT="${commit:-unknown}" \
         -DLLAMA_USE_PREBUILT_UI="${LLAMA_USE_PREBUILT_UI}" \
@@ -114,8 +121,9 @@ RUN mkdir -p /out \
     && find build -name "*.so*" -exec cp -P {} /out/ \;
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+# libibverbs1 + ibverbs-providers (mlx5, ...): libggml-rpc links libibverbs for the RDMA transport.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libgomp1 libssl3 iptables \
+        ca-certificates curl libgomp1 libssl3 iptables libibverbs1 ibverbs-providers \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=llama /out /opt/llama

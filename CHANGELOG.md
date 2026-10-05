@@ -18,6 +18,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- The agent image builds llama.cpp's RDMA transport (RoCE / InfiniBand, via libibverbs). RPC connections
+  negotiate it per connection and fall back to TCP wherever either side has no RDMA device; to use it, run
+  the agents with `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.
+- The coordinator image's converter tools (llama-quantize, llama-imatrix) are built with AVX2/FMA/F16C spelled
+  out, instead of relying on a CMake default that a `SOURCE_DATE_EPOCH` build environment turns off.
+
 - One `ggml-rpc-server` per server and replica serves all of the replica's GPUs on that server
   (`-d CUDA0,CUDA1`) instead of one process per GPU. llama.cpp then copies activations between those GPUs
   inside the server; with a process per GPU each boundary went server → head → server, two network transfers

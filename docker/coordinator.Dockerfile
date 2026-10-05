@@ -118,10 +118,15 @@ WORKDIR /src
 # OpenSSL (models come from gpupool, not llama.cpp's downloader), no server, no tests. Tools and
 # examples are switched on only because the four targets live there; only those are built.
 # The build number comes from the tag because a tarball has no .git (see docker/agent.Dockerfile).
+# The x86 SIMD level is spelled out (x86-64-v3: AVX2/FMA/F16C, ignored on arm64): GGML_NATIVE=OFF
+# only enables it while ggml's GGML_NATIVE_DEFAULT is ON, which a SOURCE_DATE_EPOCH in the build
+# environment (reproducible builds) silently turns off, leaving llama-imatrix and llama-quantize
+# several times slower.
 RUN num="${LLAMA_CPP_REF#b}"; \
     case "$num" in ''|*[!0-9]*) num=0 ;; esac; \
     commit="$(cat /src/.gpupool-commit)"; \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF \
+        -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON \
         -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF \
         -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_EXAMPLES=ON \
         -DLLAMA_BUILD_NUMBER="$num" -DLLAMA_BUILD_COMMIT="${commit:-unknown}" \
