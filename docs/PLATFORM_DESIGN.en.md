@@ -140,7 +140,7 @@ device's `est_mb`.
   carve up a large GPU while a snug one is free.
 - `n_dev`, `n_rpc`: extra devices and network hops (one per RPC server).
 
-Ties break by smaller tier, then the first device's name, so results are deterministic. The winning
+Ties break by smaller tier, then the head node and its first device's name, so results are deterministic. The winning
 placement is stored with the replica (`score`, `est_decode_tps`, `reasons`), so the UI can explain why a
 model runs where it does.
 

@@ -137,7 +137,7 @@ speculative được đặt nguyên khối trên thiết bị CUDA đầu tiên 
   của best-fit: không xé nhỏ một GPU lớn khi GPU vừa khít còn trống.
 - `n_dev`, `n_rpc`: số thiết bị thêm và số lần nhảy qua mạng (mỗi RPC server một lần).
 
-Hòa điểm thì chọn tier nhỏ hơn, rồi tên thiết bị đầu tiên, nên kết quả xác định. Phương án thắng được lưu
+Hòa điểm thì chọn tier nhỏ hơn, rồi tên node head và thiết bị đầu tiên của nó, nên kết quả xác định. Phương án thắng được lưu
 cùng replica (`score`, `est_decode_tps`, `reasons`), để UI giải thích được vì sao model nằm ở đó.
 
 **4.4 Giành chỗ (preemption).** Model đang dưới mức tối thiểu đang chạy (`max(min_replicas, 1)`, bị chặn bởi

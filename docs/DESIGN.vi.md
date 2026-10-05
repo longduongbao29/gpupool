@@ -203,8 +203,11 @@ mô phỏng và rebalancing.
    layer, rồi một bước sửa chuyển từng layer từ device quá tải nhất sang device dư nhất, kiểm bằng byte
    từng layer chính xác, tới khi mọi device có `est_mb <= usable_mb`. `tensor_split` = số layer.
 6. **Head** = node giữ nhiều layer nhất (tìm bằng điểm bất động: sắp xếp lại, chia lại, lặp). **Thứ tự
-   device**: các device CUDA của head, CPU của head, rồi mọi node khác theo tổng usable giảm dần (device
-   trong một node theo usable giảm dần). Device không local được đặt tên `RPC0`, `RPC1`...
+   device**: mọi node khác theo tổng usable giảm dần (device trong một node theo usable giảm dần), rồi CPU của
+   head, rồi các device CUDA của head **ở cuối**. Device cuối giữ layer đầu ra, và llama-server đọc `n_vocab x 4`
+   byte logits từ nó ở mỗi token (0,5 MB với từ vựng 128k); khi GPU của chính head đứng cuối, chỉ hidden state
+   (`n_embd x 4` byte) đi qua mạng. Embedding đầu vào luôn được tính trên CPU của head. Device không local được
+   đặt tên `RPC0`, `RPC1`... theo thứ tự này.
 
 Pin (`pin_devices`), GPU bị tắt trong pool và VRAM đang được các replica đang launch giữ chỗ đều do
 reconciler áp dụng trước khi plan, bằng cách đặt `usable_mb` về 0 hoặc giảm nó, nên bản thân planner không
@@ -245,7 +248,7 @@ giữa chúng ngay trong server đó.
 | số device | -5 cho mỗi device thêm | ít device hơn |
 | hop | -10 cho mỗi chặng mạng | ít liên kết RPC hơn |
 
-Hòa điểm thì xét tier nhỏ hơn, rồi tên node và device, nên kết quả xác định. Ba đến bốn **lý do** đầu (tốc
+Hòa điểm thì xét tier nhỏ hơn, rồi tên node head và device đầu tiên của nó, nên kết quả xác định. Ba đến bốn **lý do** đầu (tốc
 độ so với phương án nhanh nhất, GPU dùng chung, hàng xóm cùng model, số GPU, số hop mạng) được lưu trong
 `Placement.reasons` và hiển thị trên UI. Spread là mềm: GPU dùng chung vẫn được dùng khi không còn chỗ nào
 khác. Occupant lấy từ mọi replica live, kể cả đang draining, vì chúng vẫn giữ bộ nhớ.
@@ -254,7 +257,7 @@ khác. Occupant lấy từ mọi replica live, kể cả đang draining, vì ch�
 
 Với `speculative = "draft"`, draft chạy trong `llama-server` của head trên device CUDA local đầu tiên của
 head. Với mỗi device head khả dĩ `D`, cách chia được giải trên một pool mà chỉ `D` bị trừ bộ nhớ của draft,
-và `D` được ghim làm device đầu tiên của head; tính draft vào mọi device CUDA sẽ loại nhầm những pool thật ra
+và `D` được ghim làm GPU local đầu tiên của head; tính draft vào mọi device CUDA sẽ loại nhầm những pool thật ra
 chứa vừa nó một lần. Trên 16 device CUDA, chỉ 8 cái rộng nhất được thử làm head. MB của draft được cộng
 vào `est_mb` của assignment đó và vào `est_total_mb` (`draft_est_mb`). Nếu draft không vừa trên device CUDA
 local nào của head thì không có placement.

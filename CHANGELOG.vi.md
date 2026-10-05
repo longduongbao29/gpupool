@@ -22,6 +22,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Placement bị chia đặt các GPU của chính head ở cuối thứ tự device. Device cuối giữ layer đầu ra, và llama-server
+  đọc logits (`n_vocab x 4` byte, khoảng 0,5 MB với từ vựng 128k) từ nó ở mỗi token: khi device cuối ở xa, logits đi
+  qua mạng mỗi lần, giờ chỉ còn hidden state (`n_embd x 4` byte). Model draft vẫn nằm trên GPU local đầu tiên của head.
+
 - Cache trọng số RPC có giới hạn dung lượng (`GPUPOOL_RPC_CACHE_GB`, mặc định 100): cứ 10 phút agent xoá các file
   tensor ít dùng nhất khi vượt giới hạn. llama.cpp không bao giờ xoá chúng, nên mọi model từng chia sang một máy
   chủ đều nằm lại trên đĩa máy đó.

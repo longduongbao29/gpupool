@@ -22,6 +22,11 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- Split placements put the head's own GPUs last in the device order. The last device holds the output layer,
+  and llama-server reads the logits (`n_vocab x 4` bytes, about 0.5 MB for a 128k vocabulary) from it on every
+  token: with a remote device last they crossed the network each time, now only the hidden state (`n_embd x 4`
+  bytes) does. The draft model still goes on the head's first local GPU.
+
 - The RPC weight cache has a size cap (`GPUPOOL_RPC_CACHE_GB`, default 100): the agent deletes the least
   recently used tensor files above it every 10 minutes. llama.cpp never deletes them, so every model ever split
   onto a server stayed on its disk.

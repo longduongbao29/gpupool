@@ -38,7 +38,7 @@ class NoFit(Exception):
 class _Dev(NamedTuple):
     node: NodeReport
     dev: Device
-    pin: bool = False  # draft planning: this device must be the head's first device (and the head)
+    pin: bool = False  # draft planning: this device must be the head's first local GPU (and the head)
 
 
 # Per-model correction from measured buffers (self-calibration). A context variable, not a
@@ -183,7 +183,13 @@ def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: l
 
 
 def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
-    """Head cuda devices first, then head cpu, then other nodes by usable desc."""
+    """Other nodes first (by usable desc), then the head's cpu, then the head's cuda devices.
+
+    The last device holds the output layer, and llama-server reads n_vocab x 4 bytes of logits
+    from it for every token (llama-context.cpp, ggml_backend_tensor_get_async on t_logits): 0.5 MB
+    for a 128k vocabulary. With a remote device last that crossed the network on every token; with
+    the head's own GPU last only the hidden state (n_embd x 4 bytes) does. The input embeddings are
+    computed on the head's CPU either way, so the first device costs n_embd x 4 bytes too."""
     by_usable = lambda d: (not d.pin, -d.dev.usable_mb)  # noqa: E731
     head = [d for d in devs if d.node.node_id == head_id]
     head_cuda = sorted((d for d in head if d.dev.kind == "cuda"), key=by_usable)
@@ -195,7 +201,7 @@ def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
         (d for d in devs if d.node.node_id != head_id),
         key=lambda d: (-totals[d.node.node_id], d.node.node_id, -d.dev.usable_mb),
     )
-    return head_cuda + head_cpu + others
+    return others + head_cpu + head_cuda
 
 
 def _solve(meta, ctx, ct, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str] | None:
@@ -323,6 +329,11 @@ def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
     return groups
 
 
+def _head_first(c: _Cand) -> _Dev:
+    """The head's first device in the order (its local GPU when it has one), else the first."""
+    return next((d for d in c.order if d.node.node_id == c.head_id), c.order[0])
+
+
 def _n_rpc(c: _Cand) -> int:
     """Network hops per token: one per RPC server the graph passes through."""
     return len(rpc_groups(c.order, c.head_id))
@@ -377,9 +388,9 @@ def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupant
         if n_rpc:
             reasons.append(f"{n_rpc} network hop{'s' if n_rpc > 1 else ''} (RPC)")
         out.append(_Scored(score, tps, reasons[:4], c))
-    # deterministic: score, then smaller tier, then the first device's name
-    out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier],
-                            s.cand.order[0].node.node_id, s.cand.order[0].dev.device_id))
+    # deterministic: score, then smaller tier, then the head and its first device's name
+    out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier], s.cand.head_id,
+                            _head_first(s.cand).node.node_id, _head_first(s.cand).dev.device_id))
     return out
 
 
@@ -388,7 +399,7 @@ _DRAFT_TOP_HEADS = 8
 
 
 def _draft_candidates(meta, spec, pool: list[_Dev], draft_mb: int) -> tuple[list[_Cand], list[_Dev]]:
-    """Candidates whose head-local first device carries the draft model.
+    """Candidates whose head's first local GPU carries the draft model.
 
     The draft runs on the head's first local CUDA device, so for each possible head device D
     the split is solved on a pool where only D gives up `draft_mb`. Shrinking every CUDA
@@ -416,8 +427,9 @@ def _draft_candidates(meta, spec, pool: list[_Dev], draft_mb: int) -> tuple[list
         cands, used_r = _all_candidates(meta, ctx, ct, reduced)
         used = [orig[ident(d)] for d in used_r]
         for c in cands:
-            if c.head_id != h.node.node_id or ident(c.order[0]) != hid:
-                continue  # candidates that dropped D lost the pin; D must lead the head's devices
+            first_local = next((d for d in c.order if _is_local(d, c.head_id)), None)
+            if c.head_id != h.node.node_id or first_local is None or ident(first_local) != hid:
+                continue  # candidates that dropped D lost the pin; D must lead the head's GPUs
             cand = _Cand(c.tier, [orig[ident(d)] for d in c.order], list(c.counts), c.head_id)
             out.setdefault(_cand_key(cand), cand)
     return list(out.values()), used
@@ -724,11 +736,12 @@ def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id,
         node = order[group[0]].node
         ep = f"{node.host}:{port_alloc(node.node_id)}"
         endpoint_of.update({i: ep for i in group})
+    draft_at = next((i for i, d in enumerate(order) if _is_local(d, head_id)), None)
     start, rpc_i = 0, 0
     for i, (d, c) in enumerate(zip(order, counts)):
         est = _need(meta, ctx, ct, d, start, c, i == len(order) - 1)
-        if i == 0 and draft_mb is not None:
-            est += draft_mb  # the draft lives on the first (head-local CUDA) device
+        if i == draft_at and draft_mb is not None:
+            est += draft_mb  # the draft lives on the head's first local CUDA device
         if i not in endpoint_of:
             llama_dev, endpoint = d.dev.device_id, None
         else:

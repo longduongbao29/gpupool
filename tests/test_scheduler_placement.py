@@ -98,9 +98,10 @@ def test_three_nodes():
     assert pl.tier == "multi_node"
     assert len(pl.assignments) == 3
     assert pl.head_node == "n2"
-    assert pl.assignments[0].llama_device == "CUDA0"
-    assert [a.llama_device for a in pl.assignments[1:]] == ["RPC0", "RPC1"]
-    assert all(a.rpc_endpoint for a in pl.assignments[1:])
+    # the head's own GPU is last: it holds the output layer, so the logits never cross the network
+    assert pl.assignments[-1].llama_device == "CUDA0" and pl.assignments[-1].node_id == "n2"
+    assert [a.llama_device for a in pl.assignments[:-1]] == ["RPC0", "RPC1"]
+    assert all(a.rpc_endpoint for a in pl.assignments[:-1])
     assert len(ports.calls) == 3
     check(meta, pl, nodes)
 
@@ -131,7 +132,7 @@ def test_cpu_device_on_head_is_rpc():
     nodes = [node("a", dev("CUDA0", need * 6 // 10), dev("CPU", need * 6 // 10, kind="cpu"))]
     ports = Ports()
     pl = plan(meta, SPEC, nodes, "r1", ports)
-    cuda, cpu = pl.assignments
+    cpu, cuda = pl.assignments  # the head's GPU last
     assert (cuda.llama_device, cuda.rpc_endpoint) == ("CUDA0", None)
     assert cpu.device_id == "CPU" and cpu.llama_device == "RPC0" and cpu.rpc_endpoint == "a:9001"
     assert ports.calls == ["a", "a"]
@@ -322,6 +323,11 @@ def _qwen_like(n, layer_mb, out_mb, kv_heads=2):
                      other_bytes=out_mb * 2 * MB, output_bytes=out_mb * MB)
 
 
+def _draft_dev(pl):
+    """The head's first local GPU, where the draft is reserved."""
+    return next((a for a in pl.assignments if a.node_id == pl.head_node and not a.rpc_endpoint), None)
+
+
 def test_draft_three_server_cluster_reduces_only_the_head():
     # Real defect: a=1300 (GTX 1650), b=c=1100; 3B-like model ~2.1 GB + 0.5B-like draft ~0.56 GB
     # at ctx 2048. Reducing every GPU by the draft (3 x 563 MB) made this NoFit, although
@@ -335,19 +341,22 @@ def test_draft_three_server_cluster_reduces_only_the_head():
     assert total_need_mb(m, 2048) + dn <= 3500  # the pool holds it only if the draft is charged once
     pl = plan(m, spec, nodes, "r", Ports(), draft_meta=dm)
     assert pl.draft_est_mb == dn and pl.head_node == "a"
-    a0 = pl.assignments[0]
+    a0 = _draft_dev(pl)
     assert (a0.node_id, a0.device_id, a0.llama_device) == ("a", "CUDA0", "CUDA0")
+    assert pl.assignments[-1] is a0  # the head's GPU is last (it holds the output layer)
     usable = {n.node_id: n.devices[0].usable_mb for n in nodes}
     assert sum(a.layers for a in pl.assignments) == 36
     for i, a in enumerate(pl.assignments):
         assert a.est_mb <= usable[a.node_id]
     # the head's est_mb is its layer share plus the draft
-    own = device_need_mb(m, range(a0.layers), 2048, "cuda", len(pl.assignments) == 1)
+    start = 36 - a0.layers
+    own = device_need_mb(m, range(start, 36), 2048, "cuda", True)
     assert a0.est_mb == own + dn and a0.est_mb <= 1300
     assert pl.est_total_mb == sum(a.est_mb for a in pl.assignments)
     for p in rank(m, spec, nodes, draft_meta=dm):
-        assert p.assignments[0].llama_device == p.assignments[0].device_id
-        assert p.assignments[0].est_mb <= usable[p.assignments[0].node_id]
+        d = _draft_dev(p)
+        assert d is not None and d.llama_device == d.device_id
+        assert d.est_mb <= usable[d.node_id]
 
 
 def test_draft_goes_on_the_head_device_even_if_a_sibling_has_more_room():
@@ -372,7 +381,7 @@ def test_draft_many_gpus_stays_bounded():
     pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
     assert time.perf_counter() - t < 20
     assert pl.draft_est_mb == dn
-    a0 = pl.assignments[0]
+    a0 = _draft_dev(pl)
     assert a0.node_id == pl.head_node and a0.llama_device == a0.device_id
 
 

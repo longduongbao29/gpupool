@@ -70,6 +70,12 @@ def _find_device(devices: list[Device], a: DeviceAssignment) -> Device | None:
     return next((d for d in devices if d.device_id == a.device_id), None)
 
 
+def _draft_device(p: Placement) -> DeviceAssignment | None:
+    """The head's first local CUDA device: where the scheduler reserved the draft model."""
+    return next((a for a in p.assignments if a.node_id == p.head_node and not a.rpc_endpoint
+                 and a.llama_device.startswith("CUDA")), None)
+
+
 def is_head_engine(engine_id: str) -> bool:
     return engine_id.endswith("-head")
 
@@ -1138,11 +1144,10 @@ class Reconciler:
             if spec.speculative == "draft":
                 if not spec.draft:
                     raise LaunchError("speculative 'draft' without a draft model")
-                first = p.assignments[0]
                 # The draft runs inside the head's llama-server: an RPC or remote device cannot host it.
-                if first.node_id != p.head_node or first.rpc_endpoint or not first.llama_device.startswith("CUDA"):
-                    raise LaunchError(f"the draft model needs a local CUDA device on the head node, but the "
-                                      f"first device is {first.node_id}/{first.llama_device}")
+                if _draft_device(p) is None:
+                    raise LaunchError("the draft model needs a local CUDA device on the head node, but the "
+                                      "placement has none")
 
             # The head's model files are fetched while the RPC engines start: on a cold start the
             # download, not the engines, is the long pole, and the two do not depend on each other.
@@ -1155,7 +1160,7 @@ class Reconciler:
                     models.cancel()
                     await asyncio.gather(models, return_exceptions=True)
             if draft_path is not None:
-                extra.update(draft_model_path=draft_path, draft_device=p.assignments[0].llama_device,
+                extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
                              draft_n_max=spec.draft_n_max)
             elif spec.speculative == "mtp":
                 extra.update(draft_n_max=spec.draft_n_max)

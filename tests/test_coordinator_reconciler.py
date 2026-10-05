@@ -1942,3 +1942,27 @@ async def test_launch_starts_one_rpc_engine_for_a_shared_endpoint(mock_health):
     assert head.devices == ["CUDA0", "RPC0", "RPC1"]
     assert engine_ids(r) == [("a", f"{r.replica_id}-head"), ("b", f"{r.replica_id}-rpc-CUDA0")]
     await rec.shutdown()
+
+
+async def test_draft_goes_to_the_heads_gpu_even_when_remote_devices_come_first(mock_health):
+    from gpupool.common.models import DeviceAssignment, Placement
+
+    def planner(meta, spec, nodes, rid, port_alloc, **kw):
+        ep = f"10.0.0.2:{port_alloc('b')}"
+        asg = [DeviceAssignment(node_id="b", device_id="CUDA0", llama_device="RPC0", rpc_endpoint=ep,
+                                layers=2, est_mb=10),
+               DeviceAssignment(node_id="a", device_id="CUDA0", llama_device="CUDA0", layers=2, est_mb=10)]
+        return Placement(model=spec.name, replica_id=rid, tier="multi_node", head_node="a",
+                         head_port=port_alloc("a"), assignments=asg, tensor_split=[2.0, 2.0], est_total_mb=20)
+
+    client = FakeClient()
+    rec, store, clock = make_reconciler(planner=planner, client=client)
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(DSPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    hs = next(c[3] for c in client.calls if c[0] == "start" and c[3].kind == "server")
+    assert hs.devices == ["RPC0", "CUDA0"] and hs.draft_device == "CUDA0"
+    await rec.shutdown()

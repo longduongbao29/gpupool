@@ -210,8 +210,12 @@ display, simulation and rebalancing.
    with most slack, checked with exact per-layer bytes, until every device has `est_mb <= usable_mb`.
    `tensor_split` = layer counts.
 6. **Head** = the node holding the most layers (found as a fixed point: re-order, re-split, repeat).
-   **Device order**: the head's CUDA devices, the head's CPU, then every other node by total usable
-   descending (devices within a node by usable descending). Non-local devices are named `RPC0`, `RPC1`...
+   **Device order**: every other node by total usable descending (devices within a node by usable
+   descending), then the head's CPU, then the head's CUDA devices **last**. The last device holds the output
+   layer, and llama-server reads `n_vocab x 4` bytes of logits from it on every token (0.5 MB for a 128k
+   vocabulary); with the head's own GPU last only the hidden state (`n_embd x 4` bytes) crosses the network.
+   The input embeddings are computed on the head's CPU either way. Non-local devices are named `RPC0`,
+   `RPC1`... in this order.
 
 Pins (`pin_devices`), GPUs switched off in the pool, and VRAM reserved by launching replicas are
 applied by the reconciler before planning by setting `usable_mb` to 0 or lowering it, so the
@@ -253,7 +257,7 @@ Score of a candidate (higher wins):
 | devices | -5 per extra device | fewer devices |
 | hops | -10 per network hop | fewer RPC links |
 
-Ties break by smaller tier, then node and device name, so the result is deterministic. The top
+Ties break by smaller tier, then the head node and its first device's name, so the result is deterministic. The top
 three to four **reasons** (speed vs the fastest option, shared GPUs, same-model neighbours, number of
 GPUs, network hops) are stored in `Placement.reasons` and shown in the UI. Spread is soft: a shared
 GPU is still used when nothing else fits. Occupants come from every live replica, draining ones
@@ -263,7 +267,7 @@ included, because they still hold memory.
 
 With `speculative = "draft"` the draft runs inside the head's `llama-server` on the head's first
 local CUDA device. For each possible head device `D` the split is solved on a pool where only `D`
-gives up the draft's memory, and `D` is pinned as the head's first device; charging the draft to
+gives up the draft's memory, and `D` is pinned as the head's first local GPU; charging the draft to
 every CUDA device would reject pools that do fit it once. Above 16 CUDA devices only the roomiest
 8 are tried as heads. The draft's MB is added to that assignment's `est_mb` and to `est_total_mb`
 (`draft_est_mb`). If the draft cannot fit on a local CUDA device of the head, there is no placement.
