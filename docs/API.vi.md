@@ -519,7 +519,8 @@ Trả `{"events": [...], "unread": n}`. Một event là
 Các loại event có trong code: `server_added`, `server_removed`, `node_online`, `node_offline`,
 `model_started`, `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`,
 `realloc_started`, `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`,
-`unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`. Cảnh
+`unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `llama_version_mismatch` (các server đang sống chạy bản llama.cpp khác nhau; model bị chia
+cần cùng giao thức RPC ở mọi nơi). Cảnh
 báo và lỗi còn được POST tới `webhook_url` khi có cấu hình.
 
 ## 9. Coordinator: health, metrics và admin API cũ

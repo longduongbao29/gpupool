@@ -10,6 +10,9 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thêm
 
+- Sự kiện cảnh báo `llama_version_mismatch` (kèm webhook) khi các server đang sống báo bản llama.cpp khác nhau, một
+  lần cho mỗi thay đổi: model bị chia qua nhiều server cần cùng giao thức RPC trên head và mọi RPC server.
+
 - `kv_unified` (llama.cpp `-kvu`): các slot song song dùng chung một vùng KV, nên một request dài có thể dùng cả
   context trong khi các slot khác giữ request ngắn, với cùng lượng bộ nhớ. Có trường API, công tắc trong form
   triển khai và gợi ý Recommend cho model có nhiều slot; ước lượng tính layer sliding-window theo vùng dùng chung.

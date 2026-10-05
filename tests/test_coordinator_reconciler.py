@@ -2014,3 +2014,23 @@ async def test_head_that_exits_before_health_fails_the_launch():
     r = store.list_replicas()[0]
     assert r.state == "failed" and "head engine exited" in r.error
     assert client.engines == {}
+
+
+async def test_mixed_llama_builds_raise_one_warning_per_change():
+    rec, store, clock = make_reconciler()
+
+    def report(node_id, version):
+        n = node(node_id)
+        n.llama_version = version
+        return n
+
+    beat(store, clock, report("a", "b11413"), report("b", "b11413"), report("c", "unknown"))
+    await rec.tick()
+    assert not [e for e in store.list_events() if e.kind == "llama_version_mismatch"]
+    beat(store, clock, report("b", "b11342"))
+    await rec.tick()
+    await rec.tick()  # same situation: no second event
+    ev = [e for e in store.list_events() if e.kind == "llama_version_mismatch"]
+    assert len(ev) == 1 and ev[0].level == "warning"
+    assert "b11342: b" in ev[0].message and "b11413: a" in ev[0].message
+    await rec.shutdown()

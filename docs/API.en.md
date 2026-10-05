@@ -521,7 +521,8 @@ larger id. Returns `{"events": [...], "unread": n}`. An event is
 Event kinds in the code: `server_added`, `server_removed`, `node_online`, `node_offline`, `model_started`,
 `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
 `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`, `unloaded_idle`, `cold_start`,
-`rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`. Warnings and errors are also POSTed to
+`rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `llama_version_mismatch` (live servers run
+different llama.cpp builds; a split model needs the same RPC protocol everywhere). Warnings and errors are also POSTed to
 `webhook_url` when configured.
 
 ## 9. Coordinator: health, metrics and legacy admin API

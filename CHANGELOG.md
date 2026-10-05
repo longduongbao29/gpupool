@@ -10,6 +10,9 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- `llama_version_mismatch` warning event (and webhook) when live servers report different llama.cpp builds, once
+  per change: a model split over servers needs the same RPC protocol on its head and every RPC server.
+
 - `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
   whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a
   Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool.

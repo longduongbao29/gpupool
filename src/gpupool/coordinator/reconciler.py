@@ -162,6 +162,7 @@ class Reconciler:
         self._nofit: dict[str, str] = {}
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
+        self._versions_seen: tuple[str, ...] = ()  # llama.cpp builds of live servers at the last check
         self._realloc: dict[str, _Realloc] = {}
         self._preempted: dict[str, tuple[float, set[str]]] = {}  # model -> (when, victim replica ids)
         self._wake = asyncio.Event()
@@ -865,6 +866,28 @@ class Reconciler:
             self._emit("warning", "node_offline",
                        f"Server {node_id} went offline (no report for {now - n.last_seen:.0f} s){tail}",
                        node_id=node_id)
+        self._track_versions(nodes, now)
+
+    def _track_versions(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """llama_version_mismatch when live servers run different llama.cpp builds, once per change.
+
+        A split replica needs one RPC protocol on its head and every RPC server (ggml-rpc refuses a
+        different major version at HELLO, and the head aborts). Builds are told apart by version;
+        "unknown" ones are left out."""
+        by_version: dict[str, list[str]] = {}
+        for node_id, n in nodes.items():
+            v = n.report.llama_version
+            if self._alive(n, now) and v and v != "unknown":
+                by_version.setdefault(v, []).append(node_id)
+        key = tuple(sorted(by_version))
+        if key == self._versions_seen:
+            return
+        self._versions_seen = key
+        if len(by_version) > 1:
+            parts = "; ".join(f"{v}: {', '.join(sorted(ids))}" for v, ids in sorted(by_version.items()))
+            self._emit("warning", "llama_version_mismatch",
+                       f"Servers run different llama.cpp builds ({parts}). A model split over servers needs "
+                       "the same RPC protocol on all of them: upgrade every agent to the same image.")
 
     # ------------------------------------------------------------------ failure detection
     def _bump_backoff(self, model: str, now: float) -> tuple[int, float]:
