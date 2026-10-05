@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-05
+
 ### Added
 
 - Launch settings for speed, in the model form and `PUT /api/models`: flash attention (`flash_attn`
@@ -168,7 +170,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
