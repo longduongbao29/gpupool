@@ -18,8 +18,10 @@ Spread = Literal["gpu", "node", "none"]
 # KV cache element type. Bytes per element: f16 2, q8_0 34/32, q4_0 18/32 (llama.cpp block formats).
 KvCacheType = Literal["f16", "q8_0", "q4_0"]
 # Speculative decoding: "ngram" guesses from the text so far (no extra memory); "draft" runs a small
-# model with the same tokenizer on the head's GPU. Fewer target passes = fewer RPC round trips.
-SpecMode = Literal["none", "ngram", "draft"]
+# model with the same tokenizer on the head's GPU; "mtp" drafts with the model's own multi-token-
+# prediction (nextn) blocks, for GGUFs that ship them (Qwen3.5, GLM-4.5+, DeepSeek...).
+# Fewer target passes = fewer RPC round trips.
+SpecMode = Literal["none", "ngram", "draft", "mtp"]
 # llama.cpp -fa. "auto" turns flash attention on wherever the backend supports it (b11342 default).
 FlashAttn = Literal["auto", "on", "off"]
 # Logical (-b) and physical (-ub) batch sizes, llama.cpp defaults. A bigger micro-batch processes long

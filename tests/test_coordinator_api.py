@@ -863,3 +863,16 @@ async def test_recommend_tip_failure_keeps_the_answer(env, monkeypatch):
     monkeypatch.setattr(api_mod, "suggest", boom)
     j = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()
     assert j["tips"] == [] and len(j["options"]) == 1
+
+
+async def test_put_model_mtp_needs_nextn_blocks(env):
+    c, store, rec, _, clock, lib = env
+    register(store, clock, node("a"))
+    put = lambda **kw: c.put("/api/models/m", json={"file": "x.gguf", "speculative": "mtp", **kw})
+    r = await put()
+    assert r.status_code == 422 and "nextn" in r.json()["detail"]
+    assert store.get_model("m") is None
+    _metas(env, **{"x.gguf": {"n_nextn": 1, "nextn_bytes": 1 << 20}})
+    r = await put(draft_n_max=3)
+    assert r.status_code == 200
+    assert (r.json()["speculative"], r.json()["draft"], r.json()["draft_n_max"]) == ("mtp", None, 3)

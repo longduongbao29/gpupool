@@ -328,7 +328,7 @@ Adds `-ctk T -ctv T` to the head (and `-ctkd/-ctvd` for the draft). The estimate
 bytes per element, so a quantized cache really lets a longer context fit. Measured on Qwen2.5-3B at
 ctx 8192: q8_0 saves 132 MB, q4_0 204 MB versus f16 (theory 142 / 217 MB).
 
-### 8.2 Speculative decoding (`speculative`: none | ngram | draft)
+### 8.2 Speculative decoding (`speculative`: none | ngram | draft | mtp)
 
 Fewer target passes mean fewer RPC round trips, which matters most for multi-node placements.
 
@@ -339,6 +339,11 @@ Fewer target passes mean fewer RPC round trips, which matters most for multi-nod
   explicitly. The API refuses a draft whose tokenizer differs, or whose vocabulary differs by more than
   128 tokens (llama.cpp refuses otherwise). The reconciler also refuses to launch if the first
   assignment is not a local CUDA device of the head.
+- `mtp`: the model's own multi-token-prediction (`nextn`) blocks draft the tokens, in a second llama.cpp
+  context on the same devices. Flags: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp loads those
+  blocks only in this mode, so the estimate adds them (at their layer position in the split), their KV and
+  a second compute buffer on the last device only with `mtp`. The API refuses `mtp` for a GGUF without
+  `nextn_predict_layers`.
 - `draft_n_max` (1..16, default 4): measured on a GTX 1650 with Qwen2.5-3B plus a 0.5B draft, 4 drafted
   tokens gave +5 %, 8 was slower than none.
 

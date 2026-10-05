@@ -1205,8 +1205,12 @@ function app() {
       var ub = parseInt(f.ubatch, 10) || 512, b = Math.max(parseInt(f.batch, 10) || 2048, ub);
       if (kv !== "f16" && fa === "off") return { error: "A quantized KV cache needs flash attention (Auto or On)" };
       var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b };
-      if (sp !== "draft") return { body: Object.assign(common, { speculative: sp, draft_file: null, draft_n_max: 4 }) };
       var n = parseFloat(f.draftN);
+      if (sp === "mtp") {
+        if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
+        return { body: Object.assign(common, { speculative: sp, draft_file: null, draft_n_max: n }) };
+      }
+      if (sp !== "draft") return { body: Object.assign(common, { speculative: sp, draft_file: null, draft_n_max: 4 }) };
       if (!f.draftFile) return { error: "Pick a draft model, or turn speculative decoding off" };
       if (f.draftFile === f.file) return { error: "The draft model must be a different file than the model" };
       if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
@@ -1280,6 +1284,7 @@ function app() {
       if (sp.parallel > 1) out.push(sp.parallel + " slots · " + Math.floor(sp.ctx_size / sp.parallel) + " ctx each");
       if ((sp.pin_devices || []).length) out.push("Limited to " + sp.pin_devices.map(function (p) { return p.replace(/\/\*$/, ""); }).join(", "));
       if (sp.speculative === "ngram") out.push("Spec: n-gram");
+      else if (sp.speculative === "mtp") out.push("Spec: MTP");
       else if (sp.speculative === "draft") out.push("Spec: draft " + (sp.draft ? String(sp.draft).replace(/^coordinator:\/\//, "") : "?"));
       return out;
     },

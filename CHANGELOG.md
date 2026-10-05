@@ -8,6 +8,14 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Speculative decoding `mtp`: GGUFs that ship multi-token-prediction (nextn) layers (Qwen3.5, GLM-4.5 and
+  newer, DeepSeek V3...) draft with them through llama.cpp's `--spec-type draft-mtp`, with no extra model
+  file. Fewer target passes per token means fewer RPC round trips when the model is split. The API refuses
+  `mtp` for a model without such layers, the estimate counts the layers (loaded only in this mode) and their
+  cache, and the Recommend panel suggests it ahead of n-gram and draft models.
+
 ### Changed
 
 - Memory estimates follow llama.cpp's real cache layout per layer. Sliding-window layers (Gemma 2/3/4,

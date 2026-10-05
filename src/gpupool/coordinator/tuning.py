@@ -204,9 +204,23 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                              f"{per_slot} tokens today, so long prompts fail or get truncated.",
                              {"ctx_size": want}, p))
 
+    # -- MTP: the model's own multi-token-prediction blocks draft the next tokens. No second file,
+    #    no tokenizer to match, and the drafts come from the model itself (high acceptance).
+    if meta.n_nextn and spec.speculative in ("none", "ngram"):
+        v = spec.model_copy(update={"speculative": "mtp", "draft": None, "draft_n_max": 3})
+        p = await try_rank(v)
+        if p is not None and _tier(p) <= _tier(best):
+            hops = " and fewer network round trips" if best is not None and best.tier == "multi_node" else ""
+            tips.append(_tip("mtp", "speed", "Speculative decoding with the model's own MTP blocks",
+                             "This GGUF ships multi-token-prediction layers: llama.cpp drafts with them, "
+                             f"usually 1.5-2x faster generation{hops}; costs about "
+                             f"{_mb(meta.nextn_bytes / 1024 ** 2)} plus their KV, no extra model file.",
+                             {"speculative": "mtp", "draft_n_max": 3}, p))
+
     # -- speculative decoding: a small model of the same family drafts tokens the big one verifies
     #    in one pass. Wins most on big models and when the model spans servers (fewer round trips).
-    if spec.speculative != "draft" and meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES:
+    if (spec.speculative not in ("draft", "mtp") and not any(t["id"] == "mtp" for t in tips)
+            and meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES):
         if lib_metas is None:
             lib_metas = await metas()
         drafts = [(i, m) for i, m in lib_metas
@@ -228,7 +242,7 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                                  f"costs about {_mb((m.file_bytes or 0) / 1024 ** 2)} plus its KV on the head GPU.",
                                  {"speculative": "draft", "draft_file": item.name, "draft_n_max": n_max}, p))
                 break
-    if spec.speculative == "none" and not any(t["id"] == "draft" for t in tips):
+    if spec.speculative == "none" and not any(t["id"] in ("draft", "mtp") for t in tips):
         big = bool(meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES)
         more = (" A draft model would help more: add a small model of the same family to the library."
                 if big else "")

@@ -54,7 +54,8 @@ _COMPUTE: ContextVar[dict] = ContextVar("gpupool_compute", default={})
 def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
     ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn,
-                                                 "parallel": spec.parallel})
+                                                 "parallel": spec.parallel,
+                                                 "mtp": spec.speculative == "mtp"})
     try:
         yield
     finally:
@@ -76,7 +77,7 @@ def total_need_mb(*a, **kw) -> int:
 
 
 def draft_need_mb(*a, **kw) -> int:
-    return _raw_draft_mb(*a, **_COMPUTE.get(), **kw)
+    return _raw_draft_mb(*a, **{k: v for k, v in _COMPUTE.get().items() if k != "mtp"}, **kw)
 
 
 def overhead_mb(meta, kind, ctx_size: int = 0) -> int:

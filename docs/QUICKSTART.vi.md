@@ -370,9 +370,9 @@ thoát với mã 1. Cụm được xoá sau khi chạy, trừ khi có `--keep`. 
 | Tùy chọn | Giá trị | Tác dụng | Đo thật (GTX 1650, Qwen2.5-3B) |
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | KV cache nhỏ hơn nên model có thể vừa ít GPU hơn | ctx 8192: −132 / −204 MB, tốc độ gần như không đổi (51.9 / 51.2 / 50.8 tok/s) |
-| Speculative | none, ngram, draft | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Speculative | none, ngram, draft, mtp | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
 
-Trong API các tuỳ chọn này là `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`),
+Trong API các tuỳ chọn này là `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: chỉ cho GGUF có layer dự đoán nhiều token),
 `draft_file` (một model trong thư viện, cho `draft`) và `draft_n_max` (1 đến 16, mặc định 4); xem
 [API.vi.md](API.vi.md). Chúng có hiệu lực ở lần chạy model kế tiếp.
 

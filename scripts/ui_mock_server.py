@@ -22,7 +22,7 @@ A `preempted` warning event is seeded.
 Model files: GET /api/library/browse lists /models (host folder /srv/gguf) with an in-library file, a split part and a broken
 link; POST /api/library {path} accepts a listed file by its /models or /srv/gguf path and answers 400 with the long
 "No such file inside the coordinator ..." message for anything else.
-KV cache / speculative decoding: PUT /api/models/{name} takes kv_cache_type (f16|q8_0|q4_0), speculative (none|ngram|draft),
+KV cache / speculative decoding: PUT /api/models/{name} takes kv_cache_type (f16|q8_0|q4_0), speculative (none|ngram|draft|mtp),
 draft_file (ready library file, required for "draft") and draft_n_max (1-16, default 4); 422 for a missing/unready draft, a draft equal to
 the model file, or a tokenizer mismatch (names starting with "llama" vs the others). Specs carry kv_cache_type, speculative, draft
 ("coordinator://<file>" or null) and draft_n_max; placements of draft models carry draft_est_mb. "chat-auto" is seeded with q8_0 + n-gram.
@@ -336,7 +336,7 @@ def _tok_family(file: str) -> str:
 def _perf_fields(body: dict, file: str) -> dict:
     """Validate kv_cache_type / speculative / draft_file / draft_n_max (all optional) like the real API; returns the spec fields."""
     kv = _choice(body.get("kv_cache_type", "f16"), tuple(KV_FACTOR), "kv_cache_type")
-    spec = _choice(body.get("speculative", "none"), ("none", "ngram", "draft"), "speculative")
+    spec = _choice(body.get("speculative", "none"), ("none", "ngram", "draft", "mtp"), "speculative")
     n = _int_in(body.get("draft_n_max", 4), 1, 16, "draft_n_max")
     draft = None
     if spec == "draft":

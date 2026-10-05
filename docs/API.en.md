@@ -120,7 +120,7 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `autoscale` | object or null, null | `{target_busy: 0.7 (0,1], up_after_s: 30 >= 0, down_after_s: 300 >= 0}`; null = those defaults. Add a replica when average busy slots / slots stays above `target_busy` for `up_after_s` (or requests queue); remove one when below `target_busy / 2` for `down_after_s` |
 | `idle_unload_s` | float `> 0` or null, null | only with `min_replicas == 0`: unload after this many seconds without a request; the next request cold-starts it |
 | `kv_cache_type` | `"f16"` / `"q8_0"` / `"q4_0"`, `"f16"` | KV cache element type (`-ctk/-ctv`). Bytes per element 2 / 34/32 / 18/32, so q8_0 / q4_0 roughly halve / quarter the KV memory |
-| `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | speculative decoding: `ngram` guesses from the text so far (no extra memory); `draft` runs a small model with the same tokenizer on the head's first GPU |
+| `speculative` | `"none"` / `"ngram"` / `"draft"` / `"mtp"`, `"none"` | speculative decoding: `ngram` guesses from the text so far (no extra memory); `draft` runs a small model with the same tokenizer on the head's first GPU; `mtp` drafts with the model's own multi-token-prediction (nextn) layers, 422 when the GGUF has none |
 | `draft` | string or null, null | source of the draft model, `coordinator://<file>`; only for `speculative: "draft"` (dropped otherwise) |
 | `draft_n_max` | int 1..16, 4 | tokens drafted per step. On a GTX 1650 (3B + 0.5B draft) 4 gave +5 %, 8 was slower than none |
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | llama.cpp `-fa`. Auto turns it on where the GPU supports it. A quantized `kv_cache_type` needs it (`off` with q8_0/q4_0 is a 422) |
@@ -390,7 +390,7 @@ Response:
   `PUT /api/models` fields to change; `kind` is `speed`, `throughput` or `fix`; `tier` / `est_*` describe the
   best placement with the tip applied. Ids: `kv_cache`, `smaller_quant` (a smaller quantization of the same
   model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `ctx_per_slot`,
-  `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
+  `mtp` (the GGUF has multi-token-prediction layers), `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
   tensor cores (compute capability below 7.0) `flash_attn_old_gpu` / `ubatch_old_gpu`. The GPU generation
   comes from each device's `compute_cap`; `ubatch` is only suggested when every GPU of the placement has
   tensor cores. Empty when nothing would help.

@@ -169,3 +169,11 @@ def test_draft_and_base_model_matching():
     assert not draft_compatible(meta(), meta(0.5, vocab=151936))
     assert not draft_compatible(meta(), meta(0.5, tok="gpt2"))
     assert same_base_model(meta(8), meta(4)) and not same_base_model(meta(), meta(layers=40))
+
+
+async def test_mtp_capable_model_gets_the_mtp_tip_instead_of_ngram():
+    m = meta().model_copy(update={"n_nextn": 1, "nextn_bytes": 512 * 1024 ** 2})
+    tips = await run(SPEC, m, pl(), lambda s: pl(), devices={("a", "CUDA0"): gpu("8.6")})
+    assert "mtp" in ids(tips) and "ngram" not in ids(tips)
+    t = next(t for t in tips if t["id"] == "mtp")
+    assert t["apply"] == {"speculative": "mtp", "draft_n_max": 3}

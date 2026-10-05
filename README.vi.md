@@ -71,7 +71,7 @@ Khi có phương án đặt tốt hơn, replica mới sẵn sàng rồi replica 
 <td valign="top">
 
 **Speculative decoding**<br>
-`ngram` hoặc model `draft`, giảm số vòng RPC khi model bị chia ra nhiều server.
+`ngram`, model `draft` hoặc chính các layer `mtp` của model, giảm số vòng RPC khi model bị chia ra nhiều server.
 
 </td>
 <td valign="top">

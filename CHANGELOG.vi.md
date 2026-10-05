@@ -8,6 +8,14 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm
+
+- Speculative decoding `mtp`: GGUF có sẵn layer dự đoán nhiều token (nextn) (Qwen3.5, GLM-4.5 trở lên,
+  DeepSeek V3...) nháp bằng chính các layer đó qua `--spec-type draft-mtp` của llama.cpp, không cần file model
+  phụ. Model đích chạy ít lượt hơn cho mỗi token nên ít vòng RPC hơn khi model bị chia. API từ chối `mtp` với
+  model không có các layer này, ước lượng tính cả các layer (chỉ được nạp ở chế độ này) cùng cache của chúng,
+  và bảng Recommend gợi ý nó trước n-gram và model draft.
+
 ### Thay đổi
 
 - Ước lượng bộ nhớ theo đúng bố cục cache từng layer của llama.cpp. Layer sliding-window (Gemma 2/3/4,

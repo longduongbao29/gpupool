@@ -120,7 +120,7 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `autoscale` | object hoặc null, null | `{target_busy: 0.7 (0,1], up_after_s: 30 >= 0, down_after_s: 300 >= 0}`; null = các giá trị mặc định đó. Thêm replica khi (slot bận / tổng slot) trung bình vượt `target_busy` liên tục `up_after_s` (hoặc có request xếp hàng); bớt một replica khi dưới `target_busy / 2` liên tục `down_after_s` |
 | `idle_unload_s` | float `> 0` hoặc null, null | chỉ khi `min_replicas == 0`: dỡ model sau chừng này giây không có request; request kế tiếp sẽ khởi động lạnh nó |
 | `kv_cache_type` | `"f16"` / `"q8_0"` / `"q4_0"`, `"f16"` | kiểu phần tử của KV cache (`-ctk/-ctv`). Byte mỗi phần tử 2 / 34/32 / 18/32, nên q8_0 / q4_0 giảm bộ nhớ KV còn khoảng một nửa / một phần tư |
-| `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | giải mã suy đoán: `ngram` đoán từ văn bản đã có (không tốn thêm bộ nhớ); `draft` chạy một model nhỏ cùng tokenizer trên GPU đầu tiên của head |
+| `speculative` | `"none"` / `"ngram"` / `"draft"` / `"mtp"`, `"none"` | giải mã suy đoán: `ngram` đoán từ văn bản đã có (không tốn thêm bộ nhớ); `draft` chạy một model nhỏ cùng tokenizer trên GPU đầu tiên của head; `mtp` nháp bằng chính các layer dự đoán nhiều token (nextn) của model, 422 khi GGUF không có |
 | `draft` | string hoặc null, null | nguồn của model draft, `coordinator://<file>`; chỉ dùng với `speculative: "draft"` (bị bỏ nếu không) |
 | `draft_n_max` | int 1..16, 4 | số token draft mỗi bước. Trên GTX 1650 (3B + draft 0.5B) mức 4 nhanh hơn 5 %, mức 8 chậm hơn không dùng |
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | `-fa` của llama.cpp. Auto bật ở nơi GPU hỗ trợ. `kv_cache_type` lượng tử hóa cần nó (`off` cùng q8_0/q4_0 trả 422) |
@@ -388,8 +388,8 @@ Phản hồi:
   ranker trên pool thật (một gợi ý không bao giờ cần nhiều GPU hơn yêu cầu gốc). `apply` chứa các trường của
   `PUT /api/models` cần đổi; `kind` là `speed`, `throughput` hoặc `fix`; `tier` / `est_*` mô tả phương án tốt
   nhất khi áp dụng gợi ý. Các id: `kv_cache`, `smaller_quant` (bản lượng tử hóa nhỏ hơn của cùng model trong thư
-  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `ctx_per_slot`, `draft` (model nhỏ tương
-  thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
+  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `ctx_per_slot`, `mtp` (GGUF có layer dự đoán nhiều
+  token), `draft` (model nhỏ tương thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
   dưới 7.0) là `flash_attn_old_gpu` / `ubatch_old_gpu`. Thế hệ GPU lấy từ `compute_cap` của từng thiết bị;
   `ubatch` chỉ được gợi ý khi mọi GPU của phương án đều có tensor core. Rỗng khi không có gì giúp được.
 

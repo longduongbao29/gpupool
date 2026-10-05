@@ -135,3 +135,19 @@ def test_meta_without_layout_fields_keeps_the_old_estimate():
 def test_quantized_cache_scales_every_layer_kind(tmp_path, ct):
     m = write(tmp_path, "gemma3", 6, kv=[("attention.sliding_window", "uint32", 1024)])
     assert layer_kv_bytes(m, 0, 32768, ct) < layer_kv_bytes(m, 5, 32768, ct)
+
+
+def test_mtp_placement_reserves_the_nextn_blocks(tmp_path):
+    from gpupool.common.models import ModelSpec
+    from gpupool.scheduler.placement import plan
+    from tests.test_coordinator_helpers import node
+    kv = [("full_attention_interval", "uint32", 4), ("ssm.conv_kernel", "uint32", 4),
+          ("ssm.inner_size", "uint32", 128), ("ssm.state_size", "uint32", 16),
+          ("ssm.group_count", "uint32", 2), ("nextn_predict_layers", "uint32", 1)]
+    tensors = [(f"blk.{i}.attn_q.weight", 4096) for i in range(9)]
+    m = write(tmp_path, "qwen35", 9, kv=kv, tensors=tensors)
+    gpu = Device(device_id="CUDA0", kind="cuda", name="g", total_mb=4000, free_mb=4000, usable_mb=4000)
+    nodes = [node("a", devices=[gpu])]
+    off = plan(m, ModelSpec(name="q", source="x", ctx_size=4096), nodes, "r", lambda n: 9000)
+    on = plan(m, ModelSpec(name="q", source="x", ctx_size=4096, speculative="mtp"), nodes, "r", lambda n: 9000)
+    assert on.est_total_mb > off.est_total_mb

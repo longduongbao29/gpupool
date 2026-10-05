@@ -938,7 +938,12 @@
         <select x-model="form.spec" @change="form.rec = null; form.sim = null" style="width:100%">
           <option value="none">Off</option>
           <option value="ngram">N-gram (no extra memory)</option>
-          <option value="draft">Draft model</option></select></label>
+          <option value="draft">Draft model</option>
+          <option value="mtp">MTP (the model's own prediction layers)</option></select></label>
+      <div class="row" x-show="form.spec==='mtp'">
+        <label class="field"><span>Draft tokens</span><input type="number" min="1" max="16" step="1" x-model="form.draftN" @input="form.rec = null; form.sim = null" style="width:110px"></label>
+      </div>
+      <div class="muted small" x-show="form.spec==='mtp'" style="margin:-4px 0 var(--s-3)">Only for GGUFs that ship multi-token-prediction (nextn) layers, such as Qwen3.5, GLM-4.5 and newer, DeepSeek V3. No extra file; the server refuses models without them.</div>
       <div class="row" x-show="form.spec==='draft'">
         <label class="field grow"><span>Draft model (from the library)</span>
           <select x-model="form.draftFile" @change="form.rec = null; form.sim = null" style="width:100%">

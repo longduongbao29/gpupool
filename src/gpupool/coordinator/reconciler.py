@@ -1143,6 +1143,8 @@ class Reconciler:
             if draft_path is not None:
                 extra.update(draft_model_path=draft_path, draft_device=p.assignments[0].llama_device,
                              draft_n_max=spec.draft_n_max)
+            elif spec.speculative == "mtp":
+                extra.update(draft_n_max=spec.draft_n_max)
 
             head_id = f"{rid}-head"
             created.append((head_url, head_id))

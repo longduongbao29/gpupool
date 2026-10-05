@@ -70,7 +70,7 @@ When a better placement exists, the new replica is ready before the old one stop
 <td valign="top">
 
 **Speculative decoding**<br>
-`ngram` or a `draft` model, to cut RPC round trips when a model is split.
+`ngram`, a `draft` model or the model's own `mtp` layers, to cut RPC round trips when a model is split.
 
 </td>
 <td valign="top">

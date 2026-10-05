@@ -110,6 +110,9 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
     # b11342: without --spec-type, -md loads the draft model but never uses it.
     if spec.spec_type == "ngram":
         cmd += ["--spec-type", "ngram-mod"]
+    elif spec.spec_type == "mtp":
+        # b11342: loads the model's nextn blocks (skipped otherwise) into a second context
+        cmd += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(spec.draft_n_max)]
     elif spec.spec_type == "draft":
         if not spec.draft_model_path or not spec.draft_device:
             raise ValueError("draft speculative decoding needs draft_model_path and draft_device")

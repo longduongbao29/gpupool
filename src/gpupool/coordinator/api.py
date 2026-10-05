@@ -341,10 +341,20 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
     # ------------------------------------------------------------------ models
     async def check_draft(spec: ModelSpec, label: str = "") -> None:
-        """422 unless the draft model of a speculative "draft" spec is usable with its target."""
+        """422 unless the draft model of a speculative "draft" spec is usable with its target, or
+        the model of an "mtp" spec has multi-token-prediction blocks."""
+        pre = f"{label}: " if label else ""
+        if spec.speculative == "mtp":
+            try:
+                meta = await reconciler.meta_for(spec)
+            except Exception as e:
+                raise HTTPException(422, f"{pre}cannot read model metadata: {type(e).__name__}: {e}") from e
+            if not meta.n_nextn:
+                raise HTTPException(422, f"{pre}speculative 'mtp' needs a GGUF with multi-token-prediction "
+                                         "(nextn) blocks that llama.cpp can draft with; this one has none")
+            return
         if spec.speculative != "draft":
             return
-        pre = f"{label}: " if label else ""
         if not spec.draft or not spec.draft.startswith(COORD_PREFIX):
             raise HTTPException(422, f"{pre}speculative 'draft' needs a draft_file from the library")
         file = spec.draft[len(COORD_PREFIX):]
@@ -607,7 +617,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             return best
 
         ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn, "parallel": body.parallel}
-        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, **ckw)
+        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, mtp=body.speculative == "mtp", **ckw)
         if dmeta is not None:
             need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type, **ckw)
         try:

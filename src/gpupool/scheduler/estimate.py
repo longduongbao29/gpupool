@@ -95,9 +95,13 @@ def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_
                    flash_attn: str = "auto", parallel: int = 1, mtp: bool = False) -> int:
     total = sum(layer_weight_bytes(meta, i, mtp)
                 + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp) for i in layers)
+    extra_mb = 0
     if is_last:
         total += meta.output_bytes
-    return math.ceil(total / _MB) + overhead_mb(meta, kind, ubatch, flash_attn, ctx_size)
+        if mtp and meta.n_nextn:
+            # the MTP draft runs in a second llama.cpp context with its own compute buffer
+            extra_mb = compute_mb(meta, ubatch, flash_attn, ctx_size)
+    return math.ceil(total / _MB) + overhead_mb(meta, kind, ubatch, flash_attn, ctx_size) + extra_mb
 
 
 def total_need_mb(meta: ModelMeta, ctx_size: int, cache_type: str = "f16",

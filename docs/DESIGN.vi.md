@@ -316,7 +316,7 @@ Thêm `-ctk T -ctv T` cho head (và `-ctkd/-ctvd` cho draft). Ước lượng d�
 cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nhớ. Đo trên Qwen2.5-3B ở ctx 8192: q8_0 tiết kiệm
 132 MB, q4_0 204 MB so với f16 (lý thuyết 142 / 217 MB).
 
-### 8.2 Speculative decoding (`speculative`: none | ngram | draft)
+### 8.2 Speculative decoding (`speculative`: none | ngram | draft | mtp)
 
 Ít lượt chạy model đích hơn nghĩa là ít vòng RPC hơn, điều này quan trọng nhất với placement multi-node.
 
@@ -327,6 +327,10 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
   được đặt tường minh. API từ chối draft có tokenizer khác, hoặc kích thước từ vựng lệch quá 128 token
   (llama.cpp cũng từ chối). Reconciler cũng từ chối launch nếu assignment đầu tiên không phải device CUDA
   local của head.
+- `mtp`: chính các block dự đoán nhiều token (`nextn`) của model nháp token, trong một context llama.cpp thứ
+  hai trên cùng các device. Cờ: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp chỉ nạp các block này ở
+  chế độ này, nên ước lượng chỉ cộng chúng (ở đúng vị trí layer trong split), KV của chúng và một compute buffer
+  thứ hai trên device cuối khi có `mtp`. API từ chối `mtp` với GGUF không có `nextn_predict_layers`.
 - `draft_n_max` (1..16, mặc định 4): đo trên GTX 1650 với Qwen2.5-3B cộng draft 0.5B, 4 token nháp cho +5 %,
   8 chậm hơn không dùng.
 

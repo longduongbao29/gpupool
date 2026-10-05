@@ -92,6 +92,11 @@ def test_build_ngram():
     assert cmd == _BASE + ["--spec-type", "ngram-mod"]
 
 
+def test_build_mtp():
+    cmd = build_command(_srv(spec_type="mtp", draft_n_max=3), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3"]
+
+
 def test_build_draft():
     cmd = build_command(_srv(spec_type="draft", draft_model_path="/d.gguf",
                              draft_device="CUDA0", draft_n_max=6), BINS, "h", "/m.gguf")

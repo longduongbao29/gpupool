@@ -378,9 +378,9 @@ The model is cached in `GPUPOOL_CI_MODELS_DIR` (default `<repo>/.cache/ci-models
 | Option | Values | Effect | Measured (GTX 1650, Qwen2.5-3B) |
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | smaller KV cache, so a model can fit on fewer GPUs | ctx 8192: −132 / −204 MB, speed unchanged (51.9 / 51.2 / 50.8 tok/s) |
-| Speculative | none, ngram, draft | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Speculative | none, ngram, draft, mtp | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
 
-In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`),
+In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: only for GGUFs with multi-token-prediction layers),
 `draft_file` (a library model, for `draft`) and `draft_n_max` (1 to 16, default 4); see [API.en.md](API.en.md).
 They apply the next time the model starts.
 
