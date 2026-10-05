@@ -59,7 +59,7 @@ async def test_report(cfg):
 async def test_engine_endpoints(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)
@@ -233,7 +233,7 @@ async def test_heartbeat_posts_and_survives_errors(cfg):
 async def test_shutdown_stops_engines(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)
@@ -276,7 +276,7 @@ async def test_heartbeat_starts_when_push_enabled(cfg):
 async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, cfg.log_dir, "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)

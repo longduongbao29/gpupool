@@ -165,7 +165,7 @@ SLEEPER = "import time; time.sleep(60)"
 @pytest.fixture
 def pm_fw(tmp_path, monkeypatch):
     monkeypatch.setattr(procs, "build_command",
-                        lambda spec, bins, host, mp: [sys.executable, "-c", SLEEPER])
+                        lambda spec, bins, host, mp, *_: [sys.executable, "-c", SLEEPER])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     f, ipt = fw()
     m = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1", rpc_firewall=True, firewall=f)
@@ -190,7 +190,7 @@ def test_own_bind_address_is_allowed(tmp_path, monkeypatch):
     # Real-cluster regression: RPC bound to the container IP; the agent's readiness probe to
     # its own IP has that IP as source, was dropped, and the engine never looked "running".
     monkeypatch.setattr(procs, "build_command",
-                        lambda spec, bins, host, mp: [sys.executable, "-c", SLEEPER])
+                        lambda spec, bins, host, mp, *_: [sys.executable, "-c", SLEEPER])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     monkeypatch.setattr(ProcessManager, "_port_free", lambda self, port: True)  # no such IP here
     f, ipt = fw()

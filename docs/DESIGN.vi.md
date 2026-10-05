@@ -362,6 +362,10 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
   hai trên cùng các device. Cờ: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp chỉ nạp các block này ở
   chế độ này, nên ước lượng chỉ cộng chúng (ở đúng vị trí layer trong split), KV của chúng và một compute buffer
   thứ hai trên device cuối khi có `mtp`. API từ chối `mtp` với GGUF không có `nextn_predict_layers`.
+- Với llama.cpp b11413 trở lên (agent đọc bản build của `llama-server` của nó), `draft` và `mtp` thêm
+  `--spec-draft-sampling probabilistic`: bản nháp được lấy mẫu và kiểm bằng rejection (chấp nhận với `min(1, p/q)`)
+  thay vì so với argmax của nó, giữ đúng phân phối đầu ra của model đích và chấp nhận nhiều bản nháp hơn khi
+  temperature > 0 (llama.cpp #27694: +4-8 % throughput). Bản build cũ hơn vẫn nháp kiểu greedy.
 - `draft_n_max` (1..16, mặc định 4): đo trên GTX 1650 với Qwen2.5-3B cộng draft 0.5B, 4 token nháp cho +5 %,
   8 chậm hơn không dùng.
 

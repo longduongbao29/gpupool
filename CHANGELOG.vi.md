@@ -30,6 +30,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Speculative decoding kiểu draft và MTP lấy mẫu bản nháp và kiểm bằng rejection (`--spec-draft-sampling
+  probabilistic`, llama.cpp b11413+): cùng phân phối đầu ra, nhiều bản nháp được chấp nhận hơn khi temperature > 0
+  (+4-8 % throughput theo số đo của llama.cpp). Agent dùng bản llama.cpp cũ hơn vẫn nháp kiểu greedy.
+
 - llama.cpp b11342 → b11413 trong cả hai image (cùng giao thức RPC 7.0.0; vẫn nâng mọi agent cùng lúc như trước).
   Mang lại: draft n-gram không còn bị từ chối khi temperature > 0, lấy mẫu draft theo xác suất cho draft và MTP, sửa
   lỗi bộ nhớ CUDA với MoE nhiều expert, gộp shared expert và matmul f16/bf16 batch nhỏ nhanh hơn trên CUDA, sửa flash

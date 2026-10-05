@@ -378,6 +378,10 @@ Fewer target passes mean fewer RPC round trips, which matters most for multi-nod
   blocks only in this mode, so the estimate adds them (at their layer position in the split), their KV and
   a second compute buffer on the last device only with `mtp`. The API refuses `mtp` for a GGUF without
   `nextn_predict_layers`.
+- With llama.cpp b11413 or newer (the agent reads the build of its `llama-server`), `draft` and `mtp` add
+  `--spec-draft-sampling probabilistic`: the draft is sampled and verified by rejection (accept with
+  `min(1, p/q)`) instead of matching its argmax, which keeps the target's output distribution exactly and accepts
+  more drafts at temperature > 0 (llama.cpp #27694: +4-8 % throughput). Older builds keep greedy drafting.
 - `draft_n_max` (1..16, default 4): measured on a GTX 1650 with Qwen2.5-3B plus a 0.5B draft, 4 drafted
   tokens gave +5 %, 8 was slower than none.
 

@@ -73,8 +73,11 @@ def llama_cuda_archs(llama_dir: Path) -> list[str] | None:
     return archs or None
 
 
+PROBABILISTIC_DRAFT_BUILD = 11413  # first llama.cpp build with --spec-draft-sampling
+
+
 def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
-                  model_path: str | None) -> list[str]:
+                  model_path: str | None, llama_build: int | None = None) -> list[str]:
     if spec.kind == "rpc":
         # One process for every device of the replica on this server: llama.cpp then copies
         # activations between them inside the server (RPC_CMD_COPY_TENSOR) instead of through the
@@ -126,6 +129,11 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
                 "--spec-draft-n-max", str(spec.draft_n_max)]
         if spec.cache_type != "f16":
             cmd += ["-ctkd", spec.cache_type, "-ctvd", spec.cache_type]
+    if spec.spec_type in ("draft", "mtp") and (llama_build or 0) >= PROBABILISTIC_DRAFT_BUILD:
+        # Sample the draft and verify by rejection (min(1, p/q)) instead of matching its argmax:
+        # the output distribution is exactly the target's, and at temperature > 0 more drafts are
+        # accepted (llama.cpp #27694: +4-8 % throughput for draft-simple and draft-mtp).
+        cmd += ["--spec-draft-sampling", "probabilistic"]
     return cmd + list(spec.extra_args)
 
 
@@ -202,6 +210,7 @@ class ProcessManager:
         self._lock = threading.RLock()
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
+        self._build: int | None = None
         self.firewall = (firewall or RpcFirewall()) if rpc_firewall else None
         if self.firewall is not None:
             self.firewall.setup()  # also flushes rules of engines a previous agent left behind
@@ -259,6 +268,13 @@ class ProcessManager:
             pid_file.unlink(missing_ok=True)
         return reaped
 
+    def _llama_build(self) -> int | None:
+        """Build number of llama-server ("b11413" -> 11413), None when unknown; read once."""
+        if self._build is None:
+            v = llama_version(self.llama_dir)
+            self._build = int(v[1:]) if v.startswith("b") and v[1:].isdigit() else 0
+        return self._build or None
+
     def _binaries(self) -> dict[str, Path]:
         if self._bins is None:
             self._bins = find_binaries(self.llama_dir)
@@ -288,7 +304,7 @@ class ProcessManager:
                 raise EngineExists(spec.engine_id)
             if not self._port_free(spec.port):
                 raise PortInUse(f"port {spec.port} not available on {self.bind_host}")
-            cmd = build_command(spec, self._binaries(), self.bind_host, model_path)
+            cmd = build_command(spec, self._binaries(), self.bind_host, model_path, self._llama_build())
             self.log_dir.mkdir(parents=True, exist_ok=True)
             if old is not None:
                 self._drop_rules(old)  # crashed engine being replaced: its rules are stale

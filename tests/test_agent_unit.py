@@ -103,6 +103,18 @@ def test_build_kv_unified():
     assert "-kvu" not in build_command(_srv(), BINS, "h", "/m.gguf")
 
 
+@pytest.mark.parametrize("build, on", [(None, False), (11342, False), (11413, True), (12000, True)])
+@pytest.mark.parametrize("spec_type", ["draft", "mtp"])
+def test_probabilistic_draft_sampling_only_where_llama_has_it(spec_type, build, on):
+    kw = {"draft_model_path": "/d.gguf", "draft_device": "CUDA0"} if spec_type == "draft" else {}
+    cmd = build_command(_srv(spec_type=spec_type, **kw), BINS, "h", "/m.gguf", build)
+    assert (cmd[-2:] == ["--spec-draft-sampling", "probabilistic"]) is on
+
+
+def test_no_probabilistic_sampling_for_ngram():
+    assert "--spec-draft-sampling" not in build_command(_srv(spec_type="ngram"), BINS, "h", "/m.gguf", 11413)
+
+
 def test_build_mtp():
     cmd = build_command(_srv(spec_type="mtp", draft_n_max=3), BINS, "h", "/m.gguf")
     assert cmd == _BASE + ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3"]
@@ -226,7 +238,7 @@ def pm(tmp_path):
 
 def patch_cmd(monkeypatch, script):
     monkeypatch.setattr(procs, "build_command",
-                        lambda spec, bins, host, mp: [sys.executable, "-c", script])
+                        lambda spec, bins, host, mp, *_: [sys.executable, "-c", script])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
 
 

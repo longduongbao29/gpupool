@@ -30,6 +30,10 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- Draft and MTP speculative decoding sample the draft and verify it by rejection (`--spec-draft-sampling
+  probabilistic`, llama.cpp b11413+): same output distribution, more drafts accepted at temperature > 0
+  (+4-8 % throughput in llama.cpp's measurements). Agents on an older llama.cpp build keep greedy drafting.
+
 - llama.cpp b11342 → b11413 in both images (same RPC protocol, 7.0.0; upgrade every agent together as always).
   Brings: n-gram drafts no longer rejected at temperature > 0, probabilistic draft sampling for draft and MTP,
   a CUDA memory fault with many-expert MoE fixed, fused shared experts and faster small-batch f16/bf16 matmul on
