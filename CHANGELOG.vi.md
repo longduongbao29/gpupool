@@ -8,6 +8,15 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.4.2] - 2026-10-05
+
+### Sửa lỗi
+
+- Công tắc "In pool" ở trang Servers và GPUs không có tác dụng: phần chọn GPU riêng cho từng model trong form model
+  khai báo thêm một hàm `toggleGpu` trong component UI, đè lên hàm gọi API, nên mỗi lần bấm chỉ thay đổi form model
+  (đang ẩn). Các handler của form model giờ là `pinToggleServer` / `pinToggleGpu`, và có test báo lỗi nếu component
+  có hai method trùng tên.
+
 ## [0.4.1] - 2026-10-04
 
 ### Thêm mới
@@ -135,7 +144,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0

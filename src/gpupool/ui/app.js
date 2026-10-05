@@ -1134,14 +1134,14 @@ function app() {
     },
     pinReset: function () { this.form.plan = null; this.form.rec = null; this.form.sim = null; },
     // Checking a server stores "<node>/*" and drops that node's single-GPU pins; unchecking removes everything of the node.
-    toggleServer: function (s, on) {
+    pinToggleServer: function (s, on) {
       var prefix = s.node_id + "/";
       this.form.pins = this.form.pins.filter(function (p) { return p.indexOf(prefix) !== 0; });
       if (on) this.form.pins.push(prefix + "*");
       this.pinReset();
     },
     // Unchecking one GPU of a whole-server pick turns it into the explicit remaining "<node>/<device>" pins.
-    toggleGpu: function (s, d, on) {
+    pinToggleGpu: function (s, d, on) {
       var key = this.pinLabel(s, d);
       if (this.pinWhole(s)) {
         if (on) return;

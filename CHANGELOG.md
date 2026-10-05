@@ -8,6 +8,15 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-05
+
+### Fixed
+
+- The "In pool" switches on the Servers and GPUs pages did nothing: the model form's per-model GPU selection
+  defined a second `toggleGpu` in the UI component, which replaced the one that calls the API, so a click only
+  changed the (hidden) model form. The model form's handlers are now `pinToggleServer` / `pinToggleGpu`, and a test
+  fails on any duplicate method name in the component.
+
 ## [0.4.1] - 2026-10-04
 
 ### Added
@@ -135,7 +144,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/longduongbao29/gpupool/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/longduongbao29/gpupool/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/longduongbao29/gpupool/compare/v0.2.0...v0.3.0

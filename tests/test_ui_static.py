@@ -875,10 +875,43 @@ def test_ui_has_copy_buttons_on_the_model_card():
     assert ".ep-line" in (UI / "styles.css").read_text(encoding="utf-8")
 
 
+def test_ui_component_has_no_duplicate_methods():
+    """A repeated key in the app() object literal silently replaces the earlier method
+    (the model form's toggleGpu once shadowed the Servers tab's pool switch)."""
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    names = re.findall(r"^    ([A-Za-z_$][\w$]*): (?:async )?function", js, flags=re.M)
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, dupes
+
+
+def test_ui_pool_switch_calls_the_api_in_node():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    harness = js + """
+var a = app(), calls = [];
+a.api = async function (m, p, b) { calls.push([m, p, b]); return {}; };
+a.refresh = async function () {};
+a.form.pins = [];
+a.toggleGpu({ node_id: "a" }, { device_id: "CUDA0" }, false).then(function () {
+  console.log(JSON.stringify([calls, a.form.pins]));
+});
+"""
+    prelude = "global.window = global; global.document = {documentElement: {removeAttribute() {}, setAttribute() {}}}; global.localStorage = {getItem() { return null; }, setItem() {}}; global.matchMedia = () => ({matches: false, addEventListener() {}});"
+    r = subprocess.run([node, "-"], input=prelude + chr(10) + harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-300:]
+    import json
+
+    calls, pins = json.loads(r.stdout.strip().splitlines()[-1])
+    assert calls == [["PUT", "/api/servers/a/gpus/CUDA0", {"enabled": False}]]
+    assert pins == []
+
+
 def test_ui_has_allowed_servers_selection():
     html = (UI / "index.html").read_text(encoding="utf-8")
     js = (UI / "app.js").read_text(encoding="utf-8")
-    for needle in ("All servers and GPUs", "Only selected ones", "toggleServer(s", "toggleGpu(s, d", "pinNodeState(s)", "pinSummary()",
+    for needle in ("All servers and GPUs", "Only selected ones", "pinToggleServer(s", "pinToggleGpu(s, d", "pinNodeState(s)", "pinSummary()",
                    "Nothing selected", "disabled in the pool", "server offline", "GPUs added later", "stay enabled for other models"):
         assert needle in html, needle
     for needle in ('"/*"', "pinWhole", "pinSummary", '"Limited to "', "Select at least one server or GPU"):
@@ -898,15 +931,15 @@ var s1 = gp("a"), s2 = gp("b");
 a.servers = function () { return [s1, s2]; };
 a.gpus = function (s) { return s.gpus; };
 a.form.pins = [];
-a.toggleServer(s1, true);
+a.pinToggleServer(s1, true);
 var out = [a.form.pins.slice(), a.pinNodeState(s1)];
-a.toggleGpu(s1, s1.gpus[1], false);
+a.pinToggleGpu(s1, s1.gpus[1], false);
 out.push(a.form.pins.slice(), a.pinNodeState(s1));
-a.toggleGpu(s2, s2.gpus[0], true);
+a.pinToggleGpu(s2, s2.gpus[0], true);
 out.push(a.form.pins.slice(), a.pinNodeState(s2), a.pinSummary());
-a.toggleServer(s1, true);
+a.pinToggleServer(s1, true);
 out.push(a.form.pins.slice());
-a.toggleServer(s1, false);
+a.pinToggleServer(s1, false);
 out.push(a.form.pins.slice());
 out.push(a.specChips({ spec: { pin_devices: ["a/*", "b/CUDA1"] } }));
 console.log(JSON.stringify(out));

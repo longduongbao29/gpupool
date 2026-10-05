@@ -961,11 +961,11 @@
         <div class="gpu-pick" role="group" aria-label="Allowed servers and GPUs">
           <template x-for="s in servers()" :key="s.node_id">
             <div>
-              <label class="grp" :class="{off: !s.alive}"><input type="checkbox" :checked="pinNodeState(s) === 'all'" x-effect="$el.indeterminate = pinNodeState(s) === 'some'" @change="toggleServer(s, $event.target.checked)" :aria-label="'Whole server ' + s.node_id">
+              <label class="grp" :class="{off: !s.alive}"><input type="checkbox" :checked="pinNodeState(s) === 'all'" x-effect="$el.indeterminate = pinNodeState(s) === 'some'" @change="pinToggleServer(s, $event.target.checked)" :aria-label="'Whole server ' + s.node_id">
                 <span class="grow"><span x-text="s.node_id"></span> <span class="muted small" x-text="gpus(s).length + ' GPU' + (gpus(s).length === 1 ? '' : 's') + (pinWhole(s) ? ' · whole server, including GPUs added later' : '')"></span></span>
                 <span class="pill red lead" x-show="!s.alive">Offline</span></label>
               <template x-for="d in gpus(s)" :key="d.device_id">
-                <label class="child" :class="{off: !s.alive || !enabled(s, d)}"><input type="checkbox" :checked="pinHas(s, d)" @change="toggleGpu(s, d, $event.target.checked)" :aria-label="'GPU ' + d.device_id + ' of ' + s.node_id">
+                <label class="child" :class="{off: !s.alive || !enabled(s, d)}"><input type="checkbox" :checked="pinHas(s, d)" @change="pinToggleGpu(s, d, $event.target.checked)" :aria-label="'GPU ' + d.device_id + ' of ' + s.node_id">
                   <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
                   <span class="muted small" x-text="(!s.alive ? 'server offline · ' : (!enabled(s, d) ? 'disabled in the pool · ' : '')) + 'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
               </template>
