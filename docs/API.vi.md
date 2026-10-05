@@ -74,8 +74,9 @@ chuyển tiếp nguyên vẹn, chỉ có `cache_prompt` mặc định là `true`
 - `"stream": true` trả `text/event-stream`, chuyển tiếp nguyên như nhận được. Nếu upstream đứt sau khi
   stream đã bắt đầu, router gửi một frame SSE `data:` chứa object `error` rồi đóng stream.
 - Chọn replica: ưu tiên theo prefix của prompt (rendezvous hash trên phần đầu hội thoại, nên cùng prefix đi
-  vào cùng replica, để tận dụng prompt cache của llama.cpp), và chuyển sang replica ít tải nhất khi replica
-  được ưu tiên đang có nhiều hơn replica ít tải nhất quá 2 request.
+  vào cùng replica, để tận dụng prompt cache của llama.cpp; hội thoại nhiều lượt giữ nguyên replica), có trọng số
+  theo tốc độ ước lượng của từng replica nên replica nhanh hơn nhận nhiều hơn, và chuyển sang replica ít tải nhất
+  (số request đang chạy so với tốc độ) khi replica được ưu tiên vượt quá 2.
 - Lần thử lỗi (lỗi kết nối hoặc upstream trả status >= 500) được thử lại trên replica khác, tối đa 2 lần
   thử lại (3 lần thử), và chỉ khi chưa có byte nào tới client.
 - **Khởi động lạnh**: nếu model có `min_replicas = 0`, đã start (`replicas > 0`) và chưa có replica sẵn

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable
 
 from gpupool.common.models import ReplicaEndpoint
@@ -55,9 +56,17 @@ def prefix_key(body: dict) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _weight(key: str, replica_id: str) -> int:
+def _hash01(key: str, replica_id: str) -> float:
+    """Uniform in (0, 1) per (key, replica)."""
     digest = hashlib.sha256(f"{key}\x00{replica_id}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+    return (int.from_bytes(digest[:8], "big") + 0.5) / 2.0 ** 64
+
+
+def _score(key: str, c: ReplicaEndpoint) -> float:
+    """Weighted rendezvous hashing: the highest -w / ln(u) wins, so a replica gets a share of the
+    keys proportional to its weight and keys move only to or from a replica that joins or leaves.
+    With equal weights the order is that of u itself (plain rendezvous hashing)."""
+    return -max(c.weight, 1e-9) / math.log(_hash01(key, c.replica_id))
 
 
 class Balancer:
@@ -75,12 +84,14 @@ class Balancer:
         pool = [c for c in candidates if c.replica_id not in excluded]
         if not pool:
             return None
-        ranked = sorted(pool, key=lambda c: (-_weight(key, c.replica_id), c.replica_id))
+        ranked = sorted(pool, key=lambda c: (-_score(key, c), c.replica_id))
         preferred = ranked[0]
-        min_out = min(self.outstanding(c.replica_id) for c in pool)
-        if self.outstanding(preferred.replica_id) > min_out + self.slack:
+        # Load relative to capacity: a replica twice as fast may hold twice the requests.
+        top = max(max(c.weight, 1e-9) for c in pool)
+        load = {c.replica_id: self.outstanding(c.replica_id) * top / max(c.weight, 1e-9) for c in pool}
+        if load[preferred.replica_id] > min(load.values()) + self.slack:
             # ranked is in rendezvous order and min() is stable -> ties go to rendezvous order
-            return min(ranked, key=lambda c: self.outstanding(c.replica_id))
+            return min(ranked, key=lambda c: load[c.replica_id])
         return preferred
 
     def acquire(self, replica_id: str) -> None:

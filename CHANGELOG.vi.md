@@ -22,6 +22,11 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Router chia request giữa các replica của một model theo tốc độ của chúng: weighted rendezvous hashing với trọng
+  số là tok/s decode ước lượng của placement, và phép kiểm tra quá tải tính số request theo năng lực. Replica bị chia
+  qua mạng chạy 10 tok/s không còn nhận phần bằng replica một GPU chạy 50 tok/s. Replica cùng tốc độ định tuyến y
+  như trước.
+
 - Placement bị chia đặt các GPU của chính head ở cuối thứ tự device. Device cuối giữ layer đầu ra, và llama-server
   đọc logits (`n_vocab x 4` byte, khoảng 0,5 MB với từ vựng 128k) từ nó ở mỗi token: khi device cuối ở xa, logits đi
   qua mạng mỗi lần, giờ chỉ còn hidden state (`n_embd x 4` byte). Model draft vẫn nằm trên GPU local đầu tiên của head.

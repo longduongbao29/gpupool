@@ -388,8 +388,13 @@ layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_s
   chat, the system messages and the first user message, which every later turn repeats, so the conversation
   stays with its KV cache. With a single message, its first 512 characters; for `/v1/completions`, the
   first 512 characters of the prompt.
-- Rendezvous hash(prefix, replica) picks the preferred replica; if it has more than 2 more outstanding
-  requests than the least-loaded one, the least-loaded one is used.
+- Weighted rendezvous hashing picks the preferred replica: the highest `-weight / ln(hash(prefix, replica))`
+  wins, with `weight` = the replica's estimated decode tok/s (`Placement.est_decode_tps`; a replica without
+  one counts as the average of the others). A replica twice as fast gets twice the share of prefixes
+  (the idea of Helix, ASPLOS'25: route by capacity on heterogeneous GPUs), and with equal weights it is plain
+  rendezvous hashing. If the preferred replica's load exceeds the least-loaded one's by more than 2, the
+  least-loaded one is used; load is outstanding requests x (fastest weight / own weight), so a slow
+  replica fills up sooner.
 - Sends `cache_prompt: true`; the head runs with `--cache-reuse 256 --metrics`. The body is forwarded as
   the client sent it: when it has no `cache_prompt`, `"cache_prompt":true,` is spliced in after the opening
   brace instead of re-serializing megabytes of JSON on the event loop (a body with a BOM or in UTF-16 is

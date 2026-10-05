@@ -294,3 +294,6 @@ class ReplicaEndpoint(BaseModel):
     replica_id: str
     model: str
     base_url: str  # "http://10.0.0.5:9001" (llama-server on the head)
+    # Relative serving speed (the placement's estimated decode tok/s): a replica twice as fast gets
+    # twice the share of new prefixes. Only ratios between replicas of one model matter.
+    weight: float = 1.0

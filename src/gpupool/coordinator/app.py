@@ -353,10 +353,11 @@ def create_app(
         if cur[0] == v:
             return cur
         names = [m.name for m in store.list_models()]
-        ready: dict[str, list[tuple[str, str, int]]] = {}
+        ready: dict[str, list[tuple[str, str, int, float]]] = {}
         for r in store.list_replicas(states={"ready"}):
             ready.setdefault(r.model, []).append(
-                (r.replica_id, r.placement.head_node, r.placement.head_port))
+                (r.replica_id, r.placement.head_node, r.placement.head_port,
+                 r.placement.est_decode_tps or 0.0))
         nodes = {n.report.node_id: n for n in store.list_nodes()}
         snap = cur = (v, names, ready, nodes)
         return cur
@@ -364,13 +365,17 @@ def create_app(
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
         _, _, ready, nodes = _snapshot()
+        rows = ready.get(model, ())
+        known = [tps for *_, tps in rows if tps > 0]
+        default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []
-        for replica_id, head_node, head_port in ready.get(model, ()):
+        for replica_id, head_node, head_port, tps in rows:
             n = nodes.get(head_node)
             if n is None or not reconciler.node_alive(n, now):
                 continue
             out.append(ReplicaEndpoint(
-                replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}"))
+                replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}",
+                weight=tps if tps > 0 else default))
         return out
 
     app.include_router(make_router(

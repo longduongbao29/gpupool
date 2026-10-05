@@ -75,7 +75,9 @@ forwarded unchanged except that `cache_prompt` defaults to `true`. Rules the rou
 - `"stream": true` returns `text/event-stream`, passed through as received. If the upstream breaks after the
   stream started, one SSE `data:` frame with an `error` object is sent, then the stream ends.
 - Replica choice: prompt-prefix affinity first (rendezvous hash on the conversation prefix, so the same prefix goes to the same
-  replica, for the llama.cpp prompt cache), falling back to the least-loaded replica when the preferred one has more than 2 more requests in flight than the least loaded.
+  replica, for the llama.cpp prompt cache; a multi-turn chat keeps its replica), weighted by each replica's estimated speed so a
+  faster replica gets a larger share, falling back to the least-loaded replica (requests in flight relative to speed) when the
+  preferred one is more than 2 ahead.
 - A failed attempt (connection error or upstream status >= 500) is retried on another replica, at most
   2 retries (3 attempts), only while nothing has reached the client.
 - **Cold start**: if the model has `min_replicas = 0`, is started (`replicas > 0`) and has no ready replica,

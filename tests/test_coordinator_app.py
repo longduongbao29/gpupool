@@ -294,3 +294,13 @@ async def test_loop_lag_watchdog_quiet_when_loop_is_healthy(caplog):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert not [r for r in caplog.records if "event loop blocked" in r.getMessage()]
+
+
+def test_candidates_carry_the_estimated_speed_as_weight(routing):
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    rec = put_replica(store, "m-1", now=clock())
+    store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
+        update={"est_decode_tps": 42.5})}))
+    put_replica(store, "m-2", now=clock(), head_port=9100)  # no estimate: an average replica
+    assert {e.replica_id: e.weight for e in cap["get_candidates"]("m")} == {"m-1": 42.5, "m-2": 42.5}

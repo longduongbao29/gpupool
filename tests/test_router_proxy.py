@@ -426,3 +426,40 @@ def test_body_is_forwarded_as_received():
     assert _with_cache_prompt(kept, json.loads(kept)) is kept
     bom = '﻿{"model": "m"}'.encode("utf-8")
     assert json.loads(_with_cache_prompt(bom, json.loads(bom))) == {"model": "m", "cache_prompt": True}
+
+
+def test_weighted_rendezvous_shares_keys_by_replica_speed():
+    fast = ReplicaEndpoint(replica_id="fast", model="m", base_url="http://f:1", weight=60.0)
+    slow = ReplicaEndpoint(replica_id="slow", model="m", base_url="http://s:1", weight=20.0)
+    b = Balancer()
+    picks = [b.pick([fast, slow], f"k{i}").replica_id for i in range(4000)]
+    share = picks.count("fast") / len(picks)
+    assert 0.72 < share < 0.78  # 60 / (60 + 20) = 0.75
+    # a replica leaving moves only its own keys
+    third = ReplicaEndpoint(replica_id="third", model="m", base_url="http://t:1", weight=20.0)
+    with3 = [b.pick([fast, slow, third], f"k{i}").replica_id for i in range(4000)]
+    assert all(p == q for p, q in zip(picks, with3) if q != "third")
+
+
+def test_equal_weights_keep_plain_rendezvous_order():
+    import hashlib
+    cands = [ep(0), ep(1), ep(2)]
+
+    def plain(key):  # the pre-weights rule: highest 64-bit hash wins
+        return max(cands, key=lambda c: hashlib.sha256(f"{key}\x00{c.replica_id}".encode()).digest()[:8]).replica_id
+
+    assert all(Balancer().pick(cands, f"k{i}").replica_id == plain(f"k{i}") for i in range(500))
+
+
+def test_load_escape_hatch_counts_load_per_capacity():
+    fast = ReplicaEndpoint(replica_id="fast", model="m", base_url="http://f:1", weight=60.0)
+    slow = ReplicaEndpoint(replica_id="slow", model="m", base_url="http://s:1", weight=20.0)
+    b = Balancer(slack=2)
+    key = next(f"k{i}" for i in range(100) if b.pick([fast, slow], f"k{i}").replica_id == "fast")
+    # load is counted in requests of the fastest replica: one on the slow replica weighs 3
+    b.acquire("slow")
+    for _ in range(5):
+        b.acquire("fast")  # 5 vs 3: within the slack of 2
+    assert b.pick([fast, slow], key).replica_id == "fast"
+    b.acquire("fast")  # 6 > 3 + 2: the slow replica is relatively idler now
+    assert b.pick([fast, slow], key).replica_id == "slow"
