@@ -10,6 +10,15 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
+- Memory estimates follow llama.cpp's real cache layout per layer. Sliding-window layers (Gemma 2/3/4,
+  gpt-oss, Cohere2, OLMo2) cache only their window, MLA models (DeepSeek, Kimi, GLM-DSA) cache only the latent
+  K, hybrid models (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) cache KV only on attention layers plus a small
+  recurrent state per sequence, and MTP blocks that llama.cpp does not load without `draft-mtp` are no longer
+  counted. These models were over-estimated (up to several times the real KV at long context), which pushed
+  them onto more GPUs or servers than needed. Unknown architectures keep the old rule.
+- Decode speed of MoE models counts only the routed experts a token reads, so placements of MoE models are
+  scored on realistic speeds.
+
 - Faster cold starts: the head downloads its model (and the draft, in parallel with it) while the RPC
   engines start, instead of after they are running.
 - The coordinator's SQLite store runs with `synchronous=NORMAL` (safe under WAL): agent reports, one commit

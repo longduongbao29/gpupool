@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from gpupool.common.cuda import arch_name, has_tensor_cores, parse_cc
 from gpupool.common.models import DEFAULT_UBATCH, Device, LibraryItem, ModelMeta, ModelSpec, Placement
-from gpupool.scheduler.estimate import compute_mb, kv_bytes_per_layer
+from gpupool.scheduler.estimate import compute_mb, kv_total_bytes
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +145,9 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
             fa = {"flash_attn": "auto"} if spec.flash_attn == "off" else {}  # quantized V needs FA
             p = await try_rank(spec.model_copy(update={"kv_cache_type": kv, **fa}))
             if p is not None and _tier(p) < _tier(best):
-                saved = (kv_bytes_per_layer(meta, spec.ctx_size, spec.kv_cache_type)
-                         - kv_bytes_per_layer(meta, spec.ctx_size, kv)) * meta.n_layers / 1024 ** 2
+                kw = {"parallel": spec.parallel, "ubatch": spec.ubatch}
+                saved = (kv_total_bytes(meta, spec.ctx_size, spec.kv_cache_type, **kw)
+                         - kv_total_bytes(meta, spec.ctx_size, kv, **kw)) / 1024 ** 2
                 quality = "negligible quality loss" if kv == "q8_0" else "a small quality loss"
                 tips.append(_tip("kv_cache", "fix", f"Quantize the KV cache to {kv} to {goal}",
                                  f"Saves about {_mb(saved)} of KV memory with {quality}; "

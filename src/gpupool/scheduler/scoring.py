@@ -30,6 +30,12 @@ def device_bw(dev: Device, cuda_default: float) -> float:
     return CPU_BW_GBPS if dev.kind == "cpu" else cuda_default
 
 
+def decode_bytes(meta: ModelMeta) -> list[int]:
+    """Bytes one decoded token reads per layer: every weight of a dense layer, the shared part
+    plus the routed share (expert_used_count / expert_count) of a MoE layer's experts."""
+    return meta.active_bytes if meta.active_bytes is not None else meta.layer_bytes
+
+
 def est_decode_tps(
     meta: ModelMeta,
     devices_with_layers: Sequence[tuple[Device, int]],
@@ -39,8 +45,9 @@ def est_decode_tps(
     """Tokens/s for devices in layer order; the last one also holds the output tensors."""
     t, start = 0.0, 0
     last = len(devices_with_layers) - 1
+    read = decode_bytes(meta)
     for i, (dev, count) in enumerate(devices_with_layers):
-        b = sum(meta.layer_bytes[start:start + count])
+        b = sum(read[start:start + count])
         if i == last:
             b += meta.output_bytes
         t += b / (device_bw(dev, cuda_default_gbps) * 1e9 * ETA)

@@ -606,7 +606,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                     hi = mid - 1
             return best
 
-        ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn}
+        ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn, "parallel": body.parallel}
         need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, **ckw)
         if dmeta is not None:
             need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type, **ckw)

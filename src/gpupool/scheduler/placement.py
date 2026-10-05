@@ -26,7 +26,9 @@ from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
 from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
 from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
 from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
-from gpupool.scheduler.scoring import CUDA_BW_FALLBACK_GBPS, default_cuda_bw, device_bw, est_decode_tps
+from gpupool.scheduler.scoring import (
+    CUDA_BW_FALLBACK_GBPS, decode_bytes, default_cuda_bw, device_bw, est_decode_tps,
+)
 
 
 class NoFit(Exception):
@@ -51,7 +53,8 @@ _COMPUTE: ContextVar[dict] = ContextVar("gpupool_compute", default={})
 @contextlib.contextmanager
 def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
-    ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn})
+    ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn,
+                                                 "parallel": spec.parallel})
     try:
         yield
     finally:
@@ -77,7 +80,9 @@ def draft_need_mb(*a, **kw) -> int:
 
 
 def overhead_mb(meta, kind, ctx_size: int = 0) -> int:
-    return _raw_overhead_mb(meta, kind, ctx_size=ctx_size, **_COMPUTE.get())
+    c = _COMPUTE.get()
+    return _raw_overhead_mb(meta, kind, ctx_size=ctx_size,
+                            **{k: v for k, v in c.items() if k in ("ubatch", "flash_attn")})
 
 
 def _need(meta, ctx, ct, d: _Dev, start: int, count: int, is_last: bool) -> int:
@@ -129,8 +134,9 @@ def _split(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev]) -> list[int] |
 def _decode_s(meta: ModelMeta, bws: list[float], counts: list[int]) -> float:
     """Seconds per token up to a constant (the est_decode_tps sum without ETA and hops)."""
     t, start = 0.0, 0
+    read = decode_bytes(meta)
     for i, (bw, c) in enumerate(zip(bws, counts)):
-        b = sum(meta.layer_bytes[start:start + c])
+        b = sum(read[start:start + c])
         if i == len(counts) - 1:
             b += meta.output_bytes
         t += b / bw

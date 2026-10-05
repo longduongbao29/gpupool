@@ -140,14 +140,27 @@ winning placement.
 For a device holding layer range `L` (calibrated against llama.cpp b11342 verbose load logs):
 
 ```
-need = ceil( sum(layer_bytes[i] for i in L) + |L| x kv_bytes_per_layer [+ output_bytes if last device] )
+need = ceil( sum(layer_bytes[i] + cache_bytes[i] for i in L) [+ output_bytes if last device] )
        + compute_buffer + runtime_context
-kv_bytes_per_layer = 2 x ctx_size x n_head_kv x head_dim x bytes_per_element(kv_cache_type)
+cache_bytes[i]     = cells[i] x (k_row[i] + v_row[i]) x bytes_per_element(kv_cache_type)
+                     + state_bytes[i] x parallel
+cells[i]           = ctx_size, or for a sliding-window layer
+                     parallel x pad256(min(pad256(ctx_size / parallel), n_swa + ubatch))
 compute_buffer     = ceil(21 x 512 x n_embd x 4 bytes)      (default ubatch 512)
 runtime_context    = 128 MB (CUDA) | 32 MB (CPU)
 ```
 
 - Bytes per KV element: f16 2, q8_0 34/32, q4_0 18/32 (ggml block layouts).
+- The per-layer layout follows llama.cpp b11342's loaders: `k_row = n_head_kv[i] x key_length`
+  (`key_length_swa` on SWA layers), `v_row` likewise, 0 with MLA (`key_length_mla`: only the latent K
+  is cached). Recurrent layers of hybrid models (`full_attention_interval` for Qwen3-Next / Qwen3.5,
+  `recurrent_layers`, or 0 KV heads) have no KV but a per-sequence f32 state from the `ssm.*` keys.
+  SWA layers come from a `sliding_window_pattern` array, or for gemma2/3/3n, gpt-oss, cohere2 and
+  olmo2 from the loader's own period when `sliding_window` is set; any other architecture counts
+  full layers (over-estimate, never an OOM). Without layout data (old metadata) every layer uses
+  `2 x ctx_size x n_head_kv x head_dim`.
+- MTP (`nextn`) blocks that llama.cpp loads only for `--spec-type draft-mtp` are kept apart
+  (`nextn_bytes`) and count, with their cache, only when MTP is on.
 - `output_bytes` (output.weight, or token_embd when tied, plus output_norm) counts on the **last
   device** in `--device` order. token_embd stays in host RAM and is not counted on any GPU.
 - The result is multiplied by the model's calibrated memory factor (section 12), which is 1.0 until
@@ -205,7 +218,8 @@ est_decode_tps = 1 / time per token
 ```
 
 (0.5 = fraction of peak bandwidth llama.cpp reaches; calibrated on a GTX 1650, 160 GB/s, where
-Qwen2.5-0.5B q4_k_m measured 182 tok/s.) Unknown bandwidth: CPU 25 GB/s; an unknown CUDA GPU ranks as
+Qwen2.5-0.5B q4_k_m measured 182 tok/s.) For a MoE layer the bytes per token are its shared weights plus
+`expert_used_count / expert_count` of its routed experts (`ffn_*_exps`). Unknown bandwidth: CPU 25 GB/s; an unknown CUDA GPU ranks as
 the slowest known one (100 GB/s when none is known).
 
 Score of a candidate (higher wins):

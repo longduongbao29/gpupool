@@ -10,6 +10,15 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thay đổi
 
+- Ước lượng bộ nhớ theo đúng bố cục cache từng layer của llama.cpp. Layer sliding-window (Gemma 2/3/4,
+  gpt-oss, Cohere2, OLMo2) chỉ cache cửa sổ của nó, model MLA (DeepSeek, Kimi, GLM-DSA) chỉ cache K latent,
+  model lai (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) chỉ có KV ở layer attention cộng một state hồi quy nhỏ
+  cho mỗi sequence, và các block MTP mà llama.cpp không nạp khi không có `draft-mtp` không còn bị tính. Các model
+  này trước đây bị ước lượng dư (tới vài lần KV thật ở context dài), khiến chúng bị chia ra nhiều GPU hoặc máy
+  chủ hơn mức cần. Kiến trúc chưa biết giữ quy tắc cũ.
+- Tốc độ decode của model MoE chỉ tính các expert mà mỗi token thực sự đọc, nên placement của model MoE được
+  chấm điểm theo tốc độ sát thực tế.
+
 - Khởi động nguội nhanh hơn: head tải model (và draft, song song với model) trong lúc các engine RPC khởi
   động, thay vì đợi chúng chạy xong mới tải.
 - SQLite của coordinator chạy với `synchronous=NORMAL` (an toàn khi dùng WAL): báo cáo của agent, mỗi máy chủ

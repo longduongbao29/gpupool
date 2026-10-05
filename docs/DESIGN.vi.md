@@ -137,14 +137,26 @@ của (metadata model, spec, báo cáo node, occupant); cổng chỉ được c�
 Với một device giữ dải layer `L` (đã hiệu chỉnh theo log nạp verbose của llama.cpp b11342):
 
 ```
-need = ceil( sum(layer_bytes[i] for i in L) + |L| x kv_bytes_per_layer [+ output_bytes nếu là device cuối] )
+need = ceil( sum(layer_bytes[i] + cache_bytes[i] for i in L) [+ output_bytes nếu là device cuối] )
        + compute_buffer + runtime_context
-kv_bytes_per_layer = 2 x ctx_size x n_head_kv x head_dim x bytes_per_element(kv_cache_type)
+cache_bytes[i]     = cells[i] x (k_row[i] + v_row[i]) x bytes_per_element(kv_cache_type)
+                     + state_bytes[i] x parallel
+cells[i]           = ctx_size, hoặc với layer sliding-window
+                     parallel x pad256(min(pad256(ctx_size / parallel), n_swa + ubatch))
 compute_buffer     = ceil(21 x 512 x n_embd x 4 bytes)      (ubatch mặc định 512)
 runtime_context    = 128 MB (CUDA) | 32 MB (CPU)
 ```
 
 - Byte mỗi phần tử KV: f16 2, q8_0 34/32, q4_0 18/32 (bố cục block của ggml).
+- Bố cục theo từng layer làm theo loader của llama.cpp b11342: `k_row = n_head_kv[i] x key_length`
+  (`key_length_swa` ở layer SWA), `v_row` tương tự, bằng 0 với MLA (`key_length_mla`: chỉ cache K latent).
+  Layer hồi quy của model lai (`full_attention_interval` cho Qwen3-Next / Qwen3.5, `recurrent_layers`, hoặc
+  0 KV head) không có KV nhưng có state f32 cho mỗi sequence, tính từ các khoá `ssm.*`. Layer SWA lấy từ mảng
+  `sliding_window_pattern`, hoặc với gemma2/3/3n, gpt-oss, cohere2 và olmo2 từ chu kỳ của chính loader khi có
+  `sliding_window`; kiến trúc khác tính như layer đầy đủ (ước lượng dư, không bao giờ OOM). Không có dữ liệu
+  bố cục (metadata cũ) thì mọi layer dùng `2 x ctx_size x n_head_kv x head_dim`.
+- Các block MTP (`nextn`) mà llama.cpp chỉ nạp khi `--spec-type draft-mtp` được tách riêng (`nextn_bytes`) và
+  chỉ tính (cùng cache của chúng) khi bật MTP.
 - `output_bytes` (output.weight, hoặc token_embd khi tied, cộng output_norm) tính vào **device cuối** theo
   thứ tự `--device`. token_embd nằm trong RAM host và không tính vào GPU nào.
 - Kết quả được nhân với hệ số bộ nhớ đã hiệu chỉnh của model (mục 12), bằng 1.0 cho tới khi model được đo.
@@ -200,7 +212,8 @@ est_decode_tps = 1 / thời gian mỗi token
 
 (0.5 = tỉ lệ băng thông đỉnh mà llama.cpp đạt được; hiệu chỉnh trên GTX 1650, 160 GB/s, nơi Qwen2.5-0.5B
 q4_k_m đo được 182 tok/s.) Băng thông chưa biết: CPU 25 GB/s; GPU CUDA không biết được xếp như GPU chậm nhất
-đã biết (100 GB/s khi không biết cái nào).
+đã biết (100 GB/s khi không biết cái nào). Với layer MoE, byte mỗi token là
+phần weight dùng chung cộng `expert_used_count / expert_count` của các expert được định tuyến (`ffn_*_exps`).
 
 Điểm của một ứng viên (cao hơn thắng):
 

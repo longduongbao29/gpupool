@@ -210,6 +210,20 @@ class ModelMeta(BaseModel):
     # Tokenizer identity, to check a draft model matches its target (llama.cpp refuses otherwise).
     vocab_size: int | None = None
     tokenizer_model: str | None = None  # tokenizer.ggml.model, e.g. "gpt2", "llama"
+    # Per-layer cache layout as llama.cpp b11342 allocates it (None: unknown, every layer is
+    # estimated with n_head_kv x head_dim for K and V, the old rule). Elements per cached token:
+    kv_k: list[int] | None = None  # K row (0: the layer has no KV cache, e.g. recurrent)
+    kv_v: list[int] | None = None  # V row (0 with MLA: V is a view of the latent K)
+    swa: list[bool] | None = None  # sliding-window layer: caches only n_swa (+ ubatch) tokens
+    n_swa: int = 0
+    state_bytes: list[int] | None = None  # recurrent state per sequence (f32 conv + ssm)
+    # Multi-token-prediction layers at the end of the block list. llama.cpp loads them (and
+    # caches for them) only for --spec-type draft-mtp; their weights are kept apart.
+    n_nextn: int = 0
+    nextn_bytes: int = 0
+    # Bytes one decoded token reads per layer: MoE layers read only the routed experts.
+    # None: every byte of the layer (dense).
+    active_bytes: list[int] | None = None
 
 
 class DeviceAssignment(BaseModel):
