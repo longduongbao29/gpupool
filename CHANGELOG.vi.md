@@ -8,6 +8,19 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Hội thoại nhiều lượt ở yên trên một bản sao. Router lấy khoá theo mọi tin nhắn trừ tin cuối, nên khoá đổi ở
+  mỗi lượt (cho tới khi tiền tố quá 4096 ký tự) và khi có nhiều bản sao, hội thoại nhảy sang bản sao phải xử lý
+  lại toàn bộ lịch sử. Giờ yêu cầu nhiều lượt lấy khoá theo các tin system cộng tin user đầu tiên, phần mọi lượt
+  sau đều lặp lại. Yêu cầu một lượt giữ cách lấy khoá cũ (theo system prompt).
+- Router không còn giới hạn 100 kết nối tới upstream. Pool mặc định của httpx giữ yêu cầu thứ 101 trở đi trong
+  coordinator mà không có timeout, bộ cân bằng tải và hàng đợi của llama-server đều không thấy.
+- Cache trọng số RPC còn lại sau khi khởi động lại hay nâng cấp agent. `ggml-rpc-server -c` lưu tensor nhận được
+  ở `$LLAMA_CACHE/rpc`, mặc định là `~/.cache` trong lớp ghi của container; giờ engine nhận
+  `LLAMA_CACHE=<GPUPOOL_CACHE_DIR>/llama.cpp` (nằm trên volume `/data` trong image). `LLAMA_CACHE` do người
+  dùng đặt được giữ nguyên.
+
 ## [0.5.1] - 2026-10-05
 
 ### Thay đổi

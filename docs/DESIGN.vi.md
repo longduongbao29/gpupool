@@ -322,8 +322,11 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
 - Ứng viên = các replica `ready` của model mà node head còn sống. Router đọc một snapshot của store, chỉ được
   dựng lại khi version của store đổi; tình trạng sống được xét ở mỗi lần gọi, vì node im lặng không gây ra
   lần ghi nào.
-- **Prefix key** = sha256 của mọi message trừ cái cuối (JSON chuẩn hóa, cắt ở 4 KB); nếu chỉ có một
-  message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký tự đầu của prompt.
+- **Prefix key** = sha256 của JSON chuẩn hóa cắt ở 4 KB: với một lượt (các message system + một message
+  user), mọi message trừ cái cuối, để các request chung system prompt gặp nhau trên một replica; với hội thoại
+  nhiều lượt, các message system cộng message user đầu tiên, phần mọi lượt sau đều lặp lại, để hội thoại ở
+  cùng KV cache của nó. Nếu chỉ có một message, lấy 512 ký tự đầu của nó; với `/v1/completions`, lấy 512 ký
+  tự đầu của prompt.
 - Rendezvous hash(prefix, replica) chọn replica ưu tiên; nếu nó có nhiều hơn replica rảnh nhất quá 2 request
   đang chờ thì dùng replica rảnh nhất.
 - Gửi `cache_prompt: true`; head chạy với `--cache-reuse 256 --metrics`.

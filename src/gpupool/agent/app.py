@@ -83,7 +83,8 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
-    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall)
+    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall,
+                              llama_cache=Path(cfg.cache_dir) / "llama.cpp")
     version_cache: dict = {}  # llama version and CUDA archs: fixed for the agent's lifetime
     # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
     ensured: set[str] = set()

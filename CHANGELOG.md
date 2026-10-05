@@ -8,6 +8,20 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Multi-turn chats stay on one replica. The router keyed a conversation on every message but the last, so the
+  key changed on each turn (until the prefix passed 4096 characters) and with several replicas the conversation
+  hopped to a replica that had to process the whole history again. Multi-turn requests are now keyed on the
+  system messages plus the first user message, which every later turn repeats. Single-turn requests are keyed
+  as before (on the system prompt).
+- The router no longer caps upstream connections at 100. httpx's default pool held request 101 and later in
+  the coordinator with no timeout, invisible to the balancer's load count and to llama-server's queue.
+- The RPC weight cache survives agent restarts and upgrades. `ggml-rpc-server -c` stores received tensors under
+  `$LLAMA_CACHE/rpc`, which defaulted to `~/.cache` in the container's writable layer; engines now get
+  `LLAMA_CACHE=<GPUPOOL_CACHE_DIR>/llama.cpp` (on the `/data` volume in the image). A `LLAMA_CACHE` set by the
+  user is kept.
+
 ## [0.5.1] - 2026-10-05
 
 ### Changed

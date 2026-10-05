@@ -91,6 +91,34 @@ def test_prefix_key_rules():
     assert prefix_key({"prompt": "p" * 600}) == prefix_key({"prompt": "p" * 512 + "x"})
 
 
+def test_prefix_key_keeps_a_conversation_together():
+    sys_msg = {"role": "system", "content": "sys"}
+    turn = lambda n: [sys_msg] + [  # noqa: E731
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(2 * n - 1)]
+    keys = {prefix_key({"messages": turn(n)}) for n in range(2, 8)}
+    assert len(keys) == 1  # every turn after the first: same key, same replica (its KV cache)
+    other = [sys_msg, {"role": "user", "content": "other"}, *turn(3)[2:]]
+    assert prefix_key({"messages": other}) not in keys  # another conversation is free to go elsewhere
+    # without a system prompt the first user message anchors the conversation
+    assert (prefix_key({"messages": turn(3)[1:]}) == prefix_key({"messages": turn(5)[1:]}))
+    # single turn: unchanged, the system prompt is the key
+    assert prefix_key(chat("a")) == prefix_key({"messages": [sys_msg, {"role": "user", "content": "b"}]})
+
+
+def test_router_upstream_pool_is_not_capped(monkeypatch):
+    import gpupool.router.proxy as proxy_mod
+    seen = {}
+
+    def fake_client(**kw):
+        seen.update(kw)
+        return httpx.AsyncClient()
+
+    monkeypatch.setattr(proxy_mod, "internal_client", fake_client)
+    make_router(get_candidates=lambda m: [], list_models=lambda: [], balancer=Balancer(),
+                metrics=RouterMetrics(), api_keys=[], on_replica_error=lambda r: None)
+    assert seen["limits"].max_connections is None
+
+
 def test_balancer_skew_and_release():
     b = Balancer()
     c = [ep(0), ep(1), ep(2)]

@@ -89,7 +89,12 @@ def make_router(
     auth = require_bearer(*api_keys)
     if metrics.balancer is None:
         metrics.balancer = balancer
-    http = client or internal_client(timeout=httpx.Timeout(None, connect=5.0))
+    # httpx defaults to 100 connections in total: request 101 would wait for a free one, with
+    # no pool timeout (None), invisibly in the coordinator instead of in llama-server's slot
+    # queue. llama-server and the balancer are the limit, so the pool is not.
+    http = client or internal_client(
+        timeout=httpx.Timeout(None, connect=5.0),
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
     def check_auth(request: Request) -> JSONResponse | None:
         try:

@@ -181,9 +181,14 @@ class _Engine:
 
 class ProcessManager:
     def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str, rpc_firewall: bool = False,
-                 firewall: RpcFirewall | None = None):
+                 firewall: RpcFirewall | None = None, llama_cache: Path | None = None):
         self.llama_dir = Path(llama_dir)
         self.log_dir = Path(log_dir)
+        # LLAMA_CACHE for the engines: `ggml-rpc-server -c` keeps received weight tensors under
+        # $LLAMA_CACHE/rpc so the next load of the same model skips the network transfer. Its
+        # default (~/.cache/llama.cpp) is the container's writable layer in the agent image:
+        # lost on every image upgrade or `docker rm`. A LLAMA_CACHE set by the user wins.
+        self.llama_cache = Path(llama_cache) if llama_cache is not None else None
         self.bind_host = bind_host
         self.rpc_firewall = rpc_firewall  # restrict RPC ports to EngineSpec.allowed_peers
         self._lock = threading.RLock()
@@ -292,6 +297,8 @@ class ProcessManager:
                 fw_rules = self.firewall.install(spec.port, peers)
             log_path = self.log_dir / f"{spec.engine_id}.log"
             env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+            if self.llama_cache is not None and not env.get("LLAMA_CACHE"):
+                env["LLAMA_CACHE"] = str(self.llama_cache)
             kwargs = {}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW

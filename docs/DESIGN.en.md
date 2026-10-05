@@ -333,8 +333,11 @@ Fewer target passes mean fewer RPC round trips, which matters most for multi-nod
 - Candidates = `ready` replicas of the model whose head node is alive. The router reads a snapshot of the
   store that is rebuilt only when the store's version moves; liveness is judged on every call, because a
   node that goes silent triggers no write.
-- **Prefix key** = sha256 of all messages but the last (canonical JSON, cut at 4 KB); with a single
-  message, its first 512 characters; for `/v1/completions`, the first 512 characters of the prompt.
+- **Prefix key** = sha256 of canonical JSON cut at 4 KB: for a single turn (system messages + one user
+  message), all messages but the last, so a shared system prompt meets on one replica; for a multi-turn
+  chat, the system messages and the first user message, which every later turn repeats, so the conversation
+  stays with its KV cache. With a single message, its first 512 characters; for `/v1/completions`, the
+  first 512 characters of the prompt.
 - Rendezvous hash(prefix, replica) picks the preferred replica; if it has more than 2 more outstanding
   requests than the least-loaded one, the least-loaded one is used.
 - Sends `cache_prompt: true`; the head runs with `--cache-reuse 256 --metrics`.

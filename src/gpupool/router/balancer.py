@@ -16,6 +16,26 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else _canon(value)
 
 
+_PREAMBLE_ROLES = ("system", "developer")
+
+
+def _anchor(messages: list) -> list:
+    """The messages a key is made of.
+
+    Single turn ([system..., user]): everything but the last message, so requests sharing a
+    system prompt meet on one replica. Multi-turn: the system messages and the first
+    conversational message, which every later turn of the same conversation repeats verbatim,
+    so the whole conversation stays on the replica whose KV cache holds it. Keying on
+    messages[:-1] instead would change the key on every turn (until the canonical prefix
+    passed the 4096-character cap) and move the conversation to another replica each time.
+    """
+    first = next((i for i, m in enumerate(messages)
+                  if not (isinstance(m, dict) and m.get("role") in _PREAMBLE_ROLES)), len(messages))
+    if first + 1 < len(messages):
+        return messages[:first + 1]
+    return messages[:-1]
+
+
 def prefix_key(body: dict) -> str:
     """Stable key for requests that share a prompt prefix.
 
@@ -25,7 +45,7 @@ def prefix_key(body: dict) -> str:
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
         if len(messages) > 1:
-            material = _canon(messages[:-1])[:4096]
+            material = _canon(_anchor(messages))[:4096]
         else:
             first = messages[0]
             content = first.get("content") if isinstance(first, dict) else first

@@ -909,3 +909,27 @@ def test_nvml_compute_cap_failure_keeps_device(tmp_path, monkeypatch):
     _stub_nvml(monkeypatch)  # no nvmlDeviceGetCudaComputeCapability (very old pynvml)
     d = g._cuda_devices(make_cfg(tmp_path))[0]
     assert d.compute_cap is None and d.kernels_ok is None and d.usable_mb > 0
+
+
+ENV_PRINTER = """
+import os
+print("LLAMA_CACHE=" + os.environ.get("LLAMA_CACHE", "<unset>"), flush=True)
+"""
+
+
+@pytest.mark.parametrize("preset", [None, "/user/choice"])
+def test_engines_get_a_persistent_llama_cache(tmp_path, monkeypatch, preset):
+    # ggml-rpc-server -c caches weights under $LLAMA_CACHE/rpc: it must land in the agent's
+    # data dir, not in the container's writable layer; a LLAMA_CACHE the user set wins.
+    if preset:
+        monkeypatch.setenv("LLAMA_CACHE", preset)
+    else:
+        monkeypatch.delenv("LLAMA_CACHE", raising=False)
+    patch_cmd(monkeypatch, ENV_PRINTER)
+    m = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1", llama_cache=tmp_path / "lc")
+    try:
+        m.start(EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"]))
+        st = wait_state(m, "e1", "exited")
+    finally:
+        m.stop_all()
+    assert st.log_tail == [f"LLAMA_CACHE={preset or tmp_path / 'lc'}"]
