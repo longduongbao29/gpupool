@@ -19,7 +19,8 @@ from gpupool.agent.rpc_cache import rpc_cache_dir
 from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
 from gpupool.agent.procs import (
-    EngineExists, PortInUse, ProcessManager, disable_core_dumps, llama_cuda_archs, llama_version,
+    EngineExists, PortInUse, ProcessManager, build_number, disable_core_dumps, llama_cuda_archs,
+    llama_version,
 )
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
@@ -89,14 +90,11 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 FEATURES = {"rpc_multi_device": 11342, "spec_mtp": 11342, "kv_unified": 11342}
 
 
-def build_number(version: str) -> int | None:
-    """'b11413' -> 11413; None for 'unknown' or anything else."""
-    return int(version[1:]) if version.startswith("b") and version[1:].isdigit() else None
-
-
 def features_of(version: str) -> list[str]:
     build = build_number(version)
     return [] if build is None else sorted(f for f, first in FEATURES.items() if build >= first)
+
+
 RPC_CACHE_PRUNE_S = 600.0  # how often the rpc weight cache is trimmed to rpc_cache_gb
 
 

@@ -484,3 +484,13 @@ def test_a_chat_without_system_prompt_keeps_its_key_from_the_first_turn():
     turn2 = {"messages": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"},
                           {"role": "user", "content": "more"}]}
     assert prefix_key(turn1) == prefix_key(turn2)
+
+
+def test_long_system_prompts_do_not_merge_conversations():
+    sys_msg = {"role": "system", "content": "x" * 10_000}  # longer than any cut
+    conv = lambda first: {"messages": [sys_msg, {"role": "user", "content": first},  # noqa: E731
+                                       {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}
+    assert prefix_key(conv("question A")) != prefix_key(conv("question B"))
+    # single turn: still grouped by (the start of) the shared system prompt
+    single = lambda q: {"messages": [sys_msg, {"role": "user", "content": q}]}  # noqa: E731
+    assert prefix_key(single("a")) == prefix_key(single("b"))

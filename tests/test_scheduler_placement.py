@@ -510,11 +510,19 @@ def test_split_unchanged_when_bandwidth_equal_or_unknown():
         assert [a.layers for a in pl.assignments] == [a.layers for a in base.assignments]
 
 
-def _two_gpu_remote(features):
+def _two_gpu_remote(features, head_features=None):
     a = node("a", dev("CUDA0", 3000))  # the head: most capacity
     b = node("b", dev("CUDA0", 1200), dev("CUDA1", 1200))
     b.features = list(features)
+    a.features = list(features if head_features is None else head_features)
     return [a, b]
+
+
+def test_no_shared_rpc_server_when_the_head_cannot_use_one():
+    meta = make_meta(n_layers=40)
+    pl = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"], head_features=[]), "r", Ports())
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len({a.rpc_endpoint for a in remote}) == 2  # an old head expects one device per endpoint
 
 
 def test_one_rpc_server_serves_every_gpu_of_a_node_that_supports_it():
@@ -565,3 +573,14 @@ def test_kv_unified_needs_a_head_that_supports_it():
     assert pl.head_node == "new"
     with pytest.raises(NoFit, match="kv_unified"):
         plan(meta, spec, [old], "r", Ports())
+
+
+def test_a_capable_node_is_tried_as_head_when_the_biggest_is_not():
+    meta = make_meta(n_layers=40)
+    spec = SPEC.model_copy(update={"kv_unified": True, "parallel": 2})
+    big = node("big", dev("CUDA0", 3600))  # most VRAM: _solve's natural head, but an old agent
+    small = node("small", dev("CUDA0", 2400))
+    small.features = ["kv_unified"]
+    pl = plan(meta, spec, [big, small], "r", Ports())
+    assert pl.head_node == "small" and pl.tier == "multi_node"
+    assert pl.assignments[-1].node_id == "small"  # the head's GPU last, as always

@@ -20,6 +20,10 @@ def _text(value: object) -> str:
 _PREAMBLE_ROLES = ("system", "developer")
 
 
+def _is_preamble(m: object) -> bool:
+    return isinstance(m, dict) and m.get("role") in _PREAMBLE_ROLES
+
+
 def _anchor(messages: list) -> list:
     """The messages a key is made of.
 
@@ -32,8 +36,7 @@ def _anchor(messages: list) -> list:
     between turns 1 and 2 of a chat with a system prompt is the price of grouping single-turn
     requests by their shared system prompt.
     """
-    first = next((i for i, m in enumerate(messages)
-                  if not (isinstance(m, dict) and m.get("role") in _PREAMBLE_ROLES)), len(messages))
+    first = next((i for i, m in enumerate(messages) if not _is_preamble(m)), len(messages))
     if first + 1 < len(messages):
         return messages[:first + 1]
     return messages[:-1]
@@ -48,12 +51,17 @@ def prefix_key(body: dict) -> str:
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
         anchor = _anchor(messages) if len(messages) > 1 else messages
-        if len(anchor) > 1:
-            material = _canon(anchor)[:4096]
-        else:  # one message: its content, the same rule whether or not later turns follow
+        conversation = len(messages) > 1 and not _is_preamble(anchor[-1])
+        if len(anchor) == 1 and (conversation or len(messages) == 1):
+            # one message: its content, the same rule on the first turn and on later ones
             first = anchor[0]
             content = first.get("content") if isinstance(first, dict) else first
             material = _text(content)[:512]
+        elif conversation:
+            # uncut: with a system prompt longer than any cap every conversation would share a key
+            material = _canon(anchor)
+        else:  # single turn: the system prompt, cut so long shared prompts still meet
+            material = _canon(anchor)[:4096]
     else:
         material = _text(body.get("prompt", ""))[:512]
     return hashlib.sha256(material.encode("utf-8")).hexdigest()

@@ -1205,7 +1205,9 @@ function app() {
       var kv = f.kv || "f16", sp = f.spec || "none", fa = f.fa || "auto";
       var ub = parseInt(f.ubatch, 10) || 512, b = Math.max(parseInt(f.batch, 10) || 2048, ub);
       if (kv !== "f16" && fa === "off") return { error: "A quantized KV cache needs flash attention (Auto or On)" };
-      var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b, kv_unified: !!f.kvu };
+      // the switch is hidden at one slot, where it means nothing: never send a value the user cannot see
+      var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b,
+                     kv_unified: !!f.kvu && (parseInt(f.parallel, 10) || 1) > 1 };
       var n = parseFloat(f.draftN);
       if (sp === "mtp") {
         if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
@@ -1220,7 +1222,7 @@ function app() {
     // Context each request gets: llama.cpp divides the context across the parallel slots.
     ctxPerSlot: function () {
       var c = parseInt(this.form.ctx, 10) || 0, p = parseInt(this.form.parallel, 10) || 1;
-      return this.form.kvu ? c : Math.floor(c / Math.max(1, p));
+      return this.form.kvu && p > 1 ? c : Math.floor(c / Math.max(1, p));
     },
     // GPU generation from the compute capability NVML reports ("8.6" -> "Ampere · cc 8.6").
     archName: function (cc) {

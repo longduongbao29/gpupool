@@ -15,8 +15,8 @@ All notable changes to gpupool are documented here. The format follows
   run one plain stream. Persisted, shown as `speed_model` in `GET /api/state`; placements then rank by the
   cluster's real network and GPUs instead of constants measured on one GTX 1650.
 
-- `llama_version_mismatch` warning event (and webhook) when live servers report different llama.cpp builds, once
-  per change: a model split over servers needs the same RPC protocol on its head and every RPC server.
+- `llama_version_mismatch` warning event (and webhook) when registered servers report different llama.cpp builds,
+  once per change of the set of builds (a flapping server does not repeat it): a model split over servers needs the same RPC protocol on its head and every RPC server.
 
 - `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
   whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a

@@ -314,15 +314,17 @@ RPC_MULTI_DEVICE = "rpc_multi_device"  # NodeReport.features
 def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
     """Indices into `order` per ggml-rpc-server: one server for each run of consecutive remote
     devices of one node (and kind), when that node's agent can serve several devices from one
-    process; one per device otherwise. Within a server llama.cpp copies activations from one
+    process and the head's can use such a server; one per device otherwise. Within a server llama.cpp copies activations from one
     device to the next itself; between servers they go through the head."""
     groups: list[list[int]] = []
+    # The head's llama-server must also know that one endpoint can serve several devices.
+    head_multi = any(d.node.node_id == head_id and RPC_MULTI_DEVICE in d.node.features for d in order)
     for i, d in enumerate(order):
         if _is_local(d, head_id):
             continue
         if groups and groups[-1][-1] == i - 1:
             prev = order[i - 1]
-            if (prev.node.node_id == d.node.node_id and prev.dev.kind == d.dev.kind
+            if (head_multi and prev.node.node_id == d.node.node_id and prev.dev.kind == d.dev.kind
                     and RPC_MULTI_DEVICE in d.node.features):
                 groups[-1].append(i)
                 continue
@@ -341,12 +343,33 @@ def head_features(spec: ModelSpec) -> set[str]:
 
 
 def _head_node(c: _Cand) -> NodeReport:
-    return _head_first(c).node
+    return next(d.node for d in c.order if d.node.node_id == c.head_id)
 
 
 def _head_first(c: _Cand) -> _Dev:
-    """The head's first device in the order (its local GPU when it has one), else the first."""
-    return next((d for d in c.order if d.node.node_id == c.head_id), c.order[0])
+    """The head's first local GPU, else its first device (the score tie-break)."""
+    head = [d for d in c.order if d.node.node_id == c.head_id]
+    return next((d for d in head if d.dev.kind == "cuda"), head[0] if head else c.order[0])
+
+
+def _with_capable_heads(meta, spec, cands: list[_Cand], need: set[str]) -> list[_Cand]:
+    """Candidates whose head's agent has `need`. _solve makes the node holding the most layers
+    the head without looking at features, so a device set whose head lacks them is solved again
+    with each capable node of the set as the head (same devices, same tier)."""
+    out: dict[tuple, _Cand] = {}
+    for c in cands:
+        if need <= set(_head_node(c).features):
+            out.setdefault(_cand_key(c), c)
+            continue
+        for node in {d.node.node_id: d.node for d in c.order}.values():
+            if not need <= set(node.features):
+                continue
+            order = _order(list(c.order), node.node_id)
+            counts = _split(meta, spec.ctx_size, spec.kv_cache_type, order)
+            if counts is not None:
+                alt = _Cand(c.tier, order, counts, node.node_id)
+                out.setdefault(_cand_key(alt), alt)
+    return list(out.values())
 
 
 def _n_rpc(c: _Cand) -> int:
@@ -467,7 +490,7 @@ def _ranked(meta, spec, nodes, occupants, exclude_nodes=frozenset(),
         cands, used = _all_candidates(meta, spec.ctx_size, ct, pool)
     need = head_features(spec)
     if need:
-        cands = [c for c in cands if need <= set(_head_node(c).features)]
+        cands = _with_capable_heads(meta, spec, cands, need)
     if extra_cands:
         # extras are scored in the same pass (scores are relative); their devices also
         # count for the waste normaliser so a lone extra does not divide by a tiny pool

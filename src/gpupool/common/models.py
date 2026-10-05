@@ -82,7 +82,8 @@ class EngineSpec(BaseModel):
     engine_id: str  # "<replica_id>-head" | "<replica_id>-rpc-<first device_id it serves>"
     kind: EngineKind
     port: int
-    # rpc: exactly one local device. server: full ordered list, e.g. ["CUDA0", "RPC0", "RPC1"].
+    # rpc: the local devices one ggml-rpc-server serves, in -d order (one for agents before 0.6).
+    # server: full ordered list, e.g. ["RPC0", "RPC1", "CUDA0"] (the head's own GPUs last).
     devices: list[str]
     model: str | None = None  # server: alias served at /v1/models
     model_path: str | None = None  # server: GGUF path on the head node
@@ -260,7 +261,8 @@ class Placement(BaseModel):
     est_decode_tps: float | None = None  # bandwidth-based estimate, None when unknown
     reasons: list[str] = Field(default_factory=list)
     # Speculative "draft": the draft model's memory, placed on the head's first local CUDA device
-    # (assignments[0]); included in that assignment's est_mb and in est_total_mb.
+    # (its first local CUDA assignment; the head's GPUs come last in the order); included in that
+    # assignment's est_mb and in est_total_mb.
     draft_est_mb: int | None = None
     # Calibrated memory factor every est_mb above was multiplied by. Calibration divides it back out:
     # a sample against already-scaled estimates would converge on sqrt(true ratio), not the ratio.

@@ -37,7 +37,7 @@ from gpupool.coordinator.store import NodeRecord, Store, gpu_key, planning_facto
 from gpupool.scheduler.estimate import CONTEXT_MB
 from gpupool.scheduler.placement import NoFit, plan, rank
 from gpupool.scheduler.scoring import (
-    bandwidth_seconds, default_cuda_bw, logits_seconds, set_speed_model, speed_model,
+    ETA_RANGE, bandwidth_seconds, default_cuda_bw, logits_seconds, set_speed_model, speed_model,
 )
 
 log = logging.getLogger("gpupool.reconciler")
@@ -879,15 +879,18 @@ class Reconciler:
         self._track_versions(nodes, now)
 
     def _track_versions(self, nodes: dict[str, NodeRecord], now: float) -> None:
-        """llama_version_mismatch when live servers run different llama.cpp builds, once per change.
+        """llama_version_mismatch when registered servers run different llama.cpp builds, once per
+        change of the set of builds.
 
         A split replica needs one RPC protocol on its head and every RPC server (ggml-rpc refuses a
-        different major version at HELLO, and the head aborts). Builds are told apart by version;
-        "unknown" ones are left out."""
+        different major version at HELLO, and the head aborts). Builds do not say which protocol
+        they speak, so the warning names the builds and the risk. Every registered server's last
+        report counts, alive or not, so a server that flaps does not repeat the warning; "unknown"
+        builds are left out."""
         by_version: dict[str, list[str]] = {}
         for node_id, n in nodes.items():
             v = n.report.llama_version
-            if self._alive(n, now) and v and v != "unknown":
+            if v and v != "unknown":
                 by_version.setdefault(v, []).append(node_id)
         key = tuple(sorted(by_version))
         if key == self._versions_seen:
@@ -897,7 +900,8 @@ class Reconciler:
             parts = "; ".join(f"{v}: {', '.join(sorted(ids))}" for v, ids in sorted(by_version.items()))
             self._emit("warning", "llama_version_mismatch",
                        f"Servers run different llama.cpp builds ({parts}). A model split over servers needs "
-                       "the same RPC protocol on all of them: upgrade every agent to the same image.")
+                       "the same RPC protocol on all of them; builds of one gpupool release always match. "
+                       "If launches of split models fail, upgrade every agent to the same image.")
 
     # ------------------------------------------------------------------ failure detection
     def _bump_backoff(self, model: str, now: float) -> tuple[int, float]:
@@ -1324,6 +1328,7 @@ class Reconciler:
                 n_rpc = len(rpc_servers(p))
                 if n_rpc == 0:
                     eta += self.SPEED_ALPHA * (t_bw * measured - eta)
+                    eta = min(max(eta, ETA_RANGE[0]), ETA_RANGE[1])  # hop samples below use it
                     n_eta += 1
                     continue
                 rest = 1.0 / measured - t_bw / eta

@@ -15,8 +15,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   thuần. Được lưu lại, hiển thị là `speed_model` trong `GET /api/state`; placement khi đó xếp hạng theo mạng và GPU thật
   của cụm thay vì hằng số đo trên một GTX 1650.
 
-- Sự kiện cảnh báo `llama_version_mismatch` (kèm webhook) khi các server đang sống báo bản llama.cpp khác nhau, một
-  lần cho mỗi thay đổi: model bị chia qua nhiều server cần cùng giao thức RPC trên head và mọi RPC server.
+- Sự kiện cảnh báo `llama_version_mismatch` (kèm webhook) khi các server đã đăng ký báo bản llama.cpp khác nhau, một
+  lần cho mỗi thay đổi của tập các bản build (server chập chờn không làm nó lặp lại): model bị chia qua nhiều server cần cùng giao thức RPC trên head và mọi RPC server.
 
 - `kv_unified` (llama.cpp `-kvu`): các slot song song dùng chung một vùng KV, nên một request dài có thể dùng cả
   context trong khi các slot khác giữ request ngắn, với cùng lượng bộ nhớ. Có trường API, công tắc trong form

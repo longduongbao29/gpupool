@@ -76,6 +76,11 @@ def llama_cuda_archs(llama_dir: Path) -> list[str] | None:
 PROBABILISTIC_DRAFT_BUILD = 11413  # first llama.cpp build with --spec-draft-sampling
 
 
+def build_number(version: str) -> int | None:
+    """'b11413' -> 11413; None for 'unknown' or anything else."""
+    return int(version[1:]) if version.startswith("b") and version[1:].isdigit() else None
+
+
 def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
                   model_path: str | None, llama_build: int | None = None) -> list[str]:
     if spec.kind == "rpc":
@@ -211,6 +216,7 @@ class ProcessManager:
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
         self.llama_build: int | None = None
+        self._build_probed = False
         self.firewall = (firewall or RpcFirewall()) if rpc_firewall else None
         if self.firewall is not None:
             self.firewall.setup()  # also flushes rules of engines a previous agent left behind
@@ -270,12 +276,10 @@ class ProcessManager:
 
     def _llama_build(self) -> int | None:
         """Build number of llama-server ("b11413" -> 11413), None when unknown. The agent app sets
-        llama_build from its cached version at start; otherwise it is probed here, and only a
-        successful probe is kept (a slow binary that timed out once must not disable flags)."""
-        if self.llama_build is None:
-            v = llama_version(self.llama_dir)
-            if v.startswith("b") and v[1:].isdigit():
-                self.llama_build = int(v[1:])
+        llama_build from its cached version at start; otherwise it is probed here once."""
+        if self.llama_build is None and not self._build_probed:
+            self._build_probed = True  # once: an unparseable version stays unknown, not re-probed
+            self.llama_build = build_number(llama_version(self.llama_dir))
         return self.llama_build
 
     def _binaries(self) -> dict[str, Path]:
