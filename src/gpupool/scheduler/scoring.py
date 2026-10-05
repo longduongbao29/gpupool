@@ -15,6 +15,10 @@ ETA = 0.5  # fraction of peak bandwidth llama.cpp reaches in decode
 HOP_S = 0.002  # per RPC hop, per token
 CPU_BW_GBPS = 25.0  # host RAM, when the agent reports nothing
 CUDA_BW_FALLBACK_GBPS = 100.0  # when no CUDA device in the pool reports bandwidth
+# The output layer's device hands llama-server n_vocab f32 logits per token. When that device is
+# remote they cross the network: priced at 1 Gbit/s (125 MB/s), a common LAN.
+NET_BYTES_PER_S = 125e6
+VOCAB_FALLBACK = 128_000
 
 
 def default_cuda_bw(nodes: Sequence[NodeReport]) -> float:
@@ -41,8 +45,10 @@ def est_decode_tps(
     devices_with_layers: Sequence[tuple[Device, int]],
     n_rpc: int = 0,
     cuda_default_gbps: float = CUDA_BW_FALLBACK_GBPS,
+    remote_last: bool = False,
 ) -> float:
-    """Tokens/s for devices in layer order; the last one also holds the output tensors."""
+    """Tokens/s for devices in layer order; the last one also holds the output tensors.
+    remote_last: that device is reached over RPC, so the logits travel back to the head."""
     t, start = 0.0, 0
     last = len(devices_with_layers) - 1
     read = decode_bytes(meta)
@@ -53,4 +59,6 @@ def est_decode_tps(
         t += b / (device_bw(dev, cuda_default_gbps) * 1e9 * ETA)
         start += count
     t += n_rpc * HOP_S
+    if remote_last:
+        t += (meta.vocab_size or VOCAB_FALLBACK) * 4 / NET_BYTES_PER_S
     return 1.0 / t if t > 0 else 0.0

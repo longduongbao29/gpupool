@@ -233,6 +233,7 @@ different devices run one after another, so
 
 ```
 time per token = sum over devices( bytes on device / (bandwidth x 0.5) ) + n_rpc_hops x 2 ms
+                 [+ n_vocab x 4 bytes / 125 MB/s when the last device is on another server]
 est_decode_tps = 1 / time per token
 ```
 
@@ -243,7 +244,9 @@ an unknown CUDA GPU ranks as the slowest known one (100 GB/s when none is known)
 
 `n_rpc_hops` is the number of RPC servers the graph passes through, not the number of remote devices:
 consecutive devices of one node share one `ggml-rpc-server` when its agent reports `rpc_multi_device`
-(section 3.1), and llama.cpp copies activations between them inside that server.
+(section 3.1), and llama.cpp copies activations between them inside that server. The logits term prices
+the output layer on another server (placements made before the head's GPUs were put last): the logits then
+cross the network every token, at an assumed 1 Gbit/s.
 
 Score of a candidate (higher wins):
 

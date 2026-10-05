@@ -224,6 +224,7 @@ trên device khác nhau chạy lần lượt, nên
 
 ```
 thời gian mỗi token = tổng theo device( byte trên device / (băng thông x 0.5) ) + số_hop_rpc x 2 ms
+                      [+ n_vocab x 4 byte / 125 MB/s khi device cuối nằm ở server khác]
 est_decode_tps = 1 / thời gian mỗi token
 ```
 
@@ -234,7 +235,8 @@ q4_k_m đo được 182 tok/s.) Băng thông chưa biết: CPU 25 GB/s; GPU CUDA
 
 `số_hop_rpc` là số RPC server mà đồ thị đi qua, không phải số device ở xa: các device liền nhau của một node
 dùng chung một `ggml-rpc-server` khi agent của nó báo `rpc_multi_device` (mục 3.1), và llama.cpp copy activation
-giữa chúng ngay trong server đó.
+giữa chúng ngay trong server đó. Số hạng logits tính giá cho layer đầu ra nằm ở server khác (placement tạo trước khi GPU
+của head được đặt cuối): khi đó logits đi qua mạng ở mỗi token, giả định 1 Gbit/s.
 
 Điểm của một ứng viên (cao hơn thắng):
 

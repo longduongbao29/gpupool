@@ -342,7 +342,8 @@ def _n_rpc(c: _Cand) -> int:
 def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
     cuda_bw = default_cuda_bw(nodes)
     tps_of = [
-        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw)
+        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw,
+                       remote_last=c.order[-1].node.node_id != c.head_id)
         for c in cands
     ]
     best_tps = max(tps_of, default=0.0) or 1.0
@@ -695,7 +696,8 @@ def _multi_node_subsets(meta, ctx, ct, pool, node_ids: list[str]):
             min_size = min_size or size
             order, counts, head = solved
             n_rpc = len(rpc_groups(order, head))
-            tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw)
+            tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw,
+                                 remote_last=order[-1].node.node_id != head)
             found.append((tps, subset, solved))
     found.sort(key=lambda f: (-f[0], f[1]))
     return [f[2] for f in found]

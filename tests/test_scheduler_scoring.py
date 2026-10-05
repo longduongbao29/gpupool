@@ -291,3 +291,14 @@ def test_multi_node_candidates_bounded_with_many_nodes():
         best = rank(META, SPEC, nodes)[0]
         # the two fastest nodes are the best pair, also when the pool is above the exhaustive limit
         assert {nid for nid, _ in where(best)} == {f"n{n - 1:02d}", f"n{n - 2:02d}"}
+
+
+def test_logits_from_a_remote_last_device_cost_network_time():
+    from gpupool.scheduler.scoring import NET_BYTES_PER_S, est_decode_tps
+    m = ModelMeta(arch="x", n_layers=2, n_embd=64, n_head=4, n_head_kv=4, head_dim=16,
+                  layer_bytes=[50_000_000] * 2, other_bytes=0, output_bytes=0, vocab_size=150_000)
+    gpu = Device(device_id="CUDA0", kind="cuda", name="g", total_mb=1, free_mb=1, usable_mb=1,
+                 bandwidth_gbps=100.0)
+    local = est_decode_tps(m, [(gpu, 1), (gpu, 1)], n_rpc=1)
+    remote = est_decode_tps(m, [(gpu, 1), (gpu, 1)], n_rpc=1, remote_last=True)
+    assert 1 / remote - 1 / local == pytest.approx(150_000 * 4 / NET_BYTES_PER_S)
