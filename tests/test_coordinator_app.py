@@ -294,3 +294,48 @@ async def test_loop_lag_watchdog_quiet_when_loop_is_healthy(caplog):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert not [r for r in caplog.records if "event loop blocked" in r.getMessage()]
+
+
+def test_candidates_carry_the_estimated_speed_as_weight(routing):
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    rec = put_replica(store, "m-1", now=clock())
+    store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
+        update={"est_decode_tps": 42.5})}))
+    put_replica(store, "m-2", now=clock(), head_port=9100)  # no estimate: an average replica
+    assert {e.replica_id: e.weight for e in cap["get_candidates"]("m")} == {"m-1": 42.5, "m-2": 42.5}
+
+
+def test_measured_speed_does_not_move_routing_weights(routing, monkeypatch):
+    from gpupool.coordinator.autoscaler import Autoscaler
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    rec = put_replica(store, "m-1", now=clock())
+    store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
+        update={"est_decode_tps": 42.5})}))
+    # llama-server's measured rate resets on every scrape (0 when idle, lower when busy): a weight
+    # that followed it would reshuffle prefixes every poll. Routing keeps the stable estimate.
+    monkeypatch.setattr(Autoscaler, "measured_tps", lambda self, rid: 17.0 if rid == "m-1" else None)
+    assert [e.weight for e in cap["get_candidates"]("m")] == [42.5]
+
+
+def test_routing_weight_follows_the_learned_speed_model(routing):
+    from gpupool.scheduler.scoring import set_speed_model
+    cap, store, calls, clock, _ = routing
+    store.upsert_node(node("a"), clock())
+    rec = put_replica(store, "m-1", now=clock())
+    store.put_replica(rec.model_copy(update={"placement": rec.placement.model_copy(
+        update={"est_decode_tps": 99.0, "est_bw_s": 0.01, "est_hops": 1, "est_logits_s": 0.0})}))
+    # 0.01 / 0.5 + 1 x 0.002 = 22 ms -> 45.45 tok/s (the stored 99 is ignored)
+    assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.022)
+    set_speed_model(0.25, 0.010)  # learned: slower GPUs, slower network
+    assert cap["get_candidates"]("m")[0].weight == pytest.approx(1 / 0.05)
+
+
+def test_router_keys_add_the_admin_key_only_when_v1_has_keys():
+    from gpupool.common.config import CoordinatorConfig
+    from gpupool.coordinator.app import router_keys
+    # with API keys the admin login also works on /v1 (the UI's Playground)
+    assert router_keys(CoordinatorConfig(api_keys=["k"], admin_key="adm")) == ["k", "adm"]
+    # an open /v1 stays open: requiring the admin key would lock every client out
+    assert router_keys(CoordinatorConfig(api_keys=[], admin_key="adm")) == []

@@ -36,6 +36,9 @@ from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store, gpu_key, planning_factor
 from gpupool.scheduler.estimate import CONTEXT_MB
 from gpupool.scheduler.placement import NoFit, plan, rank
+from gpupool.scheduler.scoring import (
+    ETA_RANGE, bandwidth_seconds, default_cuda_bw, logits_seconds, set_speed_model, speed_model,
+)
 
 log = logging.getLogger("gpupool.reconciler")
 
@@ -70,6 +73,12 @@ def _find_device(devices: list[Device], a: DeviceAssignment) -> Device | None:
     return next((d for d in devices if d.device_id == a.device_id), None)
 
 
+def _draft_device(p: Placement) -> DeviceAssignment | None:
+    """The head's first local CUDA device: where the scheduler reserved the draft model."""
+    return next((a for a in p.assignments if a.node_id == p.head_node and not a.rpc_endpoint
+                 and a.llama_device.startswith("CUDA")), None)
+
+
 def is_head_engine(engine_id: str) -> bool:
     return engine_id.endswith("-head")
 
@@ -89,13 +98,26 @@ async def stop_head_first(pairs, stop) -> None:
             await asyncio.gather(*(stop(a, b) for a, b in group))
 
 
+def rpc_servers(p: Placement) -> list[tuple[str, list[DeviceAssignment]]]:
+    """(endpoint, its assignments in device order) per RPC server of a placement, in --rpc order.
+    Several devices share an endpoint when one server process serves them all."""
+    out: dict[str, list[DeviceAssignment]] = {}
+    for a in p.assignments:
+        if a.rpc_endpoint:
+            out.setdefault(a.rpc_endpoint, []).append(a)
+    return list(out.items())
+
+
+def rpc_engine_id(replica_id: str, devices: list[DeviceAssignment]) -> str:
+    return f"{replica_id}-rpc-{devices[0].device_id}"
+
+
 def engine_ids(rec: ReplicaRecord) -> list[tuple[str, str]]:
     """(node_id, engine_id) for every engine this replica owns."""
     p = rec.placement
     out = [(p.head_node, f"{rec.replica_id}-head")]
-    for a in p.assignments:
-        if a.rpc_endpoint:
-            out.append((a.node_id, f"{rec.replica_id}-rpc-{a.device_id}"))
+    for _, devs in rpc_servers(p):
+        out.append((devs[0].node_id, rpc_engine_id(rec.replica_id, devs)))
     return out
 
 
@@ -112,6 +134,8 @@ class Reconciler:
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
     CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
+    SPEED_SAMPLE_S = 60.0  # how often ready replicas feed the speed model
+    SPEED_ALPHA = 0.2  # EMA weight of one speed sample (one per replica per SPEED_SAMPLE_S)
     CAL_EVENT_DELTA = 0.05  # emit `calibrated` when the planning factor moves by more than this
 
     def __init__(
@@ -143,6 +167,8 @@ class Reconciler:
         self._nofit: dict[str, str] = {}
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
+        self._versions_seen: tuple[str, ...] = ()  # llama.cpp builds of live servers at the last check
+        self._last_speed_sample = float("-inf")
         self._realloc: dict[str, _Realloc] = {}
         self._preempted: dict[str, tuple[float, set[str]]] = {}  # model -> (when, victim replica ids)
         self._wake = asyncio.Event()
@@ -164,6 +190,9 @@ class Reconciler:
             self._preempted = {m: (float(v[0]), set(v[1])) for m, v in pre.items()}
             bo = self.store.get_state("backoff") or {}
             self._backoff = {m: (int(v[0]), float(v[1])) for m, v in bo.items()}
+            sm = self.store.get_state("speed_model")
+            if sm:
+                set_speed_model(float(sm["eta"]), float(sm["hop_s"]))
             saved = self.store.get_state("move")
             if saved:
                 mv = saved["move"]
@@ -352,8 +381,12 @@ class Reconciler:
         draft = await self.draft_meta_for(spec)
         reports = self.available_reports()
         self._apply_pins(spec, reports)
-        return self._ranker()(meta, spec, reports, occupants=self.occupants(), limit=limit,
-                              **self._pkw(spec.name, draft))
+        occupants, kw = self.occupants(), self._pkw(spec.name, draft)  # store reads stay here
+        # Ranking is pure CPU (hundreds of ms on a large pool) and Recommend ranks a dozen
+        # variants: on the event loop that would stall every streamed response for as long.
+        # Its inputs are private copies, so a worker thread can have them.
+        return await asyncio.to_thread(self._ranker(), meta, spec, reports, occupants=occupants,
+                                       limit=limit, **kw)
 
     async def plan_for(self, spec: ModelSpec, replica_id: str | None = None) -> Placement:
         """Plan one replica. No side effects (ports are only 'handed out' within this call)."""
@@ -573,21 +606,23 @@ class Reconciler:
                 continue
             ranker = self._ranker_for(s, draft)
             for _ in range(max(0, missing)):
-                ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                # rankings run off the event loop, like rank_for (the store is thread-safe)
+                ranked = await asyncio.to_thread(ranker, meta, s, reports, occupants=occ, limit=1)
                 if not ranked and len(active_of(s.name)) + started < min(wanted[s.name], self._floor(s)):
                     cands = self._candidates(by_name, [r for r in live if r.replica_id not in gone], s.name)
-                    victims = (preemption.find_victims(meta, s, reports, occ, cands, ranker,
-                                                         disabled=self._disabled(reports))
+                    victims = (await asyncio.to_thread(
+                                   preemption.find_victims, meta, s, reports, occ, cands, ranker,
+                                   disabled=self._disabled(reports))
                                if cands else None)
                     if victims:
                         for v in victims:
                             out["preempt"].append({"replica_id": v.replica_id, "model": v.model,
                                                    "priority": by_name[v.model].priority, "for_model": s.name})
                         release(victims)
-                        ranked = ranker(meta, s, reports, occupants=occ, limit=1)
+                        ranked = await asyncio.to_thread(ranker, meta, s, reports, occupants=occ, limit=1)
                 if not ranked:
-                    out["unplaced"].append({"model": s.name, "missing": missing - started,
-                                            "why": self._why_unplaced(meta, s, reports, occ, draft)})
+                    why = await asyncio.to_thread(self._why_unplaced, meta, s, reports, occ, draft)
+                    out["unplaced"].append({"model": s.name, "missing": missing - started, "why": why})
                     break
                 p = ranked[0]
                 out["start"].append({"model": s.name, "tier": p.tier, "est_decode_tps": p.est_decode_tps,
@@ -637,9 +672,11 @@ class Reconciler:
                 draft = await self.draft_meta_for(spec)
                 reports = self.available_reports()
                 self._apply_pins(spec, reports)  # a move stays within the model's pins
-                ranked = self._ranker()(meta, spec, reports, limit=5, extra=[r.placement],
-                                        occupants=[o for o in occ_all if o.replica_id != r.replica_id],
-                                        **self._pkw(spec.name, draft))
+                # off the event loop, like rank_for: one ranking per ready replica
+                ranked = await asyncio.to_thread(
+                    self._ranker(), meta, spec, reports, limit=5, extra=[r.placement],
+                    occupants=[o for o in occ_all if o.replica_id != r.replica_id],
+                    **self._pkw(spec.name, draft))
             except Exception:
                 log.exception("scoring a rebalance for %s failed", r.replica_id)
                 continue
@@ -785,6 +822,7 @@ class Reconciler:
             await self._advance_move(now)
             await self._enforce_counts(nodes, now)
             await self._rebalance_if_due(now)
+            await self._learn_speed(nodes, now)
             self.store.prune_replicas(self.KEEP_TERMINAL_PER_MODEL)
 
     async def run(self) -> None:
@@ -846,6 +884,32 @@ class Reconciler:
             self._emit("warning", "node_offline",
                        f"Server {node_id} went offline (no report for {now - n.last_seen:.0f} s){tail}",
                        node_id=node_id)
+        self._track_versions(nodes, now)
+
+    def _track_versions(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """llama_version_mismatch when registered servers run different llama.cpp builds, once per
+        change of the set of builds.
+
+        A split replica needs one RPC protocol on its head and every RPC server (ggml-rpc refuses a
+        different major version at HELLO, and the head aborts). Builds do not say which protocol
+        they speak, so the warning names the builds and the risk. Every registered server's last
+        report counts, alive or not, so a server that flaps does not repeat the warning; "unknown"
+        builds are left out."""
+        by_version: dict[str, list[str]] = {}
+        for node_id, n in nodes.items():
+            v = n.report.llama_version
+            if v and v != "unknown":
+                by_version.setdefault(v, []).append(node_id)
+        key = tuple(sorted(by_version))
+        if key == self._versions_seen:
+            return
+        self._versions_seen = key
+        if len(by_version) > 1:
+            parts = "; ".join(f"{v}: {', '.join(sorted(ids))}" for v, ids in sorted(by_version.items()))
+            self._emit("warning", "llama_version_mismatch",
+                       f"Servers run different llama.cpp builds ({parts}). A model split over servers needs "
+                       "the same RPC protocol on all of them; builds of one gpupool release always match. "
+                       "If launches of split models fail, upgrade every agent to the same image.")
 
     # ------------------------------------------------------------------ failure detection
     def _bump_backoff(self, model: str, now: float) -> tuple[int, float]:
@@ -1119,43 +1183,48 @@ class Reconciler:
                 raise LaunchError(f"head node {p.head_node} unknown")
             head_url = agent(p.head_node)
 
-            rpc_ids: list[tuple[str, str]] = []
-            for a in p.assignments:
-                if not a.rpc_endpoint:
-                    continue
-                eid = f"{rid}-rpc-{a.device_id}"
-                url = agent(a.node_id)
-                created.append((url, eid))
-                await self.client.start_engine(url, EngineSpec(
-                    engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id],
-                    allowed_peers=[head_host]))  # only the head connects to an RPC engine
-                rpc_ids.append((url, eid))
-            for url, eid in rpc_ids:
-                await self._wait_running(url, eid)
-
-            name, src = self._model_source(spec)
-            path = await self.client.ensure_model(head_url, name, src)
-
             extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
-                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch}
+                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch,
+                           "kv_unified": spec.kv_unified}
             if spec.speculative == "draft":
                 if not spec.draft:
                     raise LaunchError("speculative 'draft' without a draft model")
-                first = p.assignments[0]
                 # The draft runs inside the head's llama-server: an RPC or remote device cannot host it.
-                if first.node_id != p.head_node or first.rpc_endpoint or not first.llama_device.startswith("CUDA"):
-                    raise LaunchError(f"the draft model needs a local CUDA device on the head node, but the "
-                                      f"first device is {first.node_id}/{first.llama_device}")
-                dname, dsrc = self._model_source(spec, spec.draft)
-                extra.update(draft_model_path=await self.client.ensure_model(head_url, dname, dsrc),
-                             draft_device=first.llama_device, draft_n_max=spec.draft_n_max)
+                if _draft_device(p) is None:
+                    raise LaunchError("the draft model needs a local CUDA device on the head node, but the "
+                                      "placement has none")
+
+            # The head's model files are fetched while the RPC engines start: on a cold start the
+            # download, not the engines, is the long pole, and the two do not depend on each other.
+            models = asyncio.create_task(self._ensure_head_models(spec, head_url))
+            try:
+                await self._start_rpc_engines(rid, p, agent, head_host, created)
+                path, draft_path = await models
+            finally:  # always reap: a download that failed meanwhile must not go unretrieved
+                if not models.done():
+                    models.cancel()
+                await asyncio.gather(models, return_exceptions=True)
+            if draft_path is not None:
+                extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
+                             draft_n_max=spec.draft_n_max)
+            elif spec.speculative == "mtp":
+                if "spec_mtp" in nodes[p.head_node].report.features:
+                    extra.update(draft_n_max=spec.draft_n_max)
+                else:
+                    # The head's llama.cpp cannot draft with MTP layers (older build or agent): serve
+                    # without speculation rather than fail the launch over an optimisation.
+                    extra["spec_type"] = "none"
+                    self._emit("warning", "mtp_unavailable",
+                               f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
+                               "--spec-type draft-mtp; serving without speculative decoding. Upgrade "
+                               "the agent to enable it.", node_id=p.head_node, model=spec.name)
 
             head_id = f"{rid}-head"
             created.append((head_url, head_id))
             await self.client.start_engine(head_url, EngineSpec(
                 engine_id=head_id, kind="server", port=p.head_port,
                 devices=[a.llama_device for a in p.assignments],
-                rpc_endpoints=[a.rpc_endpoint for a in p.assignments if a.rpc_endpoint],
+                rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
                 tensor_split=p.tensor_split, model=spec.name, model_path=path,
                 ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
             await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health")
@@ -1204,6 +1273,93 @@ class Reconciler:
                     await self._calibrate(rec, spec, head_url)
             finally:
                 self._launches.pop(rid, None)
+
+    async def _start_rpc_engines(self, rid: str, p: Placement, agent: Callable[[str], str],
+                                 head_host: str, created: list[tuple[str, str]]) -> None:
+        """Start every RPC engine of `p`, then wait until all of them listen. Each one is added to
+        `created` before its start call, so a failure anywhere rolls back what may already run."""
+        rpc_ids: list[tuple[str, str]] = []
+        for endpoint, devs in rpc_servers(p):
+            eid = rpc_engine_id(rid, devs)
+            url = agent(devs[0].node_id)
+            created.append((url, eid))
+            await self.client.start_engine(url, EngineSpec(
+                engine_id=eid, kind="rpc", port=_port_of(endpoint), devices=[a.device_id for a in devs],
+                allowed_peers=[head_host]))  # only the head connects to an RPC engine
+            rpc_ids.append((url, eid))
+        for url, eid in rpc_ids:
+            await self._wait_running(url, eid)
+
+    async def _ensure_head_models(self, spec: ModelSpec, head_url: str) -> tuple[str, str | None]:
+        """(model path, draft path or None) on the head node; both files are fetched at once."""
+        name, src = self._model_source(spec)
+        if spec.speculative != "draft":
+            return await self.client.ensure_model(head_url, name, src), None
+        dname, dsrc = self._model_source(spec, spec.draft)
+        tasks = [asyncio.create_task(self.client.ensure_model(head_url, name, src)),
+                 asyncio.create_task(self.client.ensure_model(head_url, dname, dsrc))]
+        try:
+            return await tasks[0], await tasks[1]
+        finally:  # one failed or we were cancelled: do not leave the other request running
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    # ------------------------------------------------------------------ speed model
+    async def _learn_speed(self, nodes: dict[str, NodeRecord], now: float) -> None:
+        """Refine the decode-speed model (eta, seconds per RPC hop) from what replicas measure.
+
+        Only replicas whose measured speed is one plain decode stream count: parallel 1 and no
+        speculative decoding (several streams share the bandwidth; drafting multiplies tokens).
+        A single-server replica measures eta: tok/s = eta / bandwidth_seconds. A split one, with
+        eta known, measures the time its RPC servers add per token. Each is an EMA, clamped."""
+        if self.autoscaler is None or now - self._last_speed_sample < self.SPEED_SAMPLE_S:
+            return
+        self._last_speed_sample = now
+        reports = [n.report for n in nodes.values()]
+        cuda_default = default_cuda_bw(reports)
+        sm = speed_model()
+        eta, hop = sm.eta, sm.hop_s
+        n_eta = n_hop = 0
+        for rec in self.store.list_replicas(states={"ready"}):
+            spec = self.store.get_model(rec.model)
+            measured = self.autoscaler.measured_tps(rec.replica_id)
+            if spec is None or not measured or spec.parallel != 1 or spec.speculative != "none":
+                continue
+            p = rec.placement
+            devs = []
+            for a in p.assignments:
+                n = nodes.get(a.node_id)
+                d = _find_device(n.report.devices, a) if n is not None else None
+                if d is None:
+                    break
+                devs.append((d, a.layers))
+            else:
+                try:
+                    meta = await self.meta_for(spec)
+                except Exception:
+                    continue
+                t_bw = bandwidth_seconds(meta, devs, cuda_default)
+                if t_bw <= 0:
+                    continue
+                n_rpc = len(rpc_servers(p))
+                if n_rpc == 0:
+                    eta += self.SPEED_ALPHA * (t_bw * measured - eta)
+                    eta = min(max(eta, ETA_RANGE[0]), ETA_RANGE[1])  # hop samples below use it
+                    n_eta += 1
+                    continue
+                rest = 1.0 / measured - t_bw / eta
+                if p.assignments and p.assignments[-1].node_id != p.head_node:
+                    rest -= logits_seconds(meta)
+                hop += self.SPEED_ALPHA * (rest / n_rpc - hop)
+                n_hop += 1
+        if not (n_eta or n_hop):
+            return
+        set_speed_model(eta, hop)
+        sm = speed_model()
+        self._save("speed_model", {"eta": sm.eta, "hop_s": sm.hop_s})
+        log.info("speed model: eta %.3f, %.2f ms per RPC hop (%d single-server, %d split samples)",
+                 sm.eta, sm.hop_s * 1000, n_eta, n_hop)
 
     # ------------------------------------------------------------------ calibration
     @staticmethod

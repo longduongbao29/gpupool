@@ -43,28 +43,102 @@ _KV_BYTES_PER_ELEM = {"f16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}
 
 
 def kv_bytes_per_layer(meta: ModelMeta, ctx_size: int, cache_type: str = "f16") -> int:
+    """KV bytes of one full-attention layer by the plain rule (n_head_kv x head_dim, K and V)."""
     return math.ceil(2 * ctx_size * meta.n_head_kv * meta.head_dim * _KV_BYTES_PER_ELEM[cache_type])
+
+
+def _pad(n: int, to: int = 256) -> int:
+    return (n + to - 1) // to * to
+
+
+def _main_layers(meta: ModelMeta) -> int:
+    return meta.n_layers - meta.n_nextn
+
+
+def layer_kv_bytes(meta: ModelMeta, i: int, ctx_size: int, cache_type: str = "f16",
+                   parallel: int = 1, ubatch: int = DEFAULT_UBATCH, mtp: bool = False,
+                   kv_unified: bool = False) -> int:
+    """Cache bytes of layer i: KV rows (sliding-window layers hold only their window) plus the
+    recurrent state of every sequence. Mirrors llama.cpp b11342: llama-kv-cache-iswa.cpp sizes a
+    SWA layer at pad(min(n_ctx_seq, n_swa x (unified ? n_seq : 1) + n_ubatch), 256) cells per
+    stream, with one stream per sequence (n_ctx_seq = n_ctx / n_seq) or one unified stream."""
+    if i >= _main_layers(meta) and not mtp:
+        return 0  # MTP blocks: no cache in the target context
+    if meta.kv_k is None or meta.kv_v is None:
+        return kv_bytes_per_layer(meta, ctx_size, cache_type)
+    cells = ctx_size
+    if meta.swa and meta.swa[i] and meta.n_swa > 0:
+        n_seq = max(1, parallel)
+        if kv_unified:
+            cells = min(cells, _pad(min(_pad(ctx_size), meta.n_swa * n_seq + ubatch)))
+        else:
+            per_seq = _pad(math.ceil(ctx_size / n_seq))
+            cells = min(cells, n_seq * _pad(min(per_seq, meta.n_swa + ubatch)))
+    total = cells * (meta.kv_k[i] + meta.kv_v[i]) * _KV_BYTES_PER_ELEM[cache_type]
+    if meta.state_bytes:
+        total += meta.state_bytes[i] * max(1, parallel)
+    return math.ceil(total)
+
+
+def layer_weight_bytes(meta: ModelMeta, i: int, mtp: bool = False) -> int:
+    """Weights of layer i on its device. MTP blocks loaded only on demand (layer_bytes 0) count
+    only with mtp; llama.cpp places them by the tensor split like any other layer."""
+    b = meta.layer_bytes[i]
+    if mtp and meta.n_nextn and i >= _main_layers(meta):
+        b += math.ceil(meta.nextn_bytes / meta.n_nextn)
+    return b
+
+
+def kv_total_bytes(meta: ModelMeta, ctx_size: int, cache_type: str = "f16", parallel: int = 1,
+                   ubatch: int = DEFAULT_UBATCH, mtp: bool = False, kv_unified: bool = False) -> int:
+    return sum(layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
+               for i in range(meta.n_layers))
+
+
+def layer_prefix_bytes(meta: ModelMeta, ctx_size: int, cache_type: str = "f16", parallel: int = 1,
+                       ubatch: int = DEFAULT_UBATCH, mtp: bool = False,
+                       kv_unified: bool = False) -> list[int]:
+    """Cumulative weight + cache bytes: layers a..b-1 hold p[b] - p[a]. A split search checks
+    thousands of candidate layer counts; with this each device's need is one subtraction instead
+    of a Python loop over its layers."""
+    out = [0]
+    for i in range(meta.n_layers):
+        out.append(out[-1] + layer_weight_bytes(meta, i, mtp)
+                   + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified))
+    return out
 
 
 def device_need_mb(meta: ModelMeta, layers: range, ctx_size: int, kind: str, is_last: bool,
                    cache_type: str = "f16", ubatch: int = DEFAULT_UBATCH,
-                   flash_attn: str = "auto") -> int:
-    total = (sum(meta.layer_bytes[i] for i in layers)
-             + len(layers) * kv_bytes_per_layer(meta, ctx_size, cache_type))
+                   flash_attn: str = "auto", parallel: int = 1, mtp: bool = False,
+                   kv_unified: bool = False, prefix: list[int] | None = None) -> int:
+    """prefix: layer_prefix_bytes for the same arguments, when the caller has it."""
+    if prefix is not None and layers.step == 1 and layers.start <= layers.stop:
+        total = prefix[layers.stop] - prefix[layers.start]
+    else:
+        total = sum(layer_weight_bytes(meta, i, mtp)
+                    + layer_kv_bytes(meta, i, ctx_size, cache_type, parallel, ubatch, mtp, kv_unified)
+                    for i in layers)
+    extra_mb = 0
     if is_last:
         total += meta.output_bytes
-    return math.ceil(total / _MB) + overhead_mb(meta, kind, ubatch, flash_attn, ctx_size)
+        if mtp and meta.n_nextn:
+            # the MTP draft runs in a second llama.cpp context with its own compute buffer
+            extra_mb = compute_mb(meta, ubatch, flash_attn, ctx_size)
+    return math.ceil(total / _MB) + overhead_mb(meta, kind, ubatch, flash_attn, ctx_size) + extra_mb
 
 
 def total_need_mb(meta: ModelMeta, ctx_size: int, cache_type: str = "f16",
-                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto") -> int:
+                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto", parallel: int = 1,
+                  mtp: bool = False, kv_unified: bool = False) -> int:
     return device_need_mb(meta, range(meta.n_layers), ctx_size, "cuda", True, cache_type,
-                          ubatch, flash_attn)
+                          ubatch, flash_attn, parallel, mtp, kv_unified)
 
 
 def draft_need_mb(draft_meta: ModelMeta, ctx_size: int, cache_type: str = "f16",
-                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto") -> int:
+                  ubatch: int = DEFAULT_UBATCH, flash_attn: str = "auto", parallel: int = 1,
+                  kv_unified: bool = False) -> int:
     """A speculative draft model runs whole on one CUDA device (the head's), with its own
     KV at the same ctx and its own compute buffer / runtime context."""
     return device_need_mb(draft_meta, range(draft_meta.n_layers), ctx_size, "cuda", True, cache_type,
-                          ubatch, flash_attn)
+                          ubatch, flash_attn, parallel, kv_unified=kv_unified)

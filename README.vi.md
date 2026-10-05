@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=gpupool)
-[![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
+[![llama.cpp b11413](https://img.shields.io/badge/llama.cpp-b11413-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11413)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.vi.md)
 
 [Bắt đầu nhanh](#bắt-đầu-nhanh) · [Tính năng](#tính-năng) · [Kiến trúc](#kiến-trúc) · [Vừa ở đâu](#model-nào-vừa-ở-đâu) · [API](#dùng-api) · [Tài liệu](#tài-liệu) · [Hỏi đáp](#hỏi-đáp)
@@ -64,14 +64,15 @@ Khi có phương án đặt tốt hơn, replica mới sẵn sàng rồi replica 
 <tr>
 <td valign="top">
 
-**Lượng tử hóa KV cache**<br>
-`f16`, `q8_0`, `q4_0` để model vừa với ít GPU hơn.
+**KV cache: lượng tử hoá, dùng chung, tính đúng**<br>
+`f16`, `q8_0`, `q4_0`; một vùng dùng chung cho các slot; ước lượng theo đúng bố cục cache của từng model
+(sliding window, MLA, model lai).
 
 </td>
 <td valign="top">
 
 **Speculative decoding**<br>
-`ngram` hoặc model `draft`, giảm số vòng RPC khi model bị chia ra nhiều server.
+`ngram`, model `draft` hoặc chính các layer `mtp` của model, giảm số vòng RPC khi model bị chia ra nhiều server.
 
 </td>
 <td valign="top">
@@ -119,7 +120,8 @@ Trạng thái điều khiển nằm trong SQLite, còn nguyên khi coordinator k
 <td valign="top">
 
 **Giao diện web và image Docker**<br>
-Server, GPU, model, deployment, đề xuất, sự kiện. Image build được khi không có GitHub và sau HTTP proxy.
+Server, GPU, model, deployment, đề xuất, sự kiện, và Playground stream câu trả lời của model đã deploy kèm thời gian
+tới token đầu và token/giây. Image build được khi không có GitHub và sau HTTP proxy.
 
 </td>
 </tr>
@@ -292,10 +294,11 @@ huggingface.co; `--skip-convert` bỏ qua giai đoạn này.
 Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo cáo kiểm thử](docs/TEST_REPORT.vi.md) và
 [thiết kế nền tảng](docs/PLATFORM_DESIGN.vi.md#10-câu-hỏi-mở-và-các-quyết-định).
 
-- [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding qua mạng thật
+- [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding (n-gram, draft, MTP), một RPC server cho mỗi
+  server nhiều GPU và RDMA qua mạng thật
 - [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
 - [ ] Đổi model không gián đoạn (zero-downtime)
-- [ ] Nâng cấp llama.cpp
+- [x] Nâng cấp llama.cpp (b11342 → b11413)
 - [ ] Mô hình tốc độ decode theo từng kiến trúc GPU (hiện là một hiệu suất cố định 0,5) và điểm prefill riêng
 - [ ] Importance matrix trên server GPU; phân tán các job chuyển đổi sang nhiều máy
 - [ ] LoRA adapter và vision projector (`mmproj`) khi chuyển đổi
@@ -306,7 +309,19 @@ Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo c�
 <summary><b>Mọi server đều cần file model không?</b></summary>
 
 Không. Chỉ head (`llama-server`) giữ file GGUF. Trong cụm giả lập, model 2,1 GB chỉ nằm ở head, còn RPC server chỉ
-giữ cache tensor khoảng 724 MB.
+giữ cache tensor khoảng 724 MB. Cache đó nằm trên volume `/data` của agent, nên lần nạp model sau gần như không gửi gì
+qua mạng, và bị giới hạn ở `GPUPOOL_RPC_CACHE_GB` (100 GB).
+
+</details>
+
+<details>
+<summary><b>Model chia qua mạng chạy nhanh cỡ nào?</b></summary>
+
+Mỗi token sinh ra đi qua mỗi liên kết RPC một lần, nên độ trễ quan trọng hơn băng thông. gpupool giữ số chặng ở mức
+thấp: ưu tiên một GPU hoặc một server khi model vừa, các GPU mà một replica dùng trong cùng một server ở xa nằm sau một
+RPC server duy nhất (activation giữa chúng không rời khỏi máy đó), speculative decoding (n-gram, model draft, hoặc
+chính các layer MTP của model) giảm số lượt chạy cho mỗi token, và image agent dùng RDMA (InfiniBand / RoCE) khi các
+server có. Xem [Mạng](docs/QUICKSTART.vi.md#mạng).
 
 </details>
 
@@ -324,7 +339,7 @@ cần driver 570 trở lên). Server GPU cần Docker và NVIDIA Container Toolk
 
 Được: `uv run gpupool coordinator`, và trên mỗi server GPU
 `uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir <llama.cpp build/bin>`.
-Agent cần bản build llama.cpp b11342 có CUDA và RPC. Xem mục "Không dùng Docker" trong
+Agent cần bản build llama.cpp b11413 có CUDA và RPC. Xem mục "Không dùng Docker" trong
 [hướng dẫn bắt đầu nhanh](docs/QUICKSTART.vi.md).
 
 </details>
@@ -333,7 +348,7 @@ Agent cần bản build llama.cpp b11342 có CUDA và RPC. Xem mục "Không dù
 <summary><b>Serve được model safetensors không?</b></summary>
 
 Được, bằng cách chuyển chúng sang GGUF trong coordinator (UI hoặc `/api/convert`). Việc hỗ trợ phụ thuộc converter đã
-ghim (llama.cpp b11342): kiến trúc chưa được hỗ trợ sẽ được báo ở bước inspect. LoRA adapter và vision projector chưa
+ghim (llama.cpp b11413): kiến trúc chưa được hỗ trợ sẽ được báo ở bước inspect. LoRA adapter và vision projector chưa
 được chuyển đổi.
 
 </details>
@@ -352,7 +367,7 @@ trong mạng riêng hoặc VPN, và đặt một proxy kết thúc TLS trước 
 <summary><b>Trộn các loại GPU khác nhau được không?</b></summary>
 
 Được. Scheduler đọc bộ nhớ của từng GPU và xếp hạng các phương án theo tốc độ decode ước tính dựa trên băng thông bộ
-nhớ, số chặng mạng và việc chia sẻ GPU. Ước tính dùng một hiệu suất cố định cho mọi GPU, nên hãy
+nhớ, số chặng mạng và việc chia sẻ GPU (với model MoE chỉ tính các expert mà một token đọc). Ước tính dùng một hiệu suất cố định cho mọi GPU, nên hãy
 xem các con số tok/s như thứ hạng, không phải cam kết. Việc dàn trải trên phần cứng nhiều GPU, nhiều server thật mới
 chỉ được kiểm chứng bằng agent giả lập.
 

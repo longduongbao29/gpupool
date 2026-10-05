@@ -3,7 +3,7 @@
 > English version. Vietnamese version: [DESIGN.vi.md](DESIGN.vi.md). Keep both in sync.
 
 gpupool pools scattered free VRAM across many servers and serves several LLMs through one
-OpenAI-compatible API. The engine is llama.cpp (`llama-server` + `ggml-rpc-server`, build b11342);
+OpenAI-compatible API. The engine is llama.cpp (`llama-server` + `ggml-rpc-server`, build b11413);
 what we write is the control plane: an **agent** on every GPU server, and a **coordinator** that
 holds the scheduler, the reconciler, the autoscaler, the router and the web UI.
 
@@ -19,9 +19,9 @@ This document describes the system as it is in the code. Related documents:
 | --- | --- | --- | --- |
 | Control-plane language | Go or Rust | Python 3.12, installed with `uv` | `uv` is one user-space binary that fetches its own Python, so there is no dependency on the server's Python or sudo. |
 | RPC binary name | `rpc-server` | `ggml-rpc-server` (b11342) | Renamed upstream; the agent looks for both. |
-| llama.cpp build | build from source | pin b11342; prebuilt or self-built, passed via `llama_dir`; Docker images carry it | The dev driver supports CUDA 13.3, so the `cuda-13.4` build does not run; use `cuda-12.4`. |
+| llama.cpp build | build from source | pin b11413; prebuilt or self-built, passed via `llama_dir`; Docker images carry it | The dev driver supports CUDA 13.3, so the `cuda-13.4` build does not run; use `cuda-12.4`. |
 | Device order | implicit | always pass `--device` + `--tensor-split` in the same order, and `--rpc` before `--device` | llama.cpp lists local devices first, then RPC; it resolves device names while parsing arguments, so `RPC0` exists only after `--rpc` registered the servers. |
-| Remote devices | 1 rpc-server per node | 1 rpc-server per device | Own port, deterministic `RPCi` name, can be stopped individually. |
+| Remote devices | 1 rpc-server per node | 1 rpc-server per node and replica, serving that replica's consecutive devices on the node (`-d CUDA0,CUDA1`); 1 per device for agents older than 0.6 | Activations between two GPUs of one server are copied inside it (`RPC_CMD_COPY_TENSOR`) instead of going server → head → server; own port per replica, deterministic `RPCi` names (a server's devices are numbered consecutively in `-d` order). |
 | Model source | URL | URL, absolute local path, or `coordinator://<file>` | Servers reach each other but may have no internet. |
 | Agent liveness | agent pushes a heartbeat every 2 s | the coordinator **pulls** `GET /report` from every registered agent (`poll_s` = 2 s) | With push, a server deleted in the UI would re-appear on its next beat. Push stays available (`push_heartbeat`) for old setups, but only registered servers are accepted. |
 | Server registration | coordinator knows its agents from config | an agent self-registers (`POST /internal/join`, driven by `--join "<url>#<token>"`); the UI can also add by URL | One command per server. The coordinator probes `/report` first, so only a reachable, correctly-tokened agent registers; a server removed in the UI gets 403 so removal sticks. |
@@ -76,12 +76,20 @@ another device: the head's `llama-server` is started with `--rpc host:port,...` 
 - **Only the head node needs the GGUF.** The coordinator never copies the model to RPC nodes; the
   head loads it and sends each remote device its tensors over TCP when the model loads.
 - Each `ggml-rpc-server` is started with `-c`, which enables its **local tensor cache**: a later
-  load of the same model transfers (almost) nothing.
+  load of the same model transfers (almost) nothing. The cache is `$LLAMA_CACHE/rpc` (one file per
+  tensor above 10 MiB, named by its hash); the agent sets `LLAMA_CACHE=<cache_dir>/llama.cpp` (the
+  `/data` volume in the image, unless the user set `LLAMA_CACHE`) and trims it every 10 minutes to
+  `rpc_cache_gb` (100 GB), least recently used files first. llama.cpp never deletes cache files, and a
+  missing one only makes the head send that tensor again.
+- RPC uses TCP, or RDMA (RoCE / InfiniBand) when both ends have an RDMA device: the agent image builds
+  ggml-rpc with libibverbs and llama.cpp negotiates it per connection (`GGML_RPC_NO_RDMA=1` forces TCP).
 - Activations cross the network once per token per hop, so a split over RPC trades speed for
   capacity. The scheduler models this as a fixed per-hop cost (section 6.3) and uses multi-node
   placements only when no single GPU or single node fits.
-- One `ggml-rpc-server` per device, bound to the agent's `host` on a port from `port_range`
-  (9000-9999) that the coordinator allocates, so ports never collide across replicas.
+- One `ggml-rpc-server` per node and replica, serving every consecutive device of the replica on that
+  node (agents report the `rpc_multi_device` feature; older agents get one server per device), bound to
+  the agent's `host` on a port from `port_range` (9000-9999) that the coordinator allocates, so ports
+  never collide across replicas. The scheduler counts one network hop per server, not per device.
 - The head's own CPU device, if exposed (`include_cpu`), is also reached through an rpc-server
   (`-d CPU`), so it is an `RPCi` device too.
 
@@ -93,6 +101,12 @@ split; llama.cpp auto-fit must not change it) and `-lv 4` (verbosity 4 prints pe
 and compute buffer sizes, which calibration parses; 5 would add a dry-run pass, so it is exactly 4).
 `--tensor-split` is the layer counts, passed when there is more than one device.
 
+Per-model options add flags only when they differ from llama.cpp's defaults: `-ctk/-ctv` (KV cache
+type), `-fa` (flash attention), `-b` / `-ub` (batch, micro-batch), `-kvu` (`kv_unified`: the slots share
+one KV pool instead of `ctx_size / parallel` each), and for speculative decoding `--spec-type ngram-mod`,
+`--spec-type draft-simple -md ...` or `--spec-type draft-mtp` (section 8.2). `--rpc` lists each RPC
+server once, in the order of its `RPCi` devices.
+
 ## 4. Data contracts
 
 Source of truth: `src/gpupool/common/models.py` (pydantic v2). Changing a field is a protocol
@@ -102,13 +116,13 @@ change; agent and coordinator of different versions must keep talking, so every 
 | Model | Direction | Key fields |
 | --- | --- | --- |
 | `Device` | agent to coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (configured cap; the coordinator also subtracts the estimates of its own live replicas from it, since free memory does not show their share), `uuid` / `pci_bus_id` (stable identity), `bandwidth_gbps` (NVML bus width x memory clock; ranks GPUs), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `models` (GGUF files in the local cache), CPU/RAM telemetry |
-| `EngineSpec` | coordinator to agent | `engine_id`, `kind` rpc/server, `port`, `devices` (order = `--device`), `rpc_endpoints`, `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type`, `draft_model_path`, `draft_device`, `draft_n_max`, `allowed_peers` (rpc: hosts allowed to connect) |
+| `NodeReport` | agent to coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP other nodes use for RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (GGUF files in the local cache), `features` (capabilities by the agent's llama.cpp build: `rpc_multi_device`, `spec_mtp`, `kv_unified` from b11342, none for an unknown build; the coordinator uses only what an agent reports: RPC servers are shared only between agents that both report `rpc_multi_device`, and an `mtp` model on a head without `spec_mtp` runs without speculation (warning `mtp_unavailable`)), CPU/RAM telemetry |
+| `EngineSpec` | coordinator to agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: order = `--device`; rpc: the devices one `ggml-rpc-server` serves, `-d` order), `rpc_endpoints` (one per RPC server), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: hosts allowed to connect) |
 | `EngineStatus` | agent to coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (at most 50 lines) |
-| `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = stopped), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max` |
+| `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = stopped), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
 | `AutoscalePolicy` | inside `ModelSpec` | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300 |
-| `ModelMeta` | read from the GGUF header | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model` |
-| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps`, `reasons`, `draft_est_mb`, `mem_factor` (calibration factor the estimates were multiplied by) |
+| `ModelMeta` | read from the GGUF header | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model`; per-layer cache layout `kv_k[i]` / `kv_v[i]` (cached row sizes), `swa[i]` + `n_swa`, `state_bytes[i]` (recurrent state per sequence); `n_nextn` / `nextn_bytes` (MTP blocks loaded only for `draft-mtp`); `active_bytes[i]` (MoE: bytes a token reads) |
+| `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps` (and its parts `est_bw_s`, `est_hops`, `est_logits_s`), `reasons`, `draft_est_mb`, `mem_factor` (calibration factor the estimates were multiplied by) |
 | `Occupant` | reconciler to scheduler | an engine already on a GPU: node, device, model, `est_mb`, `busy` (0..1) |
 | `ReplicaRecord` | store | placement + state `pending`, `launching`, `ready`, `draining`, `stopped`, or `failed` |
 | `LibraryItem` | library | a GGUF the coordinator can serve as `coordinator://<name>` |
@@ -140,14 +154,28 @@ winning placement.
 For a device holding layer range `L` (calibrated against llama.cpp b11342 verbose load logs):
 
 ```
-need = ceil( sum(layer_bytes[i] for i in L) + |L| x kv_bytes_per_layer [+ output_bytes if last device] )
+need = ceil( sum(layer_bytes[i] + cache_bytes[i] for i in L) [+ output_bytes if last device] )
        + compute_buffer + runtime_context
-kv_bytes_per_layer = 2 x ctx_size x n_head_kv x head_dim x bytes_per_element(kv_cache_type)
+cache_bytes[i]     = cells[i] x (k_row[i] + v_row[i]) x bytes_per_element(kv_cache_type)
+                     + state_bytes[i] x parallel
+cells[i]           = ctx_size, or for a sliding-window layer
+                     parallel x pad256(min(pad256(ctx_size / parallel), n_swa + ubatch))
+                     (kv_unified: pad256(min(ctx_size, n_swa x parallel + ubatch)))
 compute_buffer     = ceil(21 x 512 x n_embd x 4 bytes)      (default ubatch 512)
 runtime_context    = 128 MB (CUDA) | 32 MB (CPU)
 ```
 
 - Bytes per KV element: f16 2, q8_0 34/32, q4_0 18/32 (ggml block layouts).
+- The per-layer layout follows llama.cpp b11342's loaders: `k_row = n_head_kv[i] x key_length`
+  (`key_length_swa` on SWA layers), `v_row` likewise, 0 with MLA (`key_length_mla`: only the latent K
+  is cached). Recurrent layers of hybrid models (`full_attention_interval` for Qwen3-Next / Qwen3.5,
+  `recurrent_layers`, or 0 KV heads) have no KV but a per-sequence f32 state from the `ssm.*` keys.
+  SWA layers come from a `sliding_window_pattern` array, or for gemma2/3/3n, gpt-oss, cohere2 and
+  olmo2 from the loader's own period when `sliding_window` is set; any other architecture counts
+  full layers (over-estimate, never an OOM). Without layout data (old metadata) every layer uses
+  `2 x ctx_size x n_head_kv x head_dim`.
+- MTP (`nextn`) blocks that llama.cpp loads only for `--spec-type draft-mtp` are kept apart
+  (`nextn_bytes`) and count, with their cache, only when MTP is on.
 - `output_bytes` (output.weight, or token_embd when tied, plus output_norm) counts on the **last
   device** in `--device` order. token_embd stays in host RAM and is not counted on any GPU.
 - The result is multiplied by the model's calibrated memory factor (section 12), which is 1.0 until
@@ -180,10 +208,20 @@ display, simulation and rebalancing.
 5. **Layer split** per device set: proportional to capacity (usable minus overhead), at least one
    layer each, then a repair pass moves one layer at a time from the most overfull device to the one
    with most slack, checked with exact per-layer bytes, until every device has `est_mb <= usable_mb`.
-   `tensor_split` = layer counts.
+   When the devices' bandwidths differ, a speed pass then moves layers from slower to faster devices
+   while they fit and the estimated decode time drops (every device keeps at least one layer).
+   `tensor_split` = layer counts. Cost: a device's need is one subtraction from per-layer prefix sums
+   (weights + cache, built once per planning call); moving a layer between two devices re-checks only
+   the devices whose layer ranges shift; the speed pass keeps moving along one pair while it helps. A
+   pool of 8 servers with 5 devices each plans in about 0.3 s. Recommend, simulation and rebalance
+   scoring rank in a worker thread, so they never stall streamed responses.
 6. **Head** = the node holding the most layers (found as a fixed point: re-order, re-split, repeat).
-   **Device order**: the head's CUDA devices, the head's CPU, then every other node by total usable
-   descending (devices within a node by usable descending). Non-local devices are named `RPC0`, `RPC1`...
+   **Device order**: every other node by total usable descending (devices within a node by usable
+   descending), then the head's CPU, then the head's CUDA devices **last**. The last device holds the output
+   layer, and llama-server reads `n_vocab x 4` bytes of logits from it on every token (0.5 MB for a 128k
+   vocabulary); with the head's own GPU last only the hidden state (`n_embd x 4` bytes) crosses the network.
+   The input embeddings are computed on the head's CPU either way. Non-local devices are named `RPC0`,
+   `RPC1`... in this order.
 
 Pins (`pin_devices`), GPUs switched off in the pool, and VRAM reserved by launching replicas are
 applied by the reconciler before planning by setting `usable_mb` to 0 or lowering it, so the
@@ -201,12 +239,28 @@ different devices run one after another, so
 
 ```
 time per token = sum over devices( bytes on device / (bandwidth x 0.5) ) + n_rpc_hops x 2 ms
+                 [+ n_vocab x 4 bytes / 125 MB/s when the last device is on another server]
 est_decode_tps = 1 / time per token
 ```
 
 (0.5 = fraction of peak bandwidth llama.cpp reaches; calibrated on a GTX 1650, 160 GB/s, where
-Qwen2.5-0.5B q4_k_m measured 182 tok/s.) Unknown bandwidth: CPU 25 GB/s; an unknown CUDA GPU ranks as
-the slowest known one (100 GB/s when none is known).
+Qwen2.5-0.5B q4_k_m measured 182 tok/s.) For a MoE layer the bytes per token are its shared weights plus
+`expert_used_count / expert_count` of its routed experts (`ffn_*_exps`). Unknown bandwidth: CPU 25 GB/s;
+an unknown CUDA GPU ranks as the slowest known one (100 GB/s when none is known).
+
+`n_rpc_hops` is the number of RPC servers the graph passes through, not the number of remote devices:
+consecutive devices of one node share one `ggml-rpc-server` when its agent reports `rpc_multi_device`
+(section 3.1), and llama.cpp copies activations between them inside that server. The logits term prices
+the output layer on another server (placements made before the head's GPUs were put last): the logits then
+cross the network every token, at an assumed 1 Gbit/s.
+
+**Learned speed model.** 0.5 and 2 ms are starting values. Every 60 s the reconciler takes each ready replica
+whose measured speed is one plain decode stream (`parallel` 1, no speculative decoding; several streams share
+the bandwidth and drafting multiplies tokens) and its fresh `llamacpp:predicted_tokens_seconds`: a replica on one
+server gives `eta = bandwidth seconds x measured tok/s`, a split one (eta known) gives
+`(1 / measured - bandwidth seconds / eta - logits term) / n_rpc_hops` seconds per hop. Each moves by an EMA of
+weight 0.2, clamped to eta 0.15..0.95 and 0.1..50 ms, is saved in `control_state` (`speed_model`) and shown in
+`GET /api/state`. One value each for the whole cluster.
 
 Score of a candidate (higher wins):
 
@@ -220,7 +274,7 @@ Score of a candidate (higher wins):
 | devices | -5 per extra device | fewer devices |
 | hops | -10 per network hop | fewer RPC links |
 
-Ties break by smaller tier, then node and device name, so the result is deterministic. The top
+Ties break by smaller tier, then the head node and its first device's name, so the result is deterministic. The top
 three to four **reasons** (speed vs the fastest option, shared GPUs, same-model neighbours, number of
 GPUs, network hops) are stored in `Placement.reasons` and shown in the UI. Spread is soft: a shared
 GPU is still used when nothing else fits. Occupants come from every live replica, draining ones
@@ -230,7 +284,7 @@ included, because they still hold memory.
 
 With `speculative = "draft"` the draft runs inside the head's `llama-server` on the head's first
 local CUDA device. For each possible head device `D` the split is solved on a pool where only `D`
-gives up the draft's memory, and `D` is pinned as the head's first device; charging the draft to
+gives up the draft's memory, and `D` is pinned as the head's first local GPU; charging the draft to
 every CUDA device would reject pools that do fit it once. Above 16 CUDA devices only the roomiest
 8 are tried as heads. The draft's MB is added to that assignment's `est_mb` and to `est_total_mb`
 (`draft_est_mb`). If the draft cannot fit on a local CUDA device of the head, there is no placement.
@@ -314,7 +368,7 @@ Adds `-ctk T -ctv T` to the head (and `-ctkd/-ctvd` for the draft). The estimate
 bytes per element, so a quantized cache really lets a longer context fit. Measured on Qwen2.5-3B at
 ctx 8192: q8_0 saves 132 MB, q4_0 204 MB versus f16 (theory 142 / 217 MB).
 
-### 8.2 Speculative decoding (`speculative`: none | ngram | draft)
+### 8.2 Speculative decoding (`speculative`: none | ngram | draft | mtp)
 
 Fewer target passes mean fewer RPC round trips, which matters most for multi-node placements.
 
@@ -325,19 +379,56 @@ Fewer target passes mean fewer RPC round trips, which matters most for multi-nod
   explicitly. The API refuses a draft whose tokenizer differs, or whose vocabulary differs by more than
   128 tokens (llama.cpp refuses otherwise). The reconciler also refuses to launch if the first
   assignment is not a local CUDA device of the head.
+- `mtp`: the model's own multi-token-prediction (`nextn`) blocks draft the tokens, in a second llama.cpp
+  context on the same devices. Flags: `--spec-type draft-mtp --spec-draft-n-max N`. llama.cpp loads those
+  blocks only in this mode, so the estimate adds them (at their layer position in the split), their KV and
+  a second compute buffer on the last device only with `mtp`. The API refuses `mtp` for a GGUF without
+  `nextn_predict_layers`. A head whose agent does not report `spec_mtp` (older agent or llama.cpp build) launches
+  the model without speculation and raises a `mtp_unavailable` warning: an optimisation never fails a launch.
+- With llama.cpp b11413 or newer (the agent reads the build of its `llama-server`), `draft` and `mtp` add
+  `--spec-draft-sampling probabilistic`: the draft is sampled and verified by rejection (accept with
+  `min(1, p/q)`) instead of matching its argmax, which keeps the target's output distribution exactly and accepts
+  more drafts at temperature > 0 (llama.cpp #27694: +4-8 % throughput). Older builds keep greedy drafting.
 - `draft_n_max` (1..16, default 4): measured on a GTX 1650 with Qwen2.5-3B plus a 0.5B draft, 4 drafted
   tokens gave +5 %, 8 was slower than none.
+
+### 8.3 Shared KV pool (`kv_unified`)
+
+With `parallel` > 1 llama.cpp gives each slot its own stream of `ctx_size / parallel` cells, so one long
+request fails while the other slots sit on short ones. `kv_unified` adds `-kvu`: one pool of `ctx_size`
+cells for all slots, so any one request may use all of it. The memory is the same; only sliding-window
+layers change, from `parallel` windows of `n_swa + ubatch` to one window of `n_swa x parallel + ubatch`
+(section 6.1). Recommend suggests it (`kv_unified` tip) for every model with several slots.
 
 ## 9. Router (`router/`)
 
 - Candidates = `ready` replicas of the model whose head node is alive. The router reads a snapshot of the
   store that is rebuilt only when the store's version moves; liveness is judged on every call, because a
   node that goes silent triggers no write.
-- **Prefix key** = sha256 of all messages but the last (canonical JSON, cut at 4 KB); with a single
-  message, its first 512 characters; for `/v1/completions`, the first 512 characters of the prompt.
-- Rendezvous hash(prefix, replica) picks the preferred replica; if it has more than 2 more outstanding
-  requests than the least-loaded one, the least-loaded one is used.
-- Sends `cache_prompt: true`; the head runs with `--cache-reuse 256 --metrics`.
+- **Prefix key** = sha256 of canonical JSON: for a single turn (system messages + one user message), all
+  messages but the last, cut at 4 KB, so a shared system prompt meets on one replica; for a multi-turn
+  chat, the system messages and the first user message, uncut (a system prompt longer than any cut would
+  otherwise give every conversation one key), which every later turn repeats, so from its second
+  turn on the conversation stays with its KV cache (from the first when it has no system prompt: a single
+  message keys on its content either way). With a single message, its first 512 characters; for `/v1/completions`, the
+  first 512 characters of the prompt.
+- Weighted rendezvous hashing picks the preferred replica: the highest `-weight / ln(hash(prefix, replica))`
+  wins, with `weight` = the placement's estimated decode tok/s, recomputed on every request from its stored
+  parts (`est_bw_s`, `est_hops`, `est_logits_s`) with the current, learned speed model (older placements:
+  `est_decode_tps`; a replica with neither counts as the average of the others). Not llama-server's measured rate: its bucket resets on every
+  `/metrics` read, so it is 0 when idle and lower when busy, and every change of a weight moves prefixes to a
+  replica without them in its KV cache; measured speed improves the estimate through the speed model
+  (section 6.3) instead. A replica twice as fast gets twice the share of prefixes
+  (the idea of Helix, ASPLOS'25: route by capacity on heterogeneous GPUs), and with equal weights it is plain
+  rendezvous hashing. If the preferred replica's load exceeds the least-loaded one's by more than 2, the
+  least-loaded one is used; load is outstanding requests x (fastest weight / own weight), so a slow
+  replica fills up sooner.
+- Sends `cache_prompt: true`; the head runs with `--cache-reuse 256 --metrics`. The body is forwarded as
+  the client sent it: when it has no `cache_prompt`, `"cache_prompt":true,` is spliced in after the opening
+  brace instead of re-serializing megabytes of JSON on the event loop (a body with a BOM or in UTF-16 is
+  re-encoded).
+- Upstream connections are not capped by the router's HTTP client (httpx would hold request 101 and later
+  in the coordinator, with no timeout); llama-server's slots and the balancer are the limit.
 - Retries on connection errors or 5xx **before the first byte**, at most twice, never after bytes were
   sent. Every error feeds `note_error`, which makes the reconciler check that replica's `/health` next tick.
 - A mid-stream failure ends the SSE stream with an error event; the outstanding counter is released
@@ -392,8 +483,8 @@ agents. One tick, in this order:
   device with a `budget_mb` is also capped by budget minus the estimates of all live replicas on it.
 - A ready replica on a device with `free_mb < low_free_mb` (256) is replaced first: a new replica is
   launched, and the old one drained once the new one is ready.
-- **Launch**: start the rpc engines (each with `allowed_peers` = the head's host) and wait until each is
-  running; `ensure` the model (and the draft) on the head; start the head; wait for `/health` 200
+- **Launch**: `ensure` the model (and the draft) on the head while the rpc engines start (each with
+  `allowed_peers` = the head's host) and become running; once both are done, start the head; wait for `/health` 200
   (`launch_timeout_s`, 600 s); mark `ready`; calibrate (section 12). Any failure stops every engine
   created so far, so a half-launched replica never pins VRAM on a shared GPU.
 - A replica drained or failed while launching is rolled back quietly (it is not a launch failure).
@@ -475,10 +566,16 @@ placement is missing from the data, the sample is skipped (partial data would bi
   `/api/state`.
 - Calibration is bookkeeping about a replica that already serves: it never fails a launch, and old
   agents, logs without `-lv 4` or missing devices simply leave the factor alone.
+- **Estimator version**: a factor is measured against one version of the estimate. When `estimate.py`
+  changes what it estimates, `ESTIMATOR_VERSION` (in `store.py`) is bumped and the store clears every
+  factor once at start (`control_state` key `estimator`); otherwise an old factor would scale the new
+  estimate by the old one's error (clamped at 0.9, up to 10 % under). Version 2: per-layer cache layout.
 
 ## 13. State persistence and crash recovery
 
-SQLite (WAL, busy timeout 5 s). Tables: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
+SQLite (WAL, `synchronous=NORMAL`, busy timeout 5 s). NORMAL never corrupts a WAL database; a power loss
+can only drop the last commits, and agent reports alone commit every 2 s per server on the event loop
+that also proxies inference, which FULL would fsync each time. Tables: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
 `gpu_flags`, `events` (last 1000), `control_state`, `model_calibration`, `convert_jobs` (section 17.6), plus the library's own tables.
 
 | Persisted | Where | Survives restart |
@@ -487,7 +584,8 @@ SQLite (WAL, busy timeout 5 s). Tables: `nodes`, `models`, `replicas`, `servers`
 | Events | `events` | yes; webhook delivery is best effort |
 | Preemption cooldowns and victim sets, crash-loop backoffs, the move in flight | `control_state` keys `preempted`, `backoff`, `move` | yes |
 | Autoscaler desired count, last request, last decision | `control_state` key `autoscaler:<model>` | yes (timers are not) |
-| Calibration factors | `model_calibration` | yes |
+| Calibration factors | `model_calibration` | yes, until the estimator version changes (section 12) |
+| Speed model (eta, seconds per RPC hop) | `control_state` key `speed_model` | yes |
 | `_last_rebalance` timer | memory | no, on purpose (stale reports after boot) |
 
 Control state is written through on every change (these are rare events) and times are wall-clock, so
@@ -527,8 +625,9 @@ src/gpupool/
     memlog.py                 per-device buffer sizes from a llama-server log
     gpu.py                    NVML / psutil device probing, budgets, margins
     models_cache.py           download to .part, atomic rename, split GGUFs
+    rpc_cache.py              size cap for ggml-rpc-server's weight cache (LRU)
   scheduler/
-    gguf_meta.py              GGUF header parser (file or URL)
+    gguf_meta.py              GGUF header parser (file or URL), per-layer cache layout, MoE / MTP sizes
     estimate.py               memory estimate
     scoring.py                bandwidth-based decode-speed estimate
     placement.py              candidates, split, scoring, draft reservation, plan / rank
@@ -824,7 +923,9 @@ exactly that reason, and a fresh checkout would have refused every matrix job wi
 exception for the package folder; see TEST_REPORT.)
 
 **The run.** `llama-imatrix -m intermediate -f calibration.txt -o imatrix.gguf --chunks N -c 512 --no-ppl -ngl 0
-[-t threads]`. `N` is `advanced.imatrix_chunks`, default 100; the context is 512 tokens because short sequences keep
+[-t threads] [--nextn -b 512]`. `--nextn` (b11413) is added when the intermediate has MTP (`nextn`) layers that
+llama.cpp loads only on request: without it those tensors get no matrix and a type that needs one cannot quantize
+them; it needs one sequence per batch, hence `-b 512`. `N` is `advanced.imatrix_chunks`, default 100; the context is 512 tokens because short sequences keep
 a CPU run feasible; `--no-ppl` skips the perplexity pass, which only costs time. With `--no-ppl` the tool prints no
 per-chunk lines (in b11342 they are inside the perplexity branch), so progress is estimated from the time of the first
 pass and the ETA it prints, advanced once a second (never reaching 100 % from the clock alone: the file is written

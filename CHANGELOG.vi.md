@@ -8,6 +8,132 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.6.0] - 2026-10-05
+
+### Thêm
+
+- UI: các khung lớn (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, các mục
+  Settings) thu gọn được còn phần đầu bằng mũi tên hoặc bấm vào tiêu đề. Mặc định đều mở; khung đã thu gọn được nhớ theo
+  trình duyệt.
+
+- **Playground** trong UI: chat với model đã deploy qua `/v1/chat/completions` (router, balancer và replica, đúng như
+  client). Câu trả lời stream từng ký tự, kèm dải số đo trực tiếp: thời gian tới token đầu, token/giây khi sinh, số
+  token và tổng độ trễ; mỗi câu trả lời còn hiện số token và tốc độ xử lý prompt (prefill), tốc độ placement ước tính đặt cạnh tốc độ đo được,
+  và replica đã trả lời.
+  Tốc độ lấy từ `timings` của chính llama-server khi xong (đếm trong trình duyệt khi đang stream), `reasoning_content`
+  của model có suy nghĩ vào một khối thu gọn được, *Stop* để huỷ, model on-demand đang ngủ được nạp (cold start) ở tin
+  nhắn đầu tiên. Khung chat bên trái, cài đặt bên phải, *Clear chat* ở đầu khung chat. Nút *Chat* trên thẻ model đang chạy mở Playground. Phần cài đặt (không phải nội dung chat) được nhớ
+  theo trình duyệt.
+
+- `/v1` nhận thêm admin key khi đã đặt API key (Playground đăng nhập bằng khóa này); `/v1` đang mở (không có API key)
+  vẫn mở. Mọi phản hồi được chuyển tiếp có header `x-gpupool-replica`, tức replica đã trả lời.
+
+- UI: thẻ server hiện bản llama.cpp của nó và đánh dấu server có bản khác với bản phổ biến nhất; *Placement health*
+  hiện mô hình tốc độ đã học (phần băng thông đỉnh đạt được, thời gian mỗi hop mạng); *Why here* tách thời gian của
+  một token thành đọc weight, các hop mạng và logits.
+
+- Mô hình tốc độ decode tự học từ tốc độ đo được: eta (tỉ lệ băng thông đỉnh) từ replica trên một server và thời gian
+  mỗi hop RPC từ replica bị chia, đều lấy từ tốc độ sinh token đo được của llama-server ở các replica chạy một luồng
+  thuần. Được lưu lại, hiển thị là `speed_model` trong `GET /api/state`; placement khi đó xếp hạng theo mạng và GPU thật
+  của cụm thay vì hằng số đo trên một GTX 1650.
+
+- Sự kiện cảnh báo `llama_version_mismatch` (kèm webhook) khi các server đã đăng ký báo bản llama.cpp khác nhau, một
+  lần cho mỗi thay đổi của tập các bản build (server chập chờn không làm nó lặp lại): model bị chia qua nhiều server cần cùng giao thức RPC trên head và mọi RPC server.
+
+- `kv_unified` (llama.cpp `-kvu`): các slot song song dùng chung một vùng KV, nên một request dài có thể dùng cả
+  context trong khi các slot khác giữ request ngắn, với cùng lượng bộ nhớ. Có trường API, công tắc trong form
+  triển khai và gợi ý Recommend cho model có nhiều slot; ước lượng tính layer sliding-window theo vùng dùng chung. Agent
+  cũ hơn bỏ qua cờ này (khi đó mỗi slot vẫn giữ phần context của riêng nó).
+
+- Speculative decoding `mtp`: GGUF có sẵn layer dự đoán nhiều token (nextn) (Qwen3.5, GLM-4.5 trở lên,
+  DeepSeek V3...) nháp bằng chính các layer đó qua `--spec-type draft-mtp` của llama.cpp, không cần file model
+  phụ. Model đích chạy ít lượt hơn cho mỗi token nên ít vòng RPC hơn khi model bị chia. API từ chối `mtp` với
+  model không có các layer này, ước lượng tính cả các layer (chỉ được nạp ở chế độ này) cùng cache của chúng,
+  và bảng Recommend gợi ý nó trước n-gram và model draft. Head có agent không báo tính năng `spec_mtp` (agent hoặc bản llama.cpp cũ hơn)
+  phục vụ model mà không speculative và phát cảnh báo `mtp_unavailable` thay vì làm launch thất bại.
+
+### Thay đổi
+
+- Xếp chỗ nhanh hơn khoảng 10 lần trên cụm lớn (8 máy, mỗi máy 5 thiết bị: 3,0 s → 0,27 s; 4 máy: 256 → 29 ms),
+  cho ra đúng các phương án như trước (đã đối chiếu trên 400 cụm ngẫu nhiên). Nhu cầu bộ nhớ của mỗi thiết bị là
+  một phép trừ trên tổng cộng dồn theo layer thay vì vòng lặp qua từng layer; dời một layer giữa hai thiết bị chỉ
+  kiểm tra lại các thiết bị có dải layer bị dịch; bước ưu tiên GPU nhanh tiếp tục dời trên cùng một cặp thiết bị
+  khi còn có lợi thay vì quét lại mọi cặp sau mỗi layer. Các lượt xếp hạng của Recommend, mô phỏng và chấm điểm
+  rebalance chạy trong thread riêng nên không còn làm khựng các phản hồi đang stream.
+
+- Speculative decoding kiểu draft và MTP lấy mẫu bản nháp và kiểm bằng rejection (`--spec-draft-sampling
+  probabilistic`, llama.cpp b11413+): cùng phân phối đầu ra, nhiều bản nháp được chấp nhận hơn khi temperature > 0
+  (+4-8 % throughput theo số đo của llama.cpp). Agent dùng bản llama.cpp cũ hơn vẫn nháp kiểu greedy.
+
+- llama.cpp b11342 → b11413 trong cả hai image (cùng giao thức RPC 7.0.0; vẫn nâng mọi agent cùng lúc như trước).
+  Mang lại: draft n-gram không còn bị từ chối khi temperature > 0, lấy mẫu draft theo xác suất cho draft và MTP, sửa
+  lỗi bộ nhớ CUDA với MoE nhiều expert, gộp shared expert và matmul f16/bf16 batch nhỏ nhanh hơn trên CUDA, sửa flash
+  attention trên Volta, và `llama-imatrix --nextn`, mà gpupool giờ truyền cho model có layer MTP để các loại lượng tử
+  cần importance matrix lượng tử hoá được chúng.
+
+- Router chia request giữa các replica của một model theo tốc độ của chúng: weighted rendezvous hashing với trọng
+  số là tok/s decode ước lượng của placement (được mô hình tốc độ tự học giữ cho sát), và phép kiểm tra quá tải tính số
+  request theo năng lực. Replica bị chia
+  qua mạng chạy 10 tok/s không còn nhận phần bằng replica một GPU chạy 50 tok/s. Replica cùng tốc độ định tuyến y
+  như trước.
+
+- Placement bị chia đặt các GPU của chính head ở cuối thứ tự device. Device cuối giữ layer đầu ra, và llama-server
+  đọc logits (`n_vocab x 4` byte, khoảng 0,5 MB với từ vựng 128k) từ nó ở mỗi token: khi device cuối ở xa, logits đi
+  qua mạng mỗi lần, giờ chỉ còn hidden state (`n_embd x 4` byte). Model draft vẫn nằm trên GPU local đầu tiên của head.
+
+- Cache trọng số RPC có giới hạn dung lượng (`GPUPOOL_RPC_CACHE_GB`, mặc định 100): cứ 10 phút agent xoá các file
+  tensor ít dùng nhất khi vượt giới hạn. llama.cpp không bao giờ xoá chúng, nên mọi model từng chia sang một máy
+  chủ đều nằm lại trên đĩa máy đó.
+- Router chuyển tiếp nguyên body của request (thêm `"cache_prompt": true` khi thiếu) thay vì parse rồi serialize
+  lại, việc tốn vài mili giây event loop cho mỗi request context dài.
+
+- Image agent build kèm transport RDMA của llama.cpp (RoCE / InfiniBand, qua libibverbs). Mỗi kết nối RPC tự
+  thương lượng và quay về TCP ở nơi một trong hai bên không có thiết bị RDMA; để dùng, chạy agent với
+  `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.
+- Công cụ chuyển đổi trong image coordinator (llama-quantize, llama-imatrix) được build với AVX2/FMA/F16C ghi rõ,
+  thay vì dựa vào mặc định CMake mà môi trường build có `SOURCE_DATE_EPOCH` sẽ tắt đi.
+
+- Mỗi máy chủ và replica chỉ chạy một `ggml-rpc-server` phục vụ mọi GPU của replica trên máy đó (`-d CUDA0,CUDA1`)
+  thay vì mỗi GPU một process. llama.cpp khi đó copy activation giữa các GPU này ngay trong server; với mỗi GPU một
+  process, mỗi ranh giới phải đi server → head → server, hai lần truyền mạng cho mỗi token. Placement tính một hop
+  mạng cho mỗi RPC server nên các cách chia như vậy cũng được chấm điểm cao hơn. Agent báo khả năng này
+  (`features: ["rpc_multi_device"]`); agent cũ vẫn chạy mỗi GPU một server.
+
+- Ước lượng bộ nhớ theo đúng bố cục cache từng layer của llama.cpp. Layer sliding-window (Gemma 2/3/4,
+  gpt-oss, Cohere2, OLMo2) chỉ cache cửa sổ của nó, model MLA (DeepSeek, Kimi, GLM-DSA) chỉ cache K latent,
+  model lai (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) chỉ có KV ở layer attention cộng một state hồi quy nhỏ
+  cho mỗi sequence, và các block MTP mà llama.cpp không nạp khi không có `draft-mtp` không còn bị tính. Các model
+  này trước đây bị ước lượng dư (tới vài lần KV thật ở context dài), khiến chúng bị chia ra nhiều GPU hoặc máy
+  chủ hơn mức cần. Kiến trúc chưa biết giữ quy tắc cũ.
+- Tốc độ decode của model MoE chỉ tính các expert mà mỗi token thực sự đọc, nên placement của model MoE được
+  chấm điểm theo tốc độ sát thực tế.
+- Hệ số hiệu chỉnh VRAM đã lưu được xoá một lần khi bộ ước lượng thay đổi (lần này), vì hệ số học theo ước
+  lượng cũ sẽ nhân ước lượng mới với sai số của cái cũ.
+
+- Khởi động nguội nhanh hơn: head tải model (và draft, song song với model) trong lúc các engine RPC khởi
+  động, thay vì đợi chúng chạy xong mới tải.
+- SQLite của coordinator chạy với `synchronous=NORMAL` (an toàn khi dùng WAL): báo cáo của agent, mỗi máy chủ
+  một commit mỗi 2 s trên chính event loop chuyển tiếp suy luận, không còn fsync mỗi lần.
+
+### Sửa lỗi
+
+- UI: ô chọn có option sinh động (model của Playground, file thư viện, draft model) có thể hiện option đầu tiên thay
+  vì giá trị nó đang giữ; GPU của server offline và sự kiện đã đọc không được làm mờ (hiệu ứng xuất hiện của dòng đè
+  opacity inline); các thẻ model trên một hàng cao khác nhau.
+
+- UI trên điện thoại: các nút ở đầu khung (Placement health) xuống dòng thay vì tràn ra ngoài màn hình.
+
+- Hội thoại nhiều lượt ở yên trên một bản sao. Router lấy khoá theo mọi tin nhắn trừ tin cuối, nên khoá đổi ở
+  mỗi lượt (cho tới khi tiền tố quá 4096 ký tự) và khi có nhiều bản sao, hội thoại nhảy sang bản sao phải xử lý
+  lại toàn bộ lịch sử. Giờ yêu cầu nhiều lượt lấy khoá theo các tin system cộng tin user đầu tiên, phần mọi lượt
+  sau đều lặp lại. Yêu cầu một lượt giữ cách lấy khoá cũ (theo system prompt).
+- Router không còn giới hạn 100 kết nối tới upstream. Pool mặc định của httpx giữ yêu cầu thứ 101 trở đi trong
+  coordinator mà không có timeout, bộ cân bằng tải và hàng đợi của llama-server đều không thấy.
+- Cache trọng số RPC còn lại sau khi khởi động lại hay nâng cấp agent. `ggml-rpc-server -c` lưu tensor nhận được
+  ở `$LLAMA_CACHE/rpc`, mặc định là `~/.cache` trong lớp ghi của container; giờ engine nhận
+  `LLAMA_CACHE=<GPUPOOL_CACHE_DIR>/llama.cpp` (nằm trên volume `/data` trong image). `LLAMA_CACHE` do người
+  dùng đặt được giữ nguyên.
+
 ## [0.5.1] - 2026-10-05
 
 ### Thay đổi
@@ -180,7 +306,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable
 
 from gpupool.common.models import ReplicaEndpoint
@@ -16,6 +17,42 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else _canon(value)
 
 
+_PREAMBLE_ROLES = ("system", "developer")
+
+
+def _is_preamble(m: object) -> bool:
+    return isinstance(m, dict) and m.get("role") in _PREAMBLE_ROLES
+
+
+def _anchor(messages: list) -> list:
+    """The messages a key is made of.
+
+    Single turn ([system..., user]): everything but the last message, so requests sharing a
+    system prompt meet on one replica. Multi-turn: the system messages and the first
+    conversational message, which every later turn of the same conversation repeats verbatim,
+    so from its second turn on a conversation stays on the replica whose KV cache holds it
+    (without a system prompt, from the first). Keying on messages[:-1] instead would change the
+    key on every turn (until the canonical prefix passed the 4096-character cap). The switch
+    between turns 1 and 2 of a chat with a system prompt is the price of grouping single-turn
+    requests by their shared system prompt.
+    """
+    first = next((i for i, m in enumerate(messages) if not _is_preamble(m)), len(messages))
+    if first + 1 < len(messages):
+        return messages[:first + 1]
+    return messages[:-1]
+
+
+def _digest(messages: list) -> str:
+    """sha256 over every message, streamed: string contents are hashed as they are, so a long
+    system prompt or pasted document costs one hash pass, not a JSON re-serialisation."""
+    h = hashlib.sha256()
+    for m in messages:
+        role, content = (m.get("role"), m.get("content")) if isinstance(m, dict) else (None, m)
+        h.update(f"\x00{role}\x00".encode())
+        h.update((content if isinstance(content, str) else _canon(content)).encode("utf-8"))
+    return h.hexdigest()
+
+
 def prefix_key(body: dict) -> str:
     """Stable key for requests that share a prompt prefix.
 
@@ -24,20 +61,35 @@ def prefix_key(body: dict) -> str:
     """
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
-        if len(messages) > 1:
-            material = _canon(messages[:-1])[:4096]
-        else:
-            first = messages[0]
+        anchor = _anchor(messages) if len(messages) > 1 else messages
+        conversation = len(messages) > 1 and not _is_preamble(anchor[-1])
+        if len(anchor) == 1 and (conversation or len(messages) == 1):
+            # one message: its content, the same rule on the first turn and on later ones
+            first = anchor[0]
             content = first.get("content") if isinstance(first, dict) else first
             material = _text(content)[:512]
+        elif conversation:
+            # uncut: with a system prompt longer than any cap every conversation would share a key
+            return _digest(anchor)
+        else:  # single turn: the system prompt, cut so long shared prompts still meet
+            material = _canon(anchor)[:4096]
     else:
         material = _text(body.get("prompt", ""))[:512]
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _weight(key: str, replica_id: str) -> int:
+def _hash01(key: str, replica_id: str) -> float:
+    """Uniform in (0, 1) per (key, replica)."""
     digest = hashlib.sha256(f"{key}\x00{replica_id}".encode()).digest()
-    return int.from_bytes(digest[:8], "big")
+    # 52 bits + 0.5: exact in a float (at most 1 - 2^-53), never 0 or 1 (log(1) would divide by 0)
+    return ((int.from_bytes(digest[:8], "big") >> 12) + 0.5) / 2.0 ** 52
+
+
+def _score(key: str, c: ReplicaEndpoint) -> float:
+    """Weighted rendezvous hashing: the highest -w / ln(u) wins, so a replica gets a share of the
+    keys proportional to its weight and keys move only to or from a replica that joins or leaves.
+    With equal weights the order is that of u itself (plain rendezvous hashing)."""
+    return -max(c.weight, 1e-9) / math.log(_hash01(key, c.replica_id))
 
 
 class Balancer:
@@ -55,12 +107,14 @@ class Balancer:
         pool = [c for c in candidates if c.replica_id not in excluded]
         if not pool:
             return None
-        ranked = sorted(pool, key=lambda c: (-_weight(key, c.replica_id), c.replica_id))
+        ranked = sorted(pool, key=lambda c: (-_score(key, c), c.replica_id))
         preferred = ranked[0]
-        min_out = min(self.outstanding(c.replica_id) for c in pool)
-        if self.outstanding(preferred.replica_id) > min_out + self.slack:
+        # Load relative to capacity: a replica twice as fast may hold twice the requests.
+        top = max(max(c.weight, 1e-9) for c in pool)
+        load = {c.replica_id: self.outstanding(c.replica_id) * top / max(c.weight, 1e-9) for c in pool}
+        if load[preferred.replica_id] > min(load.values()) + self.slack:
             # ranked is in rendezvous order and min() is stable -> ties go to rendezvous order
-            return min(ranked, key=lambda c: self.outstanding(c.replica_id))
+            return min(ranked, key=lambda c: load[c.replica_id])
         return preferred
 
     def acquire(self, replica_id: str) -> None:

@@ -14,8 +14,8 @@ services:
         CUDA_ARCHS: ${CUDA_ARCHS:-61;70;75;80;86;89;90;120}
         # GitHub-free builds. Defaults match the Dockerfile (an empty value would override a
         # default there, so every non-empty default is repeated here).
-        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b11342}
-        LLAMA_CPP_URL: ${LLAMA_CPP_URL:-https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF:-b11342}.tar.gz}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b11413}
+        LLAMA_CPP_URL: ${LLAMA_CPP_URL:-https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF:-b11413}.tar.gz}
         LLAMA_USE_PREBUILT_UI: ${LLAMA_USE_PREBUILT_UI:-ON}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.10}
         UV_PYTHON_INSTALL_MIRROR: ${UV_PYTHON_INSTALL_MIRROR:-}

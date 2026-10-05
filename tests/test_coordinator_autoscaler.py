@@ -543,3 +543,16 @@ def test_store_failure_does_not_break_scaling(tmp_path):
     r.store.put_state = boom
     r.tick(600)
     assert r.a.desired(spec) == 0  # in-memory state still decided
+
+
+def test_measured_tps_only_from_a_fresh_scrape_that_generated():
+    r = Rig()
+    assert r.a.measured_tps("r1") is None  # never scraped
+    r.a._scrapes["r1"] = _Scrape(ts=r.clock(), processing=0.0, tps=0.0)
+    assert r.a.measured_tps("r1") is None  # has not generated yet
+    r.a._scrapes["r1"] = _Scrape(ts=r.clock(), processing=0.0, tps=38.5)
+    assert r.a.measured_tps("r1") == 38.5
+    r.a._scrapes["r1"].ok = False
+    assert r.a.measured_tps("r1") is None  # last scrape failed
+    r.a._scrapes["r1"] = _Scrape(ts=r.clock() - 100, processing=0.0, tps=38.5)
+    assert r.a.measured_tps("r1") is None  # stale

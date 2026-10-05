@@ -34,9 +34,9 @@ all others) are separate works with their own licenses and acceptable-use polici
 
 | Component | Version | License | Link |
 | --- | --- | --- | --- |
-| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11342` | MIT (per upstream) | <https://github.com/ggml-org/llama.cpp> |
+| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11413` | MIT (per upstream) | <https://github.com/ggml-org/llama.cpp> |
 
-- The **agent image** (`docker/agent.Dockerfile`) compiles llama.cpp b11342 with CUDA and includes the binaries.
+- The **agent image** (`docker/agent.Dockerfile`) compiles llama.cpp b11413 with CUDA and includes the binaries.
 - The **coordinator image** built with `WITH_CONVERT=1` (`docker/coordinator.Dockerfile`) compiles the CPU tools
   `llama-quantize`, `llama-tokenize`, `llama-simple`, `llama-imatrix`, and copies `convert_hf_to_gguf.py`,
   `conversion/` and `gguf-py/` from the same tag into `/opt/llama.cpp`, together with the upstream `LICENSE`
@@ -93,7 +93,7 @@ MIT, MIT and BSD-2-Clause respectively (verified).
 ## Conversion environment (coordinator image with `WITH_CONVERT=1`)
 
 The image contains a separate virtual environment, `/opt/convert-venv`, installed from llama.cpp's
-`requirements/requirements-convert_hf_to_gguf.txt` at tag b11342 (CPU wheel of PyTorch). These packages are not
+`requirements/requirements-convert_hf_to_gguf.txt` at tag b11413 (CPU wheel of PyTorch). These packages are not
 installed in this repository's environment, so their licenses are given per upstream; check the exact set inside the
 image with `docker run --rm --entrypoint /opt/convert-venv/bin/python <image> -m pip list` if you need to be sure.
 
@@ -119,7 +119,7 @@ third-party components with their own notices; see <https://github.com/pytorch/p
 | `python:3.12-slim` (coordinator image base) | Python is under the PSF License; the image also contains Debian packages, each with its own license | <https://docs.python.org/3/license.html>, <https://hub.docker.com/_/python>; per-package texts are in `/usr/share/doc/*/copyright` inside the image |
 | `nvidia/cuda:*-devel-ubuntu*` and `nvidia/cuda:*-runtime-ubuntu*` (agent image base, default CUDA 12.8.1 on Ubuntu 22.04) | NVIDIA CUDA EULA and NVIDIA Deep Learning Container license, plus Ubuntu package licenses | see the notice below |
 | Python 3.12 (agent image; CPython build downloaded by uv) | PSF License | python-build-standalone, <https://github.com/astral-sh/python-build-standalone> |
-| iptables, libgomp1 and other Debian/Ubuntu packages installed in the images | GPL/LGPL and others, per package | texts in `/usr/share/doc/*/copyright` inside the image |
+| iptables, libgomp1, libibverbs1 / ibverbs-providers (rdma-core) and other Debian/Ubuntu packages installed in the images | GPL/LGPL and others, per package | texts in `/usr/share/doc/*/copyright` inside the image |
 
 ### NVIDIA terms for the agent image
 

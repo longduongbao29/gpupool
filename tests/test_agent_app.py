@@ -59,7 +59,7 @@ async def test_report(cfg):
 async def test_engine_endpoints(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)
@@ -233,7 +233,7 @@ async def test_heartbeat_posts_and_survives_errors(cfg):
 async def test_shutdown_stops_engines(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)
@@ -276,7 +276,7 @@ async def test_heartbeat_starts_when_push_enabled(cfg):
 async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
     port = free_port()
     monkeypatch.setattr(procs, "build_command",
-                        lambda s, b, h, m: [sys.executable, "-c", LISTENER.format(port=port)])
+                        lambda s, b, h, m, *_: [sys.executable, "-c", LISTENER.format(port=port)])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
     pm = ProcessManager(tmp_path, cfg.log_dir, "127.0.0.1")
     app = create_app(cfg, pm=pm, start_heartbeat=False)
@@ -306,3 +306,30 @@ async def test_engine_memory_endpoint(cfg, monkeypatch, tmp_path):
             assert (await c.get("/engines/m1/memory", headers=H)).json()["devices"] == {}
     finally:
         pm.stop_all()
+
+
+async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
+    import gpupool.agent.app as appmod
+    monkeypatch.setattr(appmod, "llama_version", lambda d: "b11413")
+    seen = []
+    monkeypatch.setattr(ProcessManager, "start", lambda self, spec, mp=None: seen.append(spec) or
+                        procs.EngineStatus(engine_id=spec.engine_id, kind=spec.kind, state="starting",
+                                           port=spec.port))
+    app = create_app(cfg, start_heartbeat=False)
+    async with client(app) as c:
+        two = {"engine_id": "e1", "kind": "rpc", "port": 9123, "devices": ["CUDA0", "CUDA1"]}
+        assert (await c.post("/engines", json=two, headers=H)).status_code == 200
+        for bad in ([], ["CUDA0", "CUDA0"]):
+            r = await c.post("/engines", json={**two, "engine_id": "e2", "devices": bad}, headers=H)
+            assert r.status_code == 422, bad
+        assert (await c.get("/report", headers=H)).json()["features"] == [
+            "kv_unified", "rpc_multi_device", "spec_mtp"]
+    assert seen[0].devices == ["CUDA0", "CUDA1"]
+
+
+@pytest.mark.parametrize("version, features", [
+    ("b11413", ["kv_unified", "rpc_multi_device", "spec_mtp"]), ("b11342", ["kv_unified", "rpc_multi_device", "spec_mtp"]),
+    ("b9000", []), ("unknown", []), ("x1", [])])
+def test_features_follow_the_llama_build(version, features):
+    from gpupool.agent.app import features_of
+    assert features_of(version) == features

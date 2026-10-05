@@ -19,10 +19,14 @@ fits_now false + requires_preemption when the request priority is 80 or more. PO
   also shows `stop` (an autoscaled model shrinks) and `unplaced` (not enough GPUs);
 - an edit that changes nothing, or only lowers replicas, -> empty / `stop`.
 A `preempted` warning event is seeded.
+Playground: GET /v1/models and POST /v1/chat/completions (stream or not) answer like the real router, with
+x-gpupool-replica, llama-server's `timings` and a cold start for "chat-demand"; "/think" and "/long" in a message
+add a reasoning preamble / a longer reply.
+llama.cpp builds: CTG-Server-2 reports b11342, the others b11413 (a `llama_version_mismatch` warning is seeded).
 Model files: GET /api/library/browse lists /models (host folder /srv/gguf) with an in-library file, a split part and a broken
 link; POST /api/library {path} accepts a listed file by its /models or /srv/gguf path and answers 400 with the long
 "No such file inside the coordinator ..." message for anything else.
-KV cache / speculative decoding: PUT /api/models/{name} takes kv_cache_type (f16|q8_0|q4_0), speculative (none|ngram|draft),
+KV cache / speculative decoding: PUT /api/models/{name} takes kv_cache_type (f16|q8_0|q4_0), speculative (none|ngram|draft|mtp),
 draft_file (ready library file, required for "draft") and draft_n_max (1-16, default 4); 422 for a missing/unready draft, a draft equal to
 the model file, or a tokenizer mismatch (names starting with "llama" vs the others). Specs carry kv_cache_type, speculative, draft
 ("coordinator://<file>" or null) and draft_n_max; placements of draft models carry draft_est_mb. "chat-auto" is seeded with q8_0 + n-gram.
@@ -136,6 +140,10 @@ def reset() -> None:
     add_event("info", "cold_start", "chat-demand was unloaded; a request loaded it (cold start)", None, "chat-demand")
     add_event("info", "scaled_up", "chat-auto scaled up to 2 replicas (busy 0.82 above target 0.70 for 30 s)", None, "chat-auto")
     add_event("warning", "preempted", "chat-batch-1a2b3c stopped to make room for chat-auto (priority 20 < 70)", None, "chat-batch")
+    add_event("warning", "llama_version_mismatch",
+              "Servers run different llama.cpp builds (b11342: CTG-Server-2; b11413: CTG-Server-1, CTG-Server-3). "
+              "A model split over servers needs the same RPC protocol on all of them; builds of one gpupool release "
+              "always match. If launches of split models fail, upgrade every agent to the same image.")
     add_event("warning", "rebalance_failed", "Rebalance of chat-batch aborted: replacement replica did not become ready in time", None, "chat-batch")
     SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
     SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
@@ -155,7 +163,7 @@ def kill(node_id: str) -> None:
         return
     s["alive"] = False
     hit = [m for m in MODELS.values() if any(a["node_id"] == node_id for r in m["replicas"] for a in r["placement"]["assignments"])]
-    add_event("error", "node_offline", f"Server {node_id} went offline (no report for 10 s); {len(hit)} model affected", node_id)
+    add_event("error", "node_offline", f"Server {node_id} went offline (no report for 10 s); {len(hit)} model(s) affected: {', '.join(m['spec']['name'] for m in hit)}" if hit else f"Server {node_id} went offline (no report for 10 s); no model affected", node_id)
     for m in hit:
         add_event("warning", "realloc_started", f"Re-allocating {m['spec']['name']} away from {node_id}", node_id, m["spec"]["name"])
         m["state"], m["replicas"], m["_t"], m["_manual"] = "starting", [], time.time(), False
@@ -222,8 +230,18 @@ def _place(m: dict, replicas: int = 1) -> None:
     m["state"], m["error"] = "running", None
 
 
+SPEED_MODEL = {"eta": 0.52, "hop_ms": 1.8}  # what the coordinator learned from measured speed
+
+
+def _speed_parts(tps: float, hops: int) -> dict:
+    """est_bw_s / est_hops / est_logits_s that give `tps` under SPEED_MODEL (the coordinator's current_tps)."""
+    return {"est_bw_s": (1 / tps - hops * SPEED_MODEL["hop_ms"] / 1000) * SPEED_MODEL["eta"], "est_hops": hops,
+            "est_logits_s": 0.0}
+
+
 def _placement(name: str, chosen: list[tuple[str, str]], draft: str | None = None) -> dict:
-    return {"model": name, "replica_id": f"{name}-plan", "tier": "multi_node" if len({c[0] for c in chosen}) > 1 else "single_node",
+    remote = {c[0] for c in chosen[1:] if c[0] != chosen[0][0]}  # one RPC server per other node
+    return {**_speed_parts(96.4, len(remote)), "model": name, "replica_id": f"{name}-plan", "tier": "multi_node" if len({c[0] for c in chosen}) > 1 else "single_node",
             "head_node": chosen[0][0], "head_port": 9000, "tensor_split": [1.0] * len(chosen), "est_total_mb": 5000 * len(chosen),
             "score": 82.5, "est_decode_tps": 96.4, "draft_est_mb": _draft_mb(draft),
             "reasons": ["fastest GPUs with room (about 1008 GB/s)", "spread: replicas on different GPUs"],
@@ -308,7 +326,10 @@ def _server_json(s: dict) -> dict:
                     "free_mb": s["ram_total_mb"] - s["ram_used_mb"], "usable_mb": 0, "util_pct": None, "temp_c": None,
                     "power_w": None, "processes": [], "driver": None, "cuda": None})
     report = {"node_id": s["node_id"], "agent_url": s["agent_url"], "host": s["host"], "devices": devices, "engines": [],
-              "llama_version": "b4000", "models": [], "ts": s["last_seen"], "cpu_pct": s["cpu_pct"],
+              # CTG-Server-2 runs an older build: the server list flags it (llama_version_mismatch)
+              "llama_version": "b11342" if s["node_id"] == "CTG-Server-2" else "b11413",
+              "features": ["rpc_multi_device", "spec_mtp", "kv_unified"],
+              "models": [], "ts": s["last_seen"], "cpu_pct": s["cpu_pct"],
               "ram_used_mb": s["ram_used_mb"], "ram_total_mb": s["ram_total_mb"]}
     return {"node_id": s["node_id"], "agent_url": s["agent_url"], "added_at": s["added_at"], "alive": s["alive"],
             "last_seen": s["last_seen"], "report": report, "gpu_enabled": dict(s["gpu_enabled"])}
@@ -336,7 +357,7 @@ def _tok_family(file: str) -> str:
 def _perf_fields(body: dict, file: str) -> dict:
     """Validate kv_cache_type / speculative / draft_file / draft_n_max (all optional) like the real API; returns the spec fields."""
     kv = _choice(body.get("kv_cache_type", "f16"), tuple(KV_FACTOR), "kv_cache_type")
-    spec = _choice(body.get("speculative", "none"), ("none", "ngram", "draft"), "speculative")
+    spec = _choice(body.get("speculative", "none"), ("none", "ngram", "draft", "mtp"), "speculative")
     n = _int_in(body.get("draft_n_max", 4), 1, 16, "draft_n_max")
     draft = None
     if spec == "draft":
@@ -354,7 +375,7 @@ def _perf_fields(body: dict, file: str) -> dict:
     if kv != "f16" and fa == "off":
         raise HTTPException(422, f"KV cache {kv} needs flash attention (auto or on)")
     return {"kv_cache_type": kv, "speculative": spec, "draft": draft, "draft_n_max": n,
-            "flash_attn": fa, "ubatch": ub, "batch": b}
+            "flash_attn": fa, "ubatch": ub, "batch": b, "kv_unified": bool(body.get("kv_unified", False))}
 
 
 def _mock_tips(body: dict, perf: dict, ctx: int, parallel: int, need: int, biggest_gpu: int) -> list[dict]:
@@ -422,6 +443,7 @@ def state() -> dict:
         "library": [_clean(i) for i in LIBRARY.values()],
         "settings": dict(SETTINGS),
         "rebalance": {"in_progress": dict(REBAL["in_progress"]) if REBAL["in_progress"] else None, "next_run_ts": REBAL["next_run_ts"]},
+        "speed_model": dict(SPEED_MODEL),
         "events": EVENTS[:50],
         "unread_events": sum(1 for e in EVENTS if not e["read"]),
     }
@@ -940,7 +962,7 @@ REPOS: dict[str, dict] = {
     "acme/novelnet-7b": dict(
         repo="acme/NovelNet-7B", arch="NovelNetForCausalLM", model_type="novelnet", params=7_000_000_000, layers=32, ctx=4096,
         files=[("config.json", 700), ("tokenizer.model", 500_000), ("model.safetensors", 14_000_000_000)], skipped=[], supported=False,
-        warnings=["Architecture NovelNetForCausalLM is not known to the pinned llama.cpp converter (b11342)."]),
+        warnings=["Architecture NovelNetForCausalLM is not known to the pinned llama.cpp converter (b11413)."]),
     "meta-llama/llama-3.1-8b-instruct": dict(
         repo="meta-llama/Llama-3.1-8B-Instruct", arch="LlamaForCausalLM", model_type="llama", params=8_030_261_248, layers=32, ctx=131072,
         files=[("config.json", 855), ("tokenizer.json", 9_085_657)] + [(f"model-0000{i}-of-00004.safetensors", b) for i, b in
@@ -1382,6 +1404,95 @@ def mock_convert_available(body: dict) -> dict:
 
 
 seed_conversions()
+
+
+# ---------------------------------------------------------------- OpenAI-compatible API (Playground)
+_REPLY = ("Sure. gpupool pools the GPUs of several servers and serves a model split across them with llama.cpp "
+          "RPC. The head server runs llama-server, the others run rpc-server, and the router picks the replica "
+          "whose prompt cache already holds your conversation. Each token streams back as soon as it is decoded, "
+          "so the first one arrives after the prompt is processed and the rest follow at the decode speed.")
+_THOUGHT = "The user asks a question. I should answer briefly and mention how the request was served."
+
+
+def _toks(text: str) -> list[str]:
+    return re.findall(r"\s*\S+", text)
+
+
+@app.get("/v1/models", dependencies=[api])
+def v1_models() -> dict:
+    return {"object": "list", "data": [{"id": n, "object": "model", "owned_by": "gpupool"} for n in MODELS]}
+
+
+@app.post("/v1/chat/completions", dependencies=[api])
+async def v1_chat(body: dict):
+    """Like the real router: 404 unknown model, 503 stopped, a cold start for an idle on-demand model, then
+    llama-server's SSE format (role chunk, content / reasoning_content deltas, a last chunk with finish_reason and
+    `timings`, `usage` when stream_options.include_usage) at the replica's estimated speed. "/think" in the last
+    user message adds a reasoning_content preamble; "/long" makes the reply three times longer."""
+    import asyncio
+    import json as _json
+
+    from fastapi.responses import JSONResponse, StreamingResponse
+    name = body.get("model")
+    m = MODELS.get(name)
+    if m is None:
+        return JSONResponse({"error": {"message": f"model '{name}' not found", "type": "invalid_request_error",
+                                       "code": "model_not_found"}}, status_code=404)
+    if m["state"] == "idle":
+        await asyncio.sleep(3.0)  # cold start: the router holds the request while a replica loads
+        if m["state"] == "idle":
+            _place(m)  # sets the replicas and state "running"
+    if m["state"] != "running" or not m.get("replicas"):
+        return JSONResponse({"error": {"message": f"no ready replica for model '{name}'", "type": "server_error",
+                                       "code": "no_replica"}}, status_code=503)
+    rep = m["replicas"][0]
+    tps = float((rep.get("placement") or {}).get("est_decode_tps") or 40.0)
+    msgs = body.get("messages") or []
+    last = next((x.get("content") for x in reversed(msgs) if isinstance(x, dict) and x.get("role") == "user"), "") or ""
+    prompt_n = max(1, sum(len(_toks(str(x.get("content") or ""))) for x in msgs if isinstance(x, dict))) + 12
+    reply = _toks(" ".join([_REPLY] * (3 if "/long" in last else 1)))[: int(body.get("max_tokens") or 10**9)]
+    thought = _toks(_THOUGHT) if "/think" in last else []
+    prompt_s = 0.08 + prompt_n / 2500.0  # prompt processing at ~2500 tok/s
+    cid, created = "chatcmpl-" + uuid.uuid4().hex[:12], int(time.time())
+    headers = {"x-gpupool-replica": rep["replica_id"]}
+
+    def chunk(delta: dict, finish=None, **extra) -> bytes:
+        c = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": name,
+             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}], **extra}
+        return b"data: " + _json.dumps(c).encode() + b"\n\n"
+
+    if not body.get("stream"):
+        await asyncio.sleep(prompt_s + len(reply) / tps)
+        n = len(reply)
+        return JSONResponse({"id": cid, "object": "chat.completion", "created": created, "model": name,
+                             "choices": [{"index": 0, "finish_reason": "stop",
+                                          "message": {"role": "assistant", "content": "".join(reply).strip()}}],
+                             "usage": {"prompt_tokens": prompt_n, "completion_tokens": n, "total_tokens": prompt_n + n}},
+                            headers=headers)
+
+    async def gen():
+        await asyncio.sleep(prompt_s)
+        yield chunk({"role": "assistant", "content": None})
+        t0 = time.time()
+        for t in thought:
+            yield chunk({"reasoning_content": t})
+            await asyncio.sleep(1.0 / tps)
+        for i, t in enumerate(reply):
+            yield chunk({"content": t.lstrip() if i == 0 else t})
+            await asyncio.sleep(1.0 / tps * (0.8 + 0.4 * ((i * 7919) % 13) / 12))
+        n = len(thought) + len(reply)
+        gen_ms = (time.time() - t0) * 1000
+        timings = {"prompt_n": prompt_n, "prompt_ms": prompt_s * 1000, "prompt_per_second": prompt_n / prompt_s,
+                   "predicted_n": n, "predicted_ms": gen_ms, "predicted_per_second": n / max(gen_ms / 1000, 1e-6)}
+        yield chunk({}, "length" if len(reply) < len(_toks(_REPLY)) and body.get("max_tokens") else "stop",
+                    timings=timings)
+        if (body.get("stream_options") or {}).get("include_usage"):
+            u = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": name, "choices": [],
+                 "usage": {"prompt_tokens": prompt_n, "completion_tokens": n, "total_tokens": prompt_n + n}}
+            yield b"data: " + _json.dumps(u).encode() + b"\n\n"
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 app.mount("/", StaticFiles(directory=str(UI_DIR), html=True), name="ui")

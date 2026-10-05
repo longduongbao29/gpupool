@@ -91,6 +91,34 @@ def test_prefix_key_rules():
     assert prefix_key({"prompt": "p" * 600}) == prefix_key({"prompt": "p" * 512 + "x"})
 
 
+def test_prefix_key_keeps_a_conversation_together():
+    sys_msg = {"role": "system", "content": "sys"}
+    turn = lambda n: [sys_msg] + [  # noqa: E731
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"} for i in range(2 * n - 1)]
+    keys = {prefix_key({"messages": turn(n)}) for n in range(2, 8)}
+    assert len(keys) == 1  # every turn after the first: same key, same replica (its KV cache)
+    other = [sys_msg, {"role": "user", "content": "other"}, *turn(3)[2:]]
+    assert prefix_key({"messages": other}) not in keys  # another conversation is free to go elsewhere
+    # without a system prompt the first user message anchors the conversation
+    assert (prefix_key({"messages": turn(3)[1:]}) == prefix_key({"messages": turn(5)[1:]}))
+    # single turn: unchanged, the system prompt is the key
+    assert prefix_key(chat("a")) == prefix_key({"messages": [sys_msg, {"role": "user", "content": "b"}]})
+
+
+def test_router_upstream_pool_is_not_capped(monkeypatch):
+    import gpupool.router.proxy as proxy_mod
+    seen = {}
+
+    def fake_client(**kw):
+        seen.update(kw)
+        return httpx.AsyncClient()
+
+    monkeypatch.setattr(proxy_mod, "internal_client", fake_client)
+    make_router(get_candidates=lambda m: [], list_models=lambda: [], balancer=Balancer(),
+                metrics=RouterMetrics(), api_keys=[], on_replica_error=lambda r: None)
+    assert seen["limits"].max_connections is None
+
+
 def test_balancer_skew_and_release():
     b = Balancer()
     c = [ep(0), ep(1), ep(2)]
@@ -386,3 +414,94 @@ async def test_cold_start_stops_waiting_when_client_disconnects():
                                               (b"content-length", str(len(body)).encode())],
              "server": ("t", 80), "client": ("c", 1), "scheme": "http", "http_version": "1.1", "root_path": ""}
     await asyncio.wait_for(env.app(scope, receive, send), timeout=5)  # far below the 30 s timeout
+
+
+def test_body_is_forwarded_as_received():
+    from gpupool.router.proxy import _with_cache_prompt
+    raw = b'  {"model": "m", "prompt": "h\\u00e9llo",  "x": 1}'
+    out = _with_cache_prompt(raw, json.loads(raw))
+    assert json.loads(out) == {"cache_prompt": True, "model": "m", "prompt": "héllo", "x": 1}
+    assert out.endswith(b'"prompt": "h\\u00e9llo",  "x": 1}')  # client bytes untouched
+    kept = b'{"model":"m","cache_prompt":false}'
+    assert _with_cache_prompt(kept, json.loads(kept)) is kept
+    bom = '﻿{"model": "m"}'.encode("utf-8")
+    assert json.loads(_with_cache_prompt(bom, json.loads(bom))) == {"model": "m", "cache_prompt": True}
+
+
+def test_weighted_rendezvous_shares_keys_by_replica_speed():
+    fast = ReplicaEndpoint(replica_id="fast", model="m", base_url="http://f:1", weight=60.0)
+    slow = ReplicaEndpoint(replica_id="slow", model="m", base_url="http://s:1", weight=20.0)
+    b = Balancer()
+    picks = [b.pick([fast, slow], f"k{i}").replica_id for i in range(4000)]
+    share = picks.count("fast") / len(picks)
+    assert 0.72 < share < 0.78  # 60 / (60 + 20) = 0.75
+    # a replica leaving moves only its own keys
+    third = ReplicaEndpoint(replica_id="third", model="m", base_url="http://t:1", weight=20.0)
+    with3 = [b.pick([fast, slow, third], f"k{i}").replica_id for i in range(4000)]
+    assert all(p == q for p, q in zip(picks, with3) if q != "third")
+
+
+def test_equal_weights_keep_plain_rendezvous_order():
+    import hashlib
+    cands = [ep(0), ep(1), ep(2)]
+
+    def plain(key):  # the pre-weights rule: highest 64-bit hash wins
+        return max(cands, key=lambda c: hashlib.sha256(f"{key}\x00{c.replica_id}".encode()).digest()[:8]).replica_id
+
+    assert all(Balancer().pick(cands, f"k{i}").replica_id == plain(f"k{i}") for i in range(500))
+
+
+def test_load_escape_hatch_counts_load_per_capacity():
+    fast = ReplicaEndpoint(replica_id="fast", model="m", base_url="http://f:1", weight=60.0)
+    slow = ReplicaEndpoint(replica_id="slow", model="m", base_url="http://s:1", weight=20.0)
+    b = Balancer(slack=2)
+    key = next(f"k{i}" for i in range(100) if b.pick([fast, slow], f"k{i}").replica_id == "fast")
+    # load is counted in requests of the fastest replica: one on the slow replica weighs 3
+    b.acquire("slow")
+    for _ in range(5):
+        b.acquire("fast")  # 5 vs 3: within the slack of 2
+    assert b.pick([fast, slow], key).replica_id == "fast"
+    b.acquire("fast")  # 6 > 3 + 2: the slow replica is relatively idler now
+    assert b.pick([fast, slow], key).replica_id == "slow"
+
+
+def test_hash_stays_strictly_inside_zero_and_one(monkeypatch):
+    import hashlib
+    from gpupool.router import balancer as bal
+
+    class Top:  # the largest 64-bit prefix rounded to 1.0 before
+        def digest(self):
+            return b"\xff" * 32
+
+    monkeypatch.setattr(hashlib, "sha256", lambda data: Top())
+    u = bal._hash01("k", "r")
+    assert 0 < u < 1
+    assert bal._score("k", ReplicaEndpoint(replica_id="r", model="m", base_url="http://r:1")) > 0
+
+
+def test_a_chat_without_system_prompt_keeps_its_key_from_the_first_turn():
+    turn1 = {"messages": [{"role": "user", "content": "hello"}]}
+    turn2 = {"messages": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"},
+                          {"role": "user", "content": "more"}]}
+    assert prefix_key(turn1) == prefix_key(turn2)
+
+
+def test_long_system_prompts_do_not_merge_conversations():
+    sys_msg = {"role": "system", "content": "x" * 10_000}  # longer than any cut
+    conv = lambda first: {"messages": [sys_msg, {"role": "user", "content": first},  # noqa: E731
+                                       {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]}
+    assert prefix_key(conv("question A")) != prefix_key(conv("question B"))
+    # single turn: still grouped by (the start of) the shared system prompt
+    single = lambda q: {"messages": [sys_msg, {"role": "user", "content": q}]}  # noqa: E731
+    assert prefix_key(single("a")) == prefix_key(single("b"))
+
+
+async def test_responses_name_the_replica_that_answered():
+    env = Env({"*": ok})
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json=chat())
+        assert r.status_code == 200 and r.headers["x-gpupool-replica"].startswith("r")
+    env = Env({"*": lambda r: sse_response([b"data: 1\n\n", b"data: [DONE]\n\n"])})
+    async with env.client() as c:
+        r = await c.post("/v1/chat/completions", json={**chat(), "stream": True})
+        assert r.headers["x-gpupool-replica"].startswith("r")

@@ -65,8 +65,28 @@ def _error(status: int, message: str, etype: str, code: str) -> JSONResponse:
     )
 
 
+# Which replica answered: lets the Playground (and anyone debugging routing) see where a
+# request went without reading the coordinator's logs.
+REPLICA_HEADER = "x-gpupool-replica"
+
+
 class _Retryable(Exception):
     pass
+
+
+def _with_cache_prompt(raw: bytes, body: dict) -> bytes:
+    """The request as received, with "cache_prompt": true added when the client did not set it.
+
+    The bytes are forwarded rather than re-serialized: a long-context request is megabytes of JSON,
+    and dumping it again costs milliseconds on the event loop that streams every other response.
+    The key is spliced in after the opening brace (the body is a non-empty object: it has "model");
+    anything but plain UTF-8 starting with "{" (a BOM, UTF-16) is re-encoded instead."""
+    if "cache_prompt" in body:
+        return raw
+    stripped = raw.lstrip()
+    if stripped[:1] == b"{":
+        return b'{"cache_prompt":true,' + stripped[1:]
+    return json.dumps({**body, "cache_prompt": True}, ensure_ascii=False).encode("utf-8")
 
 
 def make_router(
@@ -89,7 +109,12 @@ def make_router(
     auth = require_bearer(*api_keys)
     if metrics.balancer is None:
         metrics.balancer = balancer
-    http = client or internal_client(timeout=httpx.Timeout(None, connect=5.0))
+    # httpx defaults to 100 connections in total: request 101 would wait for a free one, with
+    # no pool timeout (None), invisibly in the coordinator instead of in llama-server's slot
+    # queue. llama-server and the balancer are the limit, so the pool is not.
+    http = client or internal_client(
+        timeout=httpx.Timeout(None, connect=5.0),
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
     def check_auth(request: Request) -> JSONResponse | None:
         try:
@@ -124,8 +149,9 @@ def make_router(
             if total > max_body_bytes:
                 return too_big
             chunks.append(chunk)
+        raw = b"".join(chunks)
         try:
-            body = json.loads(b"".join(chunks))
+            body = json.loads(raw)
         except ValueError:
             return _error(400, "request body is not valid JSON",
                           "invalid_request_error", "invalid_json")
@@ -137,8 +163,7 @@ def make_router(
                           "invalid_request_error", "model_not_found")
         if on_request is not None:
             on_request(model)  # may start loading an unloaded model
-        body.setdefault("cache_prompt", True)
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        payload = _with_cache_prompt(raw, body)
         stream = body.get("stream") is True
         key = prefix_key(body)
 
@@ -202,7 +227,8 @@ def make_router(
                         status = resp.status_code
                         await resp.aclose()
                         release()
-                        return Response(content=data, status_code=status, media_type=ctype)
+                        return Response(content=data, status_code=status, media_type=ctype,
+                                        headers={REPLICA_HEADER: rid})
                     it = resp.aiter_raw()
                     try:
                         first: bytes | None = await it.__anext__()
@@ -265,7 +291,7 @@ def make_router(
             # BackgroundTask is a second safety net for the case where the generator is
             # never started (client gone before the first send); cleanup is idempotent.
             return StreamingResponse(gen(), status_code=resp.status_code, media_type=ctype,
-                                     background=BackgroundTask(cleanup))
+                                     headers={REPLICA_HEADER: rid}, background=BackgroundTask(cleanup))
 
     @router.post("/v1/chat/completions")
     async def chat(request: Request):

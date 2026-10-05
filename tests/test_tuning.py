@@ -169,3 +169,20 @@ def test_draft_and_base_model_matching():
     assert not draft_compatible(meta(), meta(0.5, vocab=151936))
     assert not draft_compatible(meta(), meta(0.5, tok="gpt2"))
     assert same_base_model(meta(8), meta(4)) and not same_base_model(meta(), meta(layers=40))
+
+
+async def test_mtp_capable_model_gets_the_mtp_tip_instead_of_ngram():
+    m = meta().model_copy(update={"n_nextn": 1, "nextn_bytes": 512 * 1024 ** 2})
+    tips = await run(SPEC, m, pl(), lambda s: pl(), devices={("a", "CUDA0"): gpu("8.6")})
+    assert "mtp" in ids(tips) and "ngram" not in ids(tips)
+    t = next(t for t in tips if t["id"] == "mtp")
+    assert t["apply"] == {"speculative": "mtp", "draft_n_max": 3}
+
+
+async def test_several_slots_get_the_shared_context_tip():
+    spec = SPEC.model_copy(update={"parallel": 4, "ctx_size": 4096})
+    tips = await run(spec, meta(), pl(), lambda s: pl())
+    t = next(t for t in tips if t["id"] == "kv_unified")
+    assert t["apply"] == {"kv_unified": True}
+    tips = await run(spec.model_copy(update={"kv_unified": True}), meta(), pl(), lambda s: pl())
+    assert not {"kv_unified", "ctx_per_slot"} & set(ids(tips))  # each request may use all 4096

@@ -722,6 +722,29 @@ async def test_plan_for_passes_occupants_to_the_planner(mock_health):
     await rec.shutdown()
 
 
+async def test_rank_for_ranks_off_the_event_loop(mock_health):
+    # ranking a big pool is CPU-bound: on the loop it would stall every streamed response
+    import threading
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000)]))
+    where = []
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: where.append(threading.get_ident()) or []
+    await rec.rank_for(SPEC, 3)
+    assert where and where[0] != threading.get_ident()
+    await rec.shutdown()
+
+
+async def test_simulate_ranks_off_the_event_loop(mock_health):
+    import threading
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000)]))
+    where = []
+    rec.ranker = lambda meta, spec, nodes, occupants=(), limit=5: where.append(threading.get_ident()) or []
+    out = await rec.simulate([SPEC.model_copy(update={"replicas": 1})])
+    assert out["unplaced"] and where and threading.get_ident() not in where
+    await rec.shutdown()
+
+
 async def test_rank_for_applies_pins_and_available_reports(mock_health):
     rec, store, clock = make_reconciler()
     beat(store, clock, node("a", devices=[dev("CUDA0", usable=5000), dev("CUDA1", usable=6000)]),
@@ -1847,4 +1870,272 @@ async def test_launch_sends_attention_and_batches(mock_health):
     await settle(rec)
     hs = next(c[3] for c in client.calls if c[0] == "start")
     assert (hs.flash_attn, hs.ubatch, hs.batch) == ("on", 1024, 4096)
+    await rec.shutdown()
+
+
+async def test_launch_downloads_the_model_while_rpc_engines_start(mock_health):
+    # The download must already be running when the RPC engines start: here it only finishes
+    # once an RPC engine was started, which a download-after-engines order would never allow.
+    class Overlap(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.rpc_started = asyncio.Event()
+
+        async def start_engine(self, url, spec):
+            if spec.kind == "rpc":
+                await asyncio.sleep(0)  # let the download begin first
+                self.rpc_started.set()
+            return await super().start_engine(url, spec)
+
+        async def ensure_model(self, url, name, source):
+            self.calls.append(("ensure", url, name, source))
+            await asyncio.wait_for(self.rpc_started.wait(), 2)
+            return "/cache/" + name
+
+    client = Overlap()
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    assert client.kinds() == ["ensure", "start", "start"]  # head last, after both
+    await rec.shutdown()
+
+
+async def test_failed_rpc_start_cancels_the_download_and_rolls_back(mock_health):
+    class SlowDownload(FakeClient):
+        cancelled = False
+
+        async def start_engine(self, url, spec):
+            await asyncio.sleep(0.01)  # the download is under way when this start fails
+            return await super().start_engine(url, spec)
+
+        async def ensure_model(self, url, name, source):
+            self.calls.append(("ensure", url, name, source))
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    client = SlowDownload()
+    client.fail_start_on = "-rpc-CUDA0"
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await asyncio.wait_for(settle(rec), 5)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "boom" in (r.error or "")
+    assert client.cancelled and client.engines == {}
+    assert not any(c[0] == "start" and c[2].endswith("-head") for c in client.calls)
+    await rec.shutdown()
+
+
+async def test_launch_starts_one_rpc_engine_for_a_shared_endpoint(mock_health):
+    from gpupool.common.models import DeviceAssignment, Placement
+    from gpupool.coordinator.reconciler import engine_ids
+
+    def planner(meta, spec, nodes, rid, port_alloc, **kw):
+        port = port_alloc("b")
+        ep = f"10.0.0.2:{port}"
+        asg = [DeviceAssignment(node_id="a", device_id="CUDA0", llama_device="CUDA0", layers=2, est_mb=10),
+               DeviceAssignment(node_id="b", device_id="CUDA0", llama_device="RPC0", rpc_endpoint=ep,
+                                layers=2, est_mb=10),
+               DeviceAssignment(node_id="b", device_id="CUDA1", llama_device="RPC1", rpc_endpoint=ep,
+                                layers=2, est_mb=10)]
+        return Placement(model=spec.name, replica_id=rid, tier="multi_node", head_node="a",
+                         head_port=port_alloc("a"), assignments=asg, tensor_split=[2.0] * 3, est_total_mb=30)
+
+    client = FakeClient()
+    rec, store, clock = make_reconciler(planner=planner, client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "ready"
+    starts = [c[3] for c in client.calls if c[0] == "start"]
+    rpc = [s for s in starts if s.kind == "rpc"]
+    head = next(s for s in starts if s.kind == "server")
+    assert len(rpc) == 1 and rpc[0].devices == ["CUDA0", "CUDA1"]
+    assert rpc[0].engine_id == f"{r.replica_id}-rpc-CUDA0"
+    assert head.rpc_endpoints == [r.placement.assignments[1].rpc_endpoint]  # listed once
+    assert head.devices == ["CUDA0", "RPC0", "RPC1"]
+    assert engine_ids(r) == [("a", f"{r.replica_id}-head"), ("b", f"{r.replica_id}-rpc-CUDA0")]
+    await rec.shutdown()
+
+
+async def test_draft_goes_to_the_heads_gpu_even_when_remote_devices_come_first(mock_health):
+    from gpupool.common.models import DeviceAssignment, Placement
+
+    def planner(meta, spec, nodes, rid, port_alloc, **kw):
+        ep = f"10.0.0.2:{port_alloc('b')}"
+        asg = [DeviceAssignment(node_id="b", device_id="CUDA0", llama_device="RPC0", rpc_endpoint=ep,
+                                layers=2, est_mb=10),
+               DeviceAssignment(node_id="a", device_id="CUDA0", llama_device="CUDA0", layers=2, est_mb=10)]
+        return Placement(model=spec.name, replica_id=rid, tier="multi_node", head_node="a",
+                         head_port=port_alloc("a"), assignments=asg, tensor_split=[2.0, 2.0], est_total_mb=20)
+
+    client = FakeClient()
+    rec, store, clock = make_reconciler(planner=planner, client=client)
+    rec.meta_for = _meta_by_source()
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(DSPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    hs = next(c[3] for c in client.calls if c[0] == "start" and c[3].kind == "server")
+    assert hs.devices == ["RPC0", "CUDA0"] and hs.draft_device == "CUDA0"
+    await rec.shutdown()
+
+
+async def test_launch_with_mtp_sends_spec_type_and_draft_tokens(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    capable = node("a")
+    capable.features = ["spec_mtp"]
+    beat(store, clock, capable)
+    store.put_model(SPEC.model_copy(update={"speculative": "mtp", "draft_n_max": 3, "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert (hs.spec_type, hs.draft_n_max, hs.draft_model_path) == ("mtp", 3, None)
+    assert client.kinds() == ["ensure", "start"]  # no second file
+    await rec.shutdown()
+
+
+async def test_rpc_engine_that_exits_fails_the_launch_with_its_log(mock_health):
+    class DyingRpc(FakeClient):
+        async def get_engine(self, url, engine_id):
+            st = await super().get_engine(url, engine_id)
+            if st is not None and "-rpc-" in engine_id:
+                st = st.model_copy(update={"state": "failed", "log_tail": ["CUDA error: out of memory"]})
+            return st
+
+    client = DyingRpc()
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "out of memory" in r.error
+    assert not any(c[0] == "start" and c[2].endswith("-head") for c in client.calls)
+    assert client.engines == {}  # rolled back
+
+
+async def test_head_that_exits_before_health_fails_the_launch():
+    client = FakeClient()
+    client.head_state = "exited"
+    with respx.mock(assert_all_called=False) as m:
+        m.get(url__regex=HEALTH).mock(side_effect=httpx.ConnectError("not listening"))
+        rec, store, clock = make_reconciler(client=client)
+        beat(store, clock, node("a"))
+        store.put_model(SPEC)
+        await rec.tick()
+        await settle(rec)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "head engine exited" in r.error
+    assert client.engines == {}
+
+
+async def test_mixed_llama_builds_raise_one_warning_per_change():
+    rec, store, clock = make_reconciler()
+
+    def report(node_id, version):
+        n = node(node_id)
+        n.llama_version = version
+        return n
+
+    beat(store, clock, report("a", "b11413"), report("b", "b11413"), report("c", "unknown"))
+    await rec.tick()
+    assert not [e for e in store.list_events() if e.kind == "llama_version_mismatch"]
+    beat(store, clock, report("b", "b11342"))
+    await rec.tick()
+    await rec.tick()  # same situation: no second event
+    ev = [e for e in store.list_events() if e.kind == "llama_version_mismatch"]
+    assert len(ev) == 1 and ev[0].level == "warning"
+    assert "b11342: b" in ev[0].message and "b11413: a" in ev[0].message
+    await rec.shutdown()
+
+
+# ---------------------------------------------------------------- speed model
+class _Measured:
+    def __init__(self, tps):
+        self.tps = tps
+
+    def measured_tps(self, rid):
+        return self.tps.get(rid)
+
+
+def _speed_rig(planner=None, **spec_kw):
+    from gpupool.common.models import ModelMeta
+    meta = ModelMeta(arch="llama", n_layers=4, n_embd=64, n_head=4, n_head_kv=4, head_dim=16,
+                     layer_bytes=[250_000_000] * 4, other_bytes=0, output_bytes=0, vocab_size=100_000)
+    rec, store, clock = make_reconciler(planner=planner)
+
+    async def meta_for(spec):
+        return meta
+
+    rec.meta_for = meta_for
+    gpu = dev().model_copy(update={"bandwidth_gbps": 100.0})
+    beat(store, clock, node("a", devices=[gpu]), node("b", devices=[gpu]))
+    store.put_model(SPEC.model_copy(update={"replicas": 0, **spec_kw}))
+    return rec, store, clock
+
+
+async def test_single_server_replicas_teach_eta():
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig()
+    put_replica(store, "m-1", now=clock())  # its 2 layers (0.5 GB) on a/CUDA0 at 100 GB/s: 5 ms at eta 1
+    rec.autoscaler = _Measured({"m-1": 140.0})  # 140 tok/s -> eta 0.7
+    nodes = rec._node_map()
+    await rec._learn_speed(nodes, clock())
+    assert speed_model().eta == pytest.approx(0.5 + 0.2 * (0.7 - 0.5))
+    await rec._learn_speed(nodes, clock() + 1)  # within SPEED_SAMPLE_S: no second sample
+    assert speed_model().eta == pytest.approx(0.54)
+    assert store.get_state("speed_model")["eta"] == pytest.approx(0.54)
+    rec2, *_ = make_reconciler(store=store)  # a restarted coordinator starts from the saved model
+    assert speed_model().eta == pytest.approx(0.54)
+    await rec.shutdown()
+
+
+async def test_split_replicas_teach_the_hop_cost():
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig()
+    r = put_replica(store, "m-1", rpc_node="b", now=clock())  # 2 + 2 layers, a local + b over RPC
+    # bandwidth time at eta 0.5: 1 GB / 100 GB/s / 0.5 = 20 ms; measured 1 / 22 ms -> 2 ms on the hop
+    # put_replica's last device is remote: the logits (100k x 4 B at 125 MB/s = 3.2 ms) are added too
+    rec.autoscaler = _Measured({"m-1": 1 / (0.020 + 0.0032 + 0.010)})  # 10 ms really spent on the hop
+    await rec._learn_speed(rec._node_map(), clock())
+    assert r.placement.assignments[-1].node_id == "b"
+    assert speed_model().hop_s == pytest.approx(0.002 + 0.2 * (0.010 - 0.002))
+    assert speed_model().eta == 0.5  # split replicas never move eta
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("kw", [{"parallel": 4}, {"speculative": "ngram"}])
+async def test_speed_samples_only_from_one_plain_stream(kw):
+    from gpupool.scheduler.scoring import speed_model
+    rec, store, clock = _speed_rig(**kw)
+    put_replica(store, "m-1", now=clock())
+    rec.autoscaler = _Measured({"m-1": 90.0})
+    await rec._learn_speed(rec._node_map(), clock())
+    assert (speed_model().eta, store.get_state("speed_model")) == (0.5, None)
+    await rec.shutdown()
+
+
+async def test_mtp_on_a_head_without_it_serves_without_speculation(mock_health):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))  # an older agent: no features
+    store.put_model(SPEC.model_copy(update={"speculative": "mtp", "replicas": 1}))
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    assert hs.spec_type == "none"
+    assert any(e.kind == "mtp_unavailable" and e.level == "warning" for e in store.list_events())
     await rec.shutdown()

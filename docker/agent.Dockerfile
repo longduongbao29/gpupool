@@ -12,6 +12,10 @@
 #   on the server's own IP. --pid host: NVML reports host PIDs; without it GPU process names
 #   would be looked up in the container's PID namespace and come out wrong.
 #
+# RDMA (RoCE / InfiniBand) between RPC servers and the head: add --device /dev/infiniband
+#   --cap-add IPC_LOCK --ulimit memlock=-1 on every server; llama.cpp then negotiates RDMA per
+#   connection and stays on TCP wherever either side lacks it (GGML_RPC_NO_RDMA=1 forces TCP).
+#
 # CUDA 12.8 is the first toolkit that builds for Blackwell (RTX 50-series, sm_120). It runs on
 # drivers >= 525 through CUDA minor-version compatibility; RTX 50-series cards themselves need a
 # driver >= 570. For older drivers rebuild with a lower CUDA_VERSION (and without 120 in CUDA_ARCHS).
@@ -43,8 +47,9 @@ ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10
 FROM ${UV_IMAGE} AS uv
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama
-# Pinned: the RPC protocol must match on every server, and gpupool was tested on b11342.
-ARG LLAMA_CPP_REF=b11342
+# Pinned: the RPC protocol must match on every server (upgrade every agent together). b11413 since
+# gpupool 0.6; the GPU measurements in docs/TEST_REPORT were taken on b11342 (same RPC protocol 7.0.0).
+ARG LLAMA_CPP_REF=b11413
 # Compute capabilities to compile kernels for. 61 Pascal, 70 Volta, 75 Turing, 80/86 Ampere,
 # 89 Ada, 90 Hopper, 120 Blackwell (RTX 5090/5080, RTX PRO 6000; needs CUDA >= 12.8, and
 # llama.cpp turns it into 120a for the FP4 tensor cores). Fewer archs = much faster build.
@@ -54,8 +59,11 @@ ARG CUDA_ARCHS="61;70;75;80;86;89;90;120"
 ARG LLAMA_CPP_URL=https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_REF}.tar.gz
 # The llama-server web UI is fetched from Hugging Face during the build; failure is only a warning.
 ARG LLAMA_USE_PREBUILT_UI=ON
+# libibverbs-dev: ggml-rpc builds its RDMA transport (RoCE / InfiniBand) when libibverbs is found.
+# It is negotiated per connection and falls back to TCP when either side has no RDMA device, so
+# the same image serves both kinds of network.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git curl ca-certificates libssl-dev libgomp1 \
+        build-essential cmake git curl ca-certificates libssl-dev libgomp1 libibverbs-dev \
     && rm -rf /var/lib/apt/lists/*
 # Fetch the source. The vendor/ bind mount is read-only and never becomes a layer.
 # The short commit goes to /src/.gpupool-commit for the build step: a tarball has no .git (GitHub
@@ -84,14 +92,14 @@ WORKDIR /src
 # Without .git, llama.cpp's CMake cannot derive the build number (a --depth 1 clone would report 1
 # too), so pass it explicitly: tag bNNNN -> build number NNNN. `llama-server --version` prints it
 # and the agent reports it as llama_version. LLAMA_BUILD_NUMBER / LLAMA_BUILD_COMMIT are honoured
-# by CMakeLists.txt (`if (NOT DEFINED ...)`), verified against tag b11342.
+# by CMakeLists.txt (`if (NOT DEFINED ...)`), verified against tag b11413.
 # --allow-shlib-undefined: libcuda.so comes from the host driver at run time, only a stub
 # exists in the build image.
 RUN num="${LLAMA_CPP_REF#b}"; \
     case "$num" in ''|*[!0-9]*) num=0 ;; esac; \
     commit="$(cat /src/.gpupool-commit)"; \
     cmake -B build -DGGML_NATIVE=OFF -DGGML_CUDA=ON -DGGML_RPC=ON \
-        -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
+        -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_RPC_RDMA=ON \
         -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
         -DLLAMA_BUILD_NUMBER="$num" -DLLAMA_BUILD_COMMIT="${commit:-unknown}" \
         -DLLAMA_USE_PREBUILT_UI="${LLAMA_USE_PREBUILT_UI}" \
@@ -114,8 +122,9 @@ RUN mkdir -p /out \
     && find build -name "*.so*" -exec cp -P {} /out/ \;
 
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+# libibverbs1 + ibverbs-providers (mlx5, ...): libggml-rpc links libibverbs for the RDMA transport.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl libgomp1 libssl3 iptables \
+        ca-certificates curl libgomp1 libssl3 iptables libibverbs1 ibverbs-providers \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/uv
 COPY --from=llama /out /opt/llama

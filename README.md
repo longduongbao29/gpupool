@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![GHCR images](https://img.shields.io/badge/images-GHCR-5563f5?logo=docker&logoColor=white)](https://github.com/longduongbao29?tab=packages&repo_name=gpupool)
-[![llama.cpp b11342](https://img.shields.io/badge/llama.cpp-b11342-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11342)
+[![llama.cpp b11413](https://img.shields.io/badge/llama.cpp-b11413-8b5cf6)](https://github.com/ggml-org/llama.cpp/releases/tag/b11413)
 [![OpenAI-compatible](https://img.shields.io/badge/API-OpenAI--compatible-10a37f)](docs/API.en.md)
 
 [Quick start](#quick-start) · [Features](#features) · [Architecture](#architecture) · [What fits](#what-fits-where) · [API](#using-the-api) · [Docs](#documentation) · [FAQ](#faq)
@@ -63,14 +63,15 @@ When a better placement exists, the new replica is ready before the old one stop
 <tr>
 <td valign="top">
 
-**KV cache quantization**<br>
-`f16`, `q8_0`, `q4_0` to fit a model on fewer GPUs.
+**KV cache: quantized, shared, sized right**<br>
+`f16`, `q8_0`, `q4_0`; one pool shared by the slots; estimates follow each model's real cache layout
+(sliding window, MLA, hybrid).
 
 </td>
 <td valign="top">
 
 **Speculative decoding**<br>
-`ngram` or a `draft` model, to cut RPC round trips when a model is split.
+`ngram`, a `draft` model or the model's own `mtp` layers, to cut RPC round trips when a model is split.
 
 </td>
 <td valign="top">
@@ -118,7 +119,8 @@ Control state lives in SQLite and survives coordinator restarts, including launc
 <td valign="top">
 
 **Web UI and Docker images**<br>
-Servers, GPUs, models, deployments, recommendations, events. Images build without GitHub access and behind HTTP proxies.
+Servers, GPUs, models, deployments, recommendations, events, and a Playground that streams a deployed model's replies with
+their time to first token and tokens/s. Images build without GitHub access and behind HTTP proxies.
 
 </td>
 </tr>
@@ -292,10 +294,11 @@ huggingface.co; `--skip-convert` leaves it out.
 From the "still to do" and open-question lists in the [test report](docs/TEST_REPORT.en.md) and the
 [platform design](docs/PLATFORM_DESIGN.en.md#10-open-questions-and-decisions).
 
-- [ ] Run on a real multi-server LAN, and measure speculative decoding over a real network
+- [ ] Run on a real multi-server LAN, and measure speculative decoding (n-gram, draft, MTP), one RPC server per
+  multi-GPU server and RDMA over a real network
 - [ ] Per-client API keys and quotas, `/v1/embeddings`, TLS
 - [ ] Zero-downtime model swap
-- [ ] Upgrade llama.cpp
+- [x] Upgrade llama.cpp (b11342 → b11413)
 - [ ] Decode-speed model per GPU architecture (today a single fixed efficiency of 0.5) and a separate prefill score
 - [ ] Importance matrices on GPU servers; distributing conversion jobs over several machines
 - [ ] LoRA adapters and vision projectors (`mmproj`) in conversion
@@ -306,7 +309,19 @@ From the "still to do" and open-question lists in the [test report](docs/TEST_RE
 <summary><b>Do all servers need the model file?</b></summary>
 
 No. Only the head (`llama-server`) holds the GGUF. In the simulated cluster, a 2.1 GB model was held by the head only,
-while the RPC server held a tensor cache of about 724 MB.
+while the RPC server held a tensor cache of about 724 MB. That cache lives on the agent's `/data` volume, so the next
+load of the model sends almost nothing over the network, and is capped at `GPUPOOL_RPC_CACHE_GB` (100 GB).
+
+</details>
+
+<details>
+<summary><b>How fast is a model split over the network?</b></summary>
+
+Every generated token crosses each RPC link once, so latency matters more than bandwidth. gpupool keeps the hops
+down: one GPU or one server is preferred whenever the model fits, the GPUs a replica uses inside one remote server sit
+behind a single RPC server (activations between them never leave that machine), speculative decoding (n-gram, a
+draft model, or the model's own MTP layers) cuts the number of passes per token, and the agent image uses RDMA
+(InfiniBand / RoCE) when the servers have it. See [Network](docs/QUICKSTART.en.md#network).
 
 </details>
 
@@ -324,7 +339,7 @@ newer (RTX 50-series cards need 570 or newer). GPU servers need Docker and the N
 
 Yes: `uv run gpupool coordinator`, and on each GPU server
 `uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir <llama.cpp build/bin>`.
-The agent needs a llama.cpp b11342 build with CUDA and RPC. See "Without Docker" in the
+The agent needs a llama.cpp b11413 build with CUDA and RPC. See "Without Docker" in the
 [quick start](docs/QUICKSTART.en.md).
 
 </details>
@@ -333,7 +348,7 @@ The agent needs a llama.cpp b11342 build with CUDA and RPC. See "Without Docker"
 <summary><b>Can I serve safetensors models?</b></summary>
 
 Yes, by converting them to GGUF in the coordinator (UI or `/api/convert`). Support depends on the pinned converter
-(llama.cpp b11342): an unsupported architecture is reported at the inspect step. LoRA adapters and vision projectors
+(llama.cpp b11413): an unsupported architecture is reported at the inspect step. LoRA adapters and vision projectors
 are not converted yet.
 
 </details>
@@ -352,7 +367,8 @@ on a private network or VPN, and put a TLS-terminating proxy in front of the coo
 <summary><b>Can I mix different GPUs?</b></summary>
 
 Yes. The scheduler reads each GPU's memory and ranks placements by estimated decode speed using memory bandwidth,
-network hops and GPU sharing. The estimate uses one fixed efficiency for every GPU, so treat its tok/s figures as a ranking,
+network hops and GPU sharing (for MoE models, only the experts a token reads count). The estimate uses one fixed
+efficiency for every GPU, so treat its tok/s figures as a ranking,
 not a promise. Spreading over real multi-GPU, multi-server hardware is verified only with
 simulated agents.
 

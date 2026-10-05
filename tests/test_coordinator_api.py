@@ -161,7 +161,7 @@ async def test_state_shape_and_summary(env):
     store.upsert_node(node("a", devices=[dev("CUDA0"), dev("CUDA1")]), clock())  # ...except a
     st = (await c.get("/api/state")).json()
     assert set(st) == {"summary", "servers", "models", "library", "settings", "events", "unread_events",
-                      "rebalance"}
+                      "rebalance", "speed_model"}
     assert [s["node_id"] for s in st["servers"]] == ["a", "b", "c", "never"]
     never = st["servers"][3]
     assert never["alive"] is False and never["report"] is None and never["last_seen"] == 0.0
@@ -255,7 +255,7 @@ async def test_put_model_create_update_validation(env):
                         "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
                         "preemptible": True, "kv_cache_type": "f16", "speculative": "none",
                         "draft": None, "draft_n_max": 4, "flash_attn": "auto", "batch": 2048,
-                        "ubatch": 512}
+                        "ubatch": 512, "kv_unified": False}
     store.put_model(store.get_model("qwen").model_copy(update={"replicas": 2}))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf", "ctx_size": 8192, "parallel": 2,
                                               "pin_devices": ["a/CUDA0", "a/CUDA0"]})
@@ -863,3 +863,24 @@ async def test_recommend_tip_failure_keeps_the_answer(env, monkeypatch):
     monkeypatch.setattr(api_mod, "suggest", boom)
     j = (await c.post("/api/recommend", json={"file": "x.gguf"})).json()
     assert j["tips"] == [] and len(j["options"]) == 1
+
+
+async def test_put_model_mtp_needs_nextn_blocks(env):
+    c, store, rec, _, clock, lib = env
+    register(store, clock, node("a"))
+    put = lambda **kw: c.put("/api/models/m", json={"file": "x.gguf", "speculative": "mtp", **kw})
+    r = await put()
+    assert r.status_code == 422 and "nextn" in r.json()["detail"]
+    assert store.get_model("m") is None
+    _metas(env, **{"x.gguf": {"n_nextn": 1, "nextn_bytes": 1 << 20}})
+    r = await put(draft_n_max=3)
+    assert r.status_code == 200
+    assert (r.json()["speculative"], r.json()["draft"], r.json()["draft_n_max"]) == ("mtp", None, 3)
+
+
+async def test_state_shows_the_speed_model(env):
+    from gpupool.scheduler.scoring import set_speed_model
+    c, *_ = env
+    assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.5, "hop_ms": 2.0}
+    set_speed_model(0.62, 0.0007)
+    assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.62, "hop_ms": 0.7}

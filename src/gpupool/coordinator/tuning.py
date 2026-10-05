@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from gpupool.common.cuda import arch_name, has_tensor_cores, parse_cc
 from gpupool.common.models import DEFAULT_UBATCH, Device, LibraryItem, ModelMeta, ModelSpec, Placement
-from gpupool.scheduler.estimate import compute_mb, kv_bytes_per_layer
+from gpupool.scheduler.estimate import compute_mb, kv_total_bytes
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +145,10 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
             fa = {"flash_attn": "auto"} if spec.flash_attn == "off" else {}  # quantized V needs FA
             p = await try_rank(spec.model_copy(update={"kv_cache_type": kv, **fa}))
             if p is not None and _tier(p) < _tier(best):
-                saved = (kv_bytes_per_layer(meta, spec.ctx_size, spec.kv_cache_type)
-                         - kv_bytes_per_layer(meta, spec.ctx_size, kv)) * meta.n_layers / 1024 ** 2
+                kw = {"parallel": spec.parallel, "ubatch": spec.ubatch, "mtp": spec.speculative == "mtp",
+                      "kv_unified": spec.kv_unified}
+                saved = (kv_total_bytes(meta, spec.ctx_size, spec.kv_cache_type, **kw)
+                         - kv_total_bytes(meta, spec.ctx_size, kv, **kw)) / 1024 ** 2
                 quality = "negligible quality loss" if kv == "q8_0" else "a small quality loss"
                 tips.append(_tip("kv_cache", "fix", f"Quantize the KV cache to {kv} to {goal}",
                                  f"Saves about {_mb(saved)} of KV memory with {quality}; "
@@ -194,7 +196,15 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                                  + (f" Costs about {_mb(extra)} more KV memory." if extra and extra > 0 else ""),
                                  {"parallel": n, "ctx_size": spec.ctx_size * n}, p))
                 break
-    elif per_slot < MIN_CTX_PER_SLOT:
+    if spec.parallel > 1 and not spec.kv_unified:
+        # one shared KV pool: a long request may take the whole context while others are short
+        p = await try_rank(spec.model_copy(update={"kv_unified": True}))
+        if p is not None and _tier(p) <= _tier(best):
+            tips.append(_tip("kv_unified", "fix", "Share the context between the slots",
+                             f"Today each of the {spec.parallel} slots owns {per_slot} tokens. A shared KV "
+                             f"pool lets any one request use up to {spec.ctx_size} tokens while the others "
+                             "are short, at the same memory.", {"kv_unified": True}, p))
+    if spec.parallel > 1 and per_slot < MIN_CTX_PER_SLOT and not spec.kv_unified:
         want = MIN_CTX_PER_SLOT * spec.parallel
         p = await try_rank(spec.model_copy(update={"ctx_size": want}))
         if p is not None and _tier(p) <= _tier(best):
@@ -203,9 +213,23 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                              f"{per_slot} tokens today, so long prompts fail or get truncated.",
                              {"ctx_size": want}, p))
 
+    # -- MTP: the model's own multi-token-prediction blocks draft the next tokens. No second file,
+    #    no tokenizer to match, and the drafts come from the model itself (high acceptance).
+    if meta.n_nextn and spec.speculative in ("none", "ngram"):
+        v = spec.model_copy(update={"speculative": "mtp", "draft": None, "draft_n_max": 3})
+        p = await try_rank(v)
+        if p is not None and _tier(p) <= _tier(best):
+            hops = " and fewer network round trips" if best is not None and best.tier == "multi_node" else ""
+            tips.append(_tip("mtp", "speed", "Speculative decoding with the model's own MTP blocks",
+                             "This GGUF ships multi-token-prediction layers: llama.cpp drafts with them, "
+                             f"usually 1.5-2x faster generation{hops}; costs about "
+                             f"{_mb(meta.nextn_bytes / 1024 ** 2)} plus their KV, no extra model file.",
+                             {"speculative": "mtp", "draft_n_max": 3}, p))
+
     # -- speculative decoding: a small model of the same family drafts tokens the big one verifies
     #    in one pass. Wins most on big models and when the model spans servers (fewer round trips).
-    if spec.speculative != "draft" and meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES:
+    if (spec.speculative not in ("draft", "mtp") and not any(t["id"] == "mtp" for t in tips)
+            and meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES):
         if lib_metas is None:
             lib_metas = await metas()
         drafts = [(i, m) for i, m in lib_metas
@@ -227,7 +251,7 @@ async def suggest(spec: ModelSpec, meta: ModelMeta, best: Placement | None, *, r
                                  f"costs about {_mb((m.file_bytes or 0) / 1024 ** 2)} plus its KV on the head GPU.",
                                  {"speculative": "draft", "draft_file": item.name, "draft_n_max": n_max}, p))
                 break
-    if spec.speculative == "none" and not any(t["id"] == "draft" for t in tips):
+    if spec.speculative == "none" and not any(t["id"] in ("draft", "mtp") for t in tips):
         big = bool(meta.file_bytes and meta.file_bytes >= DRAFT_MIN_TARGET_BYTES)
         more = (" A draft model would help more: add a small model of the same family to the library."
                 if big else "")

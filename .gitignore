@@ -20,3 +20,5 @@ models/
 vendor/*
 !vendor/.gitkeep
 !vendor/README.md
+.coverage
+htmlcov/

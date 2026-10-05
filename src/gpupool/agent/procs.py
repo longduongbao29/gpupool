@@ -73,11 +73,22 @@ def llama_cuda_archs(llama_dir: Path) -> list[str] | None:
     return archs or None
 
 
+PROBABILISTIC_DRAFT_BUILD = 11413  # first llama.cpp build with --spec-draft-sampling
+
+
+def build_number(version: str) -> int | None:
+    """'b11413' -> 11413; None for 'unknown' or anything else."""
+    return int(version[1:]) if version.startswith("b") and version[1:].isdigit() else None
+
+
 def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
-                  model_path: str | None) -> list[str]:
+                  model_path: str | None, llama_build: int | None = None) -> list[str]:
     if spec.kind == "rpc":
+        # One process for every device of the replica on this server: llama.cpp then copies
+        # activations between them inside the server (RPC_CMD_COPY_TENSOR) instead of through the
+        # head, which a process per device forces (two network transfers per boundary).
         return [str(bins["rpc"]), "-H", bind_host, "-p", str(spec.port),
-                "-d", spec.devices[0], "-c", *spec.extra_args]
+                "-d", ",".join(spec.devices), "-c", *spec.extra_args]
     if not model_path:
         raise ValueError("server engine needs a model_path")
     cmd = [str(bins["server"]), "-m", model_path, "--host", bind_host, "--port", str(spec.port),
@@ -102,6 +113,8 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
     # Only non-defaults, so a default spec launches exactly as before these options existed.
     if spec.flash_attn != "auto":
         cmd += ["-fa", spec.flash_attn]
+    if spec.kv_unified:
+        cmd += ["-kvu"]
     batch = max(spec.batch, spec.ubatch)  # llama.cpp caps ubatch at batch; keep what was asked
     if batch != DEFAULT_BATCH:
         cmd += ["-b", str(batch)]
@@ -110,6 +123,9 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
     # b11342: without --spec-type, -md loads the draft model but never uses it.
     if spec.spec_type == "ngram":
         cmd += ["--spec-type", "ngram-mod"]
+    elif spec.spec_type == "mtp":
+        # b11342: loads the model's nextn blocks (skipped otherwise) into a second context
+        cmd += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(spec.draft_n_max)]
     elif spec.spec_type == "draft":
         if not spec.draft_model_path or not spec.draft_device:
             raise ValueError("draft speculative decoding needs draft_model_path and draft_device")
@@ -118,6 +134,11 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
                 "--spec-draft-n-max", str(spec.draft_n_max)]
         if spec.cache_type != "f16":
             cmd += ["-ctkd", spec.cache_type, "-ctvd", spec.cache_type]
+    if spec.spec_type in ("draft", "mtp") and (llama_build or 0) >= PROBABILISTIC_DRAFT_BUILD:
+        # Sample the draft and verify by rejection (min(1, p/q)) instead of matching its argmax:
+        # the output distribution is exactly the target's, and at temperature > 0 more drafts are
+        # accepted (llama.cpp #27694: +4-8 % throughput for draft-simple and draft-mtp).
+        cmd += ["--spec-draft-sampling", "probabilistic"]
     return cmd + list(spec.extra_args)
 
 
@@ -181,14 +202,21 @@ class _Engine:
 
 class ProcessManager:
     def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str, rpc_firewall: bool = False,
-                 firewall: RpcFirewall | None = None):
+                 firewall: RpcFirewall | None = None, llama_cache: Path | None = None):
         self.llama_dir = Path(llama_dir)
         self.log_dir = Path(log_dir)
+        # LLAMA_CACHE for the engines: `ggml-rpc-server -c` keeps received weight tensors under
+        # $LLAMA_CACHE/rpc so the next load of the same model skips the network transfer. Its
+        # default (~/.cache/llama.cpp) is the container's writable layer in the agent image:
+        # lost on every image upgrade or `docker rm`. A LLAMA_CACHE set by the user wins.
+        self.llama_cache = Path(llama_cache) if llama_cache is not None else None
         self.bind_host = bind_host
         self.rpc_firewall = rpc_firewall  # restrict RPC ports to EngineSpec.allowed_peers
         self._lock = threading.RLock()
         self._engines: dict[str, _Engine] = {}
         self._bins: dict[str, Path] | None = None
+        self.llama_build: int | None = None
+        self._build_probed = False
         self.firewall = (firewall or RpcFirewall()) if rpc_firewall else None
         if self.firewall is not None:
             self.firewall.setup()  # also flushes rules of engines a previous agent left behind
@@ -246,6 +274,14 @@ class ProcessManager:
             pid_file.unlink(missing_ok=True)
         return reaped
 
+    def _llama_build(self) -> int | None:
+        """Build number of llama-server ("b11413" -> 11413), None when unknown. The agent app sets
+        llama_build from its cached version at start; otherwise it is probed here once."""
+        if self.llama_build is None and not self._build_probed:
+            self._build_probed = True  # once: an unparseable version stays unknown, not re-probed
+            self.llama_build = build_number(llama_version(self.llama_dir))
+        return self.llama_build
+
     def _binaries(self) -> dict[str, Path]:
         if self._bins is None:
             self._bins = find_binaries(self.llama_dir)
@@ -269,13 +305,14 @@ class ProcessManager:
             s.close()
 
     def start(self, spec: EngineSpec, model_path: str | None = None) -> EngineStatus:
+        build = self._llama_build()  # may run llama-server --version: outside the lock
         with self._lock:
             old = self._engines.get(spec.engine_id)
             if old is not None and old.proc.poll() is None:
                 raise EngineExists(spec.engine_id)
             if not self._port_free(spec.port):
                 raise PortInUse(f"port {spec.port} not available on {self.bind_host}")
-            cmd = build_command(spec, self._binaries(), self.bind_host, model_path)
+            cmd = build_command(spec, self._binaries(), self.bind_host, model_path, build)
             self.log_dir.mkdir(parents=True, exist_ok=True)
             if old is not None:
                 self._drop_rules(old)  # crashed engine being replaced: its rules are stale
@@ -292,6 +329,8 @@ class ProcessManager:
                 fw_rules = self.firewall.install(spec.port, peers)
             log_path = self.log_dir / f"{spec.engine_id}.log"
             env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+            if self.llama_cache is not None and not env.get("LLAMA_CACHE"):
+                env["LLAMA_CACHE"] = str(self.llama_cache)
             kwargs = {}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW

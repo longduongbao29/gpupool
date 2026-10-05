@@ -98,9 +98,10 @@ def test_three_nodes():
     assert pl.tier == "multi_node"
     assert len(pl.assignments) == 3
     assert pl.head_node == "n2"
-    assert pl.assignments[0].llama_device == "CUDA0"
-    assert [a.llama_device for a in pl.assignments[1:]] == ["RPC0", "RPC1"]
-    assert all(a.rpc_endpoint for a in pl.assignments[1:])
+    # the head's own GPU is last: it holds the output layer, so the logits never cross the network
+    assert pl.assignments[-1].llama_device == "CUDA0" and pl.assignments[-1].node_id == "n2"
+    assert [a.llama_device for a in pl.assignments[:-1]] == ["RPC0", "RPC1"]
+    assert all(a.rpc_endpoint for a in pl.assignments[:-1])
     assert len(ports.calls) == 3
     check(meta, pl, nodes)
 
@@ -131,7 +132,7 @@ def test_cpu_device_on_head_is_rpc():
     nodes = [node("a", dev("CUDA0", need * 6 // 10), dev("CPU", need * 6 // 10, kind="cpu"))]
     ports = Ports()
     pl = plan(meta, SPEC, nodes, "r1", ports)
-    cuda, cpu = pl.assignments
+    cpu, cuda = pl.assignments  # the head's GPU last
     assert (cuda.llama_device, cuda.rpc_endpoint) == ("CUDA0", None)
     assert cpu.device_id == "CPU" and cpu.llama_device == "RPC0" and cpu.rpc_endpoint == "a:9001"
     assert ports.calls == ["a", "a"]
@@ -322,6 +323,11 @@ def _qwen_like(n, layer_mb, out_mb, kv_heads=2):
                      other_bytes=out_mb * 2 * MB, output_bytes=out_mb * MB)
 
 
+def _draft_dev(pl):
+    """The head's first local GPU, where the draft is reserved."""
+    return next((a for a in pl.assignments if a.node_id == pl.head_node and not a.rpc_endpoint), None)
+
+
 def test_draft_three_server_cluster_reduces_only_the_head():
     # Real defect: a=1300 (GTX 1650), b=c=1100; 3B-like model ~2.1 GB + 0.5B-like draft ~0.56 GB
     # at ctx 2048. Reducing every GPU by the draft (3 x 563 MB) made this NoFit, although
@@ -335,19 +341,22 @@ def test_draft_three_server_cluster_reduces_only_the_head():
     assert total_need_mb(m, 2048) + dn <= 3500  # the pool holds it only if the draft is charged once
     pl = plan(m, spec, nodes, "r", Ports(), draft_meta=dm)
     assert pl.draft_est_mb == dn and pl.head_node == "a"
-    a0 = pl.assignments[0]
+    a0 = _draft_dev(pl)
     assert (a0.node_id, a0.device_id, a0.llama_device) == ("a", "CUDA0", "CUDA0")
+    assert pl.assignments[-1] is a0  # the head's GPU is last (it holds the output layer)
     usable = {n.node_id: n.devices[0].usable_mb for n in nodes}
     assert sum(a.layers for a in pl.assignments) == 36
     for i, a in enumerate(pl.assignments):
         assert a.est_mb <= usable[a.node_id]
     # the head's est_mb is its layer share plus the draft
-    own = device_need_mb(m, range(a0.layers), 2048, "cuda", len(pl.assignments) == 1)
+    start = 36 - a0.layers
+    own = device_need_mb(m, range(start, 36), 2048, "cuda", True)
     assert a0.est_mb == own + dn and a0.est_mb <= 1300
     assert pl.est_total_mb == sum(a.est_mb for a in pl.assignments)
     for p in rank(m, spec, nodes, draft_meta=dm):
-        assert p.assignments[0].llama_device == p.assignments[0].device_id
-        assert p.assignments[0].est_mb <= usable[p.assignments[0].node_id]
+        d = _draft_dev(p)
+        assert d is not None and d.llama_device == d.device_id
+        assert d.est_mb <= usable[d.node_id]
 
 
 def test_draft_goes_on_the_head_device_even_if_a_sibling_has_more_room():
@@ -372,7 +381,7 @@ def test_draft_many_gpus_stays_bounded():
     pl = plan(m, DSPEC, nodes, "r", Ports(), draft_meta=DRAFT)
     assert time.perf_counter() - t < 20
     assert pl.draft_est_mb == dn
-    a0 = pl.assignments[0]
+    a0 = _draft_dev(pl)
     assert a0.node_id == pl.head_node and a0.llama_device == a0.device_id
 
 
@@ -499,3 +508,65 @@ def test_split_unchanged_when_bandwidth_equal_or_unknown():
         finally:
             placement._favor_fast = orig
         assert [a.layers for a in pl.assignments] == [a.layers for a in base.assignments]
+
+
+def _two_gpu_remote(features, head_features=None):
+    a = node("a", dev("CUDA0", 3000))  # the head: most capacity
+    b = node("b", dev("CUDA0", 1200), dev("CUDA1", 1200))
+    b.features = list(features)
+    a.features = list(features if head_features is None else head_features)
+    return [a, b]
+
+
+def test_no_shared_rpc_server_when_the_head_cannot_use_one():
+    meta = make_meta(n_layers=40)
+    pl = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"], head_features=[]), "r", Ports())
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len({a.rpc_endpoint for a in remote}) == 2  # an old head expects one device per endpoint
+
+
+def test_one_rpc_server_serves_every_gpu_of_a_node_that_supports_it():
+    meta = make_meta(n_layers=40)
+    nodes = _two_gpu_remote(["rpc_multi_device"])
+    ports = Ports()
+    pl = plan(meta, SPEC, nodes, "r", ports)
+    check(meta, pl, nodes)
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len(remote) == 2 and len({a.rpc_endpoint for a in remote}) == 1
+    assert [a.llama_device for a in remote] == ["RPC0", "RPC1"]  # one server: its devices in -d order
+    assert ports.calls.count(remote[0].node_id) == 1  # one port for the server
+    assert "1 network hop (RPC)" in pl.reasons
+
+
+def test_old_agents_keep_one_rpc_server_per_gpu():
+    meta = make_meta(n_layers=40)
+    nodes = _two_gpu_remote([])
+    pl = plan(meta, SPEC, nodes, "r", Ports())
+    remote = [a for a in pl.assignments if a.node_id != pl.head_node]
+    assert len({a.rpc_endpoint for a in remote}) == 2
+    assert "2 network hops (RPC)" in pl.reasons
+
+
+def test_fewer_rpc_servers_estimate_faster_decode():
+    meta = make_meta(n_layers=40)
+    new = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
+    old = plan(meta, SPEC, _two_gpu_remote([]), "r", Ports())
+    assert new.est_decode_tps > old.est_decode_tps
+
+
+def test_remote_gpus_stay_adjacent_ahead_of_that_nodes_cpu():
+    from gpupool.scheduler.placement import _Dev, _order
+    a = node("a", dev("CUDA0", 3000))
+    b = node("b", dev("CUDA0", 2400), dev("CPU", 1600, kind="cpu"), dev("CUDA1", 800))
+    order = _order([_Dev(n, d) for n in (a, b) for d in n.devices], "a")
+    assert [(d.node.node_id, d.dev.device_id) for d in order] == [
+        ("b", "CUDA0"), ("b", "CUDA1"), ("b", "CPU"), ("a", "CUDA0")]
+
+
+
+def test_placement_keeps_the_parts_of_its_speed_estimate():
+    from gpupool.scheduler.scoring import current_tps
+    meta = make_meta(n_layers=40)
+    pl = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
+    assert pl.est_bw_s > 0 and pl.est_hops == 1 and pl.est_logits_s == 0.0  # head's GPU last
+    assert current_tps(pl.est_bw_s, pl.est_hops, pl.est_logits_s) == pytest.approx(pl.est_decode_tps, abs=0.05)

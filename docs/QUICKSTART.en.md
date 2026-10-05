@@ -85,6 +85,9 @@ Any OpenAI-compatible client works. Only two values change:
 | Model | the name you gave the model in the UI |
 | API key | none needed by default; if you set `GPUPOOL_API_KEYS`, one of those keys |
 
+The quickest check needs no client: open **Playground** in the UI (or **Chat** on the model's card), send a message
+and watch the reply stream in with its time to first token and tokens/s.
+
 curl:
 
 ```bash
@@ -125,7 +128,7 @@ weights are already on the server's disk.
    server** (absolute path of a folder with `config.json`, the tokenizer files and the weights; host paths are
    translated like library paths, see [Using model files already on the server](#using-model-files-already-on-the-server)).
 2. **Inspect**. Nothing is downloaded: gpupool reads the config and the file listing. You see the architecture and
-   whether the pinned converter (llama.cpp b11342) supports it, parameters, layers, context length, download
+   whether the pinned converter (llama.cpp b11413) supports it, parameters, layers, context length, download
    size, and warnings (gated repo, already quantized, ships custom code, ready-made GGUF builds).
 3. Pick a **quantization type** (next section). Each row shows the estimated file size and VRAM, whether it fits
    one GPU or only the pool, and which type is recommended, with the reasons.
@@ -327,7 +330,7 @@ architecture is supported, and starting a job returns HTTP 503 with an explanati
 `llama-imatrix` alone is optional: a coordinator without it converts every type that needs no matrix as usual.
 Where `download.pytorch.org` is blocked, build with a mirror of the PyTorch CPU wheel index
 (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`; `docker-compose.coordinator.yml` reads
-`TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11342.tar.gz` when it is
+`TORCH_INDEX_URL` from the environment). The llama.cpp source comes from `vendor/llama.cpp-b11413.tar.gz` when it is
 there, like the agent image, see [Building without GitHub](#building-without-github). Outside Docker set
 `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` and `GPUPOOL_LLAMA_TOOLS_DIR` (see Settings).
 
@@ -378,15 +381,19 @@ The model is cached in `GPUPOOL_CI_MODELS_DIR` (default `<repo>/.cache/ci-models
 | Option | Values | Effect | Measured (GTX 1650, Qwen2.5-3B) |
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | smaller KV cache, so a model can fit on fewer GPUs | ctx 8192: −132 / −204 MB, speed unchanged (51.9 / 51.2 / 50.8 tok/s) |
-| Speculative | none, ngram, draft | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Speculative | none, ngram, draft, mtp | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Share the context between slots | off, on | with several parallel slots, one request may use the whole context instead of context ÷ slots; same memory | not measured |
 
-In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`),
-`draft_file` (a library model, for `draft`) and `draft_n_max` (1 to 16, default 4); see [API.en.md](API.en.md).
+In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: only for GGUFs with multi-token-prediction layers),
+`draft_file` (a library model, for `draft`), `draft_n_max` (1 to 16, default 4) and `kv_unified` (shared context); see [API.en.md](API.en.md).
 They apply the next time the model starts.
 
 N-gram needs no extra memory but only helps when the output repeats earlier text. A draft model must share
 the tokenizer of the main model (checked when saving) and runs on the head's GPU (its memory is planned for).
-Drafting 4 tokens is the default; 8 was slower in our measurements.
+Drafting 4 tokens is the default; 8 was slower in our measurements. MTP uses the model's own
+multi-token-prediction layers (Qwen3.5, GLM-4.5 and newer, DeepSeek V3...): no second file and no tokenizer to
+match, and the layers' memory is planned only when MTP is on. Saving `mtp` for a model without such layers is
+refused. With MTP 2 or 3 drafted tokens is a good start.
 
 ## Without Docker
 
@@ -397,7 +404,7 @@ git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # prints the same admin key and join command
 ```
 
-GPU server (needs [uv](https://docs.astral.sh/uv/) and a llama.cpp build with CUDA and RPC, b11342):
+GPU server (needs [uv](https://docs.astral.sh/uv/) and a llama.cpp build with CUDA and RPC, b11413):
 
 ```bash
 uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /path/to/llama.cpp/build/bin
@@ -412,6 +419,24 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 | 9000–9999 | coordinator and GPU servers → GPU servers | llama.cpp (HTTP and RPC between servers) |
 
 llama.cpp RPC is not encrypted: keep the GPU servers on a trusted internal network.
+
+Split models send activations between servers on every token, so network latency sets their speed. Two
+things help:
+
+- **Several GPUs in one server.** A replica that uses two or more GPUs of one remote server gets a single
+  `ggml-rpc-server` for them, which copies activations between them locally (agents of this version; older
+  agents run one per GPU).
+- **RDMA (InfiniBand / RoCE).** The agent image's llama.cpp speaks RDMA and uses it whenever both ends have an
+  RDMA device, falling back to TCP otherwise. Give the agent container the device and locked memory:
+
+  ```bash
+  docker run -d --name gpupool-agent --gpus all --network host --pid host \
+    --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
+    -v gpupool-agent:/data -e GPUPOOL_JOIN=... ghcr.io/longduongbao29/gpupool-agent
+  ```
+
+  `GGML_RPC_NO_RDMA=1` (`-e GGML_RPC_NO_RDMA=1`) forces TCP. RDMA is negotiated per connection: a server
+  without it still works with the others over TCP.
 
 ## Security
 
@@ -517,7 +542,7 @@ What you still have to set up yourself on every machine that runs Docker:
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `docker pull` / `FROM` step: `i/o timeout`, `TLS handshake timeout`, `connection refused` | the daemon has no proxy | step 1 (daemon proxy), restart docker |
-| Build step `git clone` hangs or `Failed to connect to github.com` | GitHub blocked even through the proxy | put `vendor/llama.cpp-b11342.tar.gz` in the repo, or set `LLAMA_CPP_URL` |
+| Build step `git clone` hangs or `Failed to connect to github.com` | GitHub blocked even through the proxy | put `vendor/llama.cpp-b11413.tar.gz` in the repo, or set `LLAMA_CPP_URL` |
 | `uv sync`: `Failed to download ... cpython-3.12` | python-build-standalone is hosted on GitHub | set `UV_PYTHON_INSTALL_MIRROR` (see below) |
 | `failed to resolve source metadata for ghcr.io/astral-sh/uv` | ghcr.io unreachable | set `UV_IMAGE` to a mirror; coordinator: `UV_FROM_PYPI=1` |
 | `apt-get` or `pip` fails inside the build | proxy build args missing | pass `--build-arg http_proxy=... https_proxy=...` or use compose / `config.json` |
@@ -535,7 +560,7 @@ is needed when the proxy lets GitHub through.
    `vendor/` of this repo and copy the repo to the server:
 
    ```bash
-   curl -L -o vendor/llama.cpp-b11342.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz
+   curl -L -o vendor/llama.cpp-b11413.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz
    ```
 
    The build uses that file first, then `git clone`, then `curl` of `LLAMA_CPP_URL` (an internal mirror of the
@@ -658,6 +683,7 @@ when it is built with the conversion toolchain (the default). `docker-compose.co
 | `GPUPOOL_HEARTBEAT_S` | `2` | heartbeat interval (only used with push heartbeats) |
 | `GPUPOOL_PUSH_HEARTBEAT` | `false` | also push heartbeats, for coordinators older than pull mode; normally leave off |
 | `GPUPOOL_RPC_FIREWALL` | `false` | `1` = restrict each RPC port with iptables, see [Security](#security); needs root and `NET_ADMIN` |
+| `GPUPOOL_RPC_CACHE_GB` | `100` | cap on the RPC weight cache (`<GPUPOOL_CACHE_DIR>/llama.cpp/rpc`, lets a model load again without sending its weights over the network); least recently used files go first, `0` = no cap |
 
 Read by the programs but not part of the settings above: `GPUPOOL_LOG` (log level, default `INFO`, both
 programs), `GPUPOOL_FAKE_DEVICES` (agent: JSON list of simulated GPUs, used by `docker-compose.sim.yml`), and
@@ -672,7 +698,7 @@ described above. HTTP API: [API.en.md](API.en.md). Internals: [DESIGN.en.md](DES
 | --- | --- |
 | Server never appears in the UI | `docker logs gpupool-agent`: "connection refused" → port 8080 blocked or wrong address in the join command (use the coordinator's LAN IP); "wrong cluster token" → copy the join command again |
 | Agent log says the server was removed | it was deleted in the UI; add it again there (Servers → Add Server → agent URL `http://<server-ip>:7070`) |
-| Convert: inspect or the job says the architecture is not supported ("not supported by llama.cpp b11342's converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
+| Convert: inspect or the job says the architecture is not supported ("not supported by the pinned llama.cpp converter", HTTP 422) | the model family is newer than the pinned converter, or is not a text model. Look for an existing GGUF build of it (inspect lists them), or wait for a gpupool release with a newer llama.cpp |
 | Convert: HTTP 503 "conversion is not set up ..." | the image was built with `WITH_CONVERT=0`, or `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` are missing or wrong outside Docker. Use the full image or fix the paths; the message names what is missing |
 | Convert: HTTP 507 "not enough free disk space ..." when starting the job | the disk obviously cannot hold *uncached download + 16-bit intermediate + output* (see *Disk, RAM and time*). Nothing was queued. Free space, or point `GPUPOOL_MODELS_DIR` at a bigger disk, and start again |
 | Convert: a job *failed* with "not enough free disk space ..." | the first check passed but a later stage found less room (another job or process used the disk). The job's `failed_stage` says where. Free space, then **Retry** (finished downloads are reused) |

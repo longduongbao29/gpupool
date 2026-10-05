@@ -8,6 +8,134 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-05
+
+### Added
+
+- UI: large panels (Servers, GPUs, Model library, Conversions, Placement health, Deployments, Events, Settings
+  sections) collapse to their header from a chevron or a click on the title. All start open; folded ones are remembered
+  per browser.
+
+- **Playground** in the UI: chat with a deployed model through `/v1/chat/completions` (router, balancer and replica, as a
+  client would). Replies stream character by character with a live strip of time to first token, generation tokens/s,
+  tokens and total latency; each reply also shows prompt (prefill) tokens and speed, the placement's estimated speed beside the measured one, and
+  the replica that answered.
+  Speeds come from llama-server's own `timings` at the end (counted in the browser while streaming), thinking models'
+  `reasoning_content` goes to a collapsible block, *Stop* cancels, idle on-demand models cold-start on the first
+  message. Chat on the left, settings on the right, *Clear chat* in the chat header. A *Chat* button on running model cards opens it. The settings (not the chat) are remembered per browser.
+
+- `/v1` accepts the admin key too once API keys are set (the Playground signs in with it); an open `/v1` (no API key)
+  stays open. Every proxied response carries `x-gpupool-replica`, the replica that answered.
+
+- UI: each server card shows its llama.cpp build and flags servers whose build differs from the most common one;
+  *Placement health* shows the learned speed model (share of peak bandwidth, time per network hop); *Why here*
+  breaks a token's time into reading weights, network hops and logits.
+
+- The decode-speed model learns from measured speed: eta (fraction of peak bandwidth) from replicas on one server
+  and the time per RPC hop from split ones, both from llama-server's measured generation speed of replicas that
+  run one plain stream. Persisted, shown as `speed_model` in `GET /api/state`; placements then rank by the
+  cluster's real network and GPUs instead of constants measured on one GTX 1650.
+
+- `llama_version_mismatch` warning event (and webhook) when registered servers report different llama.cpp builds,
+  once per change of the set of builds (a flapping server does not repeat it): a model split over servers needs the same RPC protocol on its head and every RPC server.
+
+- `kv_unified` (llama.cpp `-kvu`): the parallel slots share one KV pool, so a single long request may use the
+  whole context while the other slots hold short ones, at the same memory. API field, deploy-form switch and a
+  Recommend tip for models with several slots; the estimate sizes sliding-window layers for the shared pool. An
+  older agent ignores the flag (each slot then keeps its own share of the context).
+
+- Speculative decoding `mtp`: GGUFs that ship multi-token-prediction (nextn) layers (Qwen3.5, GLM-4.5 and
+  newer, DeepSeek V3...) draft with them through llama.cpp's `--spec-type draft-mtp`, with no extra model
+  file. Fewer target passes per token means fewer RPC round trips when the model is split. The API refuses
+  `mtp` for a model without such layers, the estimate counts the layers (loaded only in this mode) and their
+  cache, and the Recommend panel suggests it ahead of n-gram and draft models. A head whose agent does not report
+  the `spec_mtp` feature (an older agent or llama.cpp build) serves the model without speculation and raises an
+  `mtp_unavailable` warning instead of failing the launch.
+
+### Changed
+
+- Placement is about 10x faster on large pools (8 servers with 5 devices each: 3.0 s → 0.27 s; 4 servers:
+  256 → 29 ms), with the same placements (checked on 400 random clusters). Each device's need is one
+  subtraction from per-layer prefix sums instead of a loop over its layers; moving a layer between two devices
+  re-checks only the devices whose layer ranges shift; the speed pass keeps moving along a pair of devices while it
+  helps instead of rescanning every pair after each layer. Recommend, simulation and rebalance scoring rank in a
+  worker thread, so they no longer stall streamed responses.
+
+- Draft and MTP speculative decoding sample the draft and verify it by rejection (`--spec-draft-sampling
+  probabilistic`, llama.cpp b11413+): same output distribution, more drafts accepted at temperature > 0
+  (+4-8 % throughput in llama.cpp's measurements). Agents on an older llama.cpp build keep greedy drafting.
+
+- llama.cpp b11342 → b11413 in both images (same RPC protocol, 7.0.0; upgrade every agent together as always).
+  Brings: n-gram drafts no longer rejected at temperature > 0, probabilistic draft sampling for draft and MTP,
+  a CUDA memory fault with many-expert MoE fixed, fused shared experts and faster small-batch f16/bf16 matmul on
+  CUDA, Volta flash-attention fixes, and `llama-imatrix --nextn`, which gpupool now passes for models with MTP
+  layers so importance-matrix types can quantize them.
+
+- The router shares requests between replicas of a model by their speed: weighted rendezvous hashing with the
+  placement's estimated decode tok/s as weight (which the learned speed model keeps honest), and the overload check
+  counts requests relative to capacity.
+  A replica split over the network at 10 tok/s no longer gets the same share as a single-GPU one at 50 tok/s.
+  Replicas of equal speed route exactly as before.
+
+- Split placements put the head's own GPUs last in the device order. The last device holds the output layer,
+  and llama-server reads the logits (`n_vocab x 4` bytes, about 0.5 MB for a 128k vocabulary) from it on every
+  token: with a remote device last they crossed the network each time, now only the hidden state (`n_embd x 4`
+  bytes) does. The draft model still goes on the head's first local GPU.
+
+- The RPC weight cache has a size cap (`GPUPOOL_RPC_CACHE_GB`, default 100): the agent deletes the least
+  recently used tensor files above it every 10 minutes. llama.cpp never deletes them, so every model ever split
+  onto a server stayed on its disk.
+- The router forwards the request body as received (adding `"cache_prompt": true` when absent) instead of
+  parsing and re-serializing it, which cost milliseconds of event-loop time per long-context request.
+
+- The agent image builds llama.cpp's RDMA transport (RoCE / InfiniBand, via libibverbs). RPC connections
+  negotiate it per connection and fall back to TCP wherever either side has no RDMA device; to use it, run
+  the agents with `--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1`.
+- The coordinator image's converter tools (llama-quantize, llama-imatrix) are built with AVX2/FMA/F16C spelled
+  out, instead of relying on a CMake default that a `SOURCE_DATE_EPOCH` build environment turns off.
+
+- One `ggml-rpc-server` per server and replica serves all of the replica's GPUs on that server
+  (`-d CUDA0,CUDA1`) instead of one process per GPU. llama.cpp then copies activations between those GPUs
+  inside the server; with a process per GPU each boundary went server → head → server, two network transfers
+  per token. Placement counts one network hop per RPC server, so such splits also score better. Agents
+  report the capability (`features: ["rpc_multi_device"]`); older agents keep one server per GPU.
+
+- Memory estimates follow llama.cpp's real cache layout per layer. Sliding-window layers (Gemma 2/3/4,
+  gpt-oss, Cohere2, OLMo2) cache only their window, MLA models (DeepSeek, Kimi, GLM-DSA) cache only the latent
+  K, hybrid models (Qwen3-Next, Qwen3.5, Nemotron-H, Jamba...) cache KV only on attention layers plus a small
+  recurrent state per sequence, and MTP blocks that llama.cpp does not load without `draft-mtp` are no longer
+  counted. These models were over-estimated (up to several times the real KV at long context), which pushed
+  them onto more GPUs or servers than needed. Unknown architectures keep the old rule.
+- Decode speed of MoE models counts only the routed experts a token reads, so placements of MoE models are
+  scored on realistic speeds.
+- Stored VRAM calibration factors reset once when the estimator changes (now: this release), since a factor
+  learned against the old estimate would scale the new one by the old error.
+
+- Faster cold starts: the head downloads its model (and the draft, in parallel with it) while the RPC
+  engines start, instead of after they are running.
+- The coordinator's SQLite store runs with `synchronous=NORMAL` (safe under WAL): agent reports, one commit
+  every 2 s per server on the event loop that also proxies inference, no longer fsync each time.
+
+### Fixed
+
+- UI: a select whose options are generated (Playground model, library file, draft model) could show the first option
+  instead of the value it held; GPUs of an offline server and events already read were not dimmed (the rows' enter
+  animation overrode the inline opacity); model cards in a row had different heights.
+
+- UI on phones: panel header buttons (Placement health) wrap instead of overflowing the screen.
+
+- Multi-turn chats stay on one replica. The router keyed a conversation on every message but the last, so the
+  key changed on each turn (until the prefix passed 4096 characters) and with several replicas the conversation
+  hopped to a replica that had to process the whole history again. Multi-turn requests are now keyed on the
+  system messages plus the first user message, which every later turn repeats. Single-turn requests are keyed
+  as before (on the system prompt).
+- The router no longer caps upstream connections at 100. httpx's default pool held request 101 and later in
+  the coordinator with no timeout, invisible to the balancer's load count and to llama-server's queue.
+- The RPC weight cache survives agent restarts and upgrades. `ggml-rpc-server -c` stores received tensors under
+  `$LLAMA_CACHE/rpc`, which defaulted to `~/.cache` in the container's writable layer; engines now get
+  `LLAMA_CACHE=<GPUPOOL_CACHE_DIR>/llama.cpp` (on the `/data` volume in the image). A `LLAMA_CACHE` set by the
+  user is kept.
+
 ## [0.5.1] - 2026-10-05
 
 ### Changed
@@ -180,7 +308,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/longduongbao29/gpupool/compare/v0.4.1...v0.4.2

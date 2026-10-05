@@ -14,10 +14,13 @@ from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from gpupool.agent.gpu import probe_devices
+from gpupool.agent.rpc_cache import prune as prune_rpc_cache
+from gpupool.agent.rpc_cache import rpc_cache_dir
 from gpupool.agent.memlog import parse_buffers
 from gpupool.agent.models_cache import ensure_model, list_models
 from gpupool.agent.procs import (
-    EngineExists, PortInUse, ProcessManager, disable_core_dumps, llama_cuda_archs, llama_version,
+    EngineExists, PortInUse, ProcessManager, build_number, disable_core_dumps, llama_cuda_archs,
+    llama_version,
 )
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
@@ -81,9 +84,24 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
             delay = min(delay * 2, 60.0)
 
 
+# NodeReport.features, by the first llama.cpp build each was verified against (b11342: one
+# ggml-rpc-server -d A,B process, --spec-type draft-mtp, -kvu). An unknown build reports none, so
+# the coordinator keeps it on the 0.5 behaviour (one RPC server per GPU, no mtp / kv_unified head).
+FEATURES = {"rpc_multi_device": 11342, "spec_mtp": 11342, "kv_unified": 11342}
+
+
+def features_of(version: str) -> list[str]:
+    build = build_number(version)
+    return [] if build is None else sorted(f for f, first in FEATURES.items() if build >= first)
+
+
+RPC_CACHE_PRUNE_S = 600.0  # how often the rpc weight cache is trimmed to rpc_cache_gb
+
+
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
-    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall)
+    pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall,
+                              llama_cache=Path(cfg.cache_dir) / "llama.cpp")
     version_cache: dict = {}  # llama version and CUDA archs: fixed for the agent's lifetime
     # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
     ensured: set[str] = set()
@@ -108,6 +126,11 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             version_cache["v"] = llama_version(cfg.llama_dir)
         return version_cache["v"]
 
+    def features() -> list[str]:
+        if "features" not in version_cache:
+            version_cache["features"] = features_of(version())
+        return version_cache["features"]
+
     def archs() -> list[str] | None:
         if "archs" not in version_cache:
             version_cache["archs"] = llama_cuda_archs(cfg.llama_dir)
@@ -126,7 +149,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             cpu_pct=cpu_pct, ram_used_mb=ram_used, ram_total_mb=ram_total,
             node_id=cfg.node_id, agent_url=f"http://{cfg.host}:{cfg.port}", host=cfg.host,
             devices=probe(cfg), engines=pm.list(), llama_version=version(),
-            cuda_archs=archs(),
+            cuda_archs=archs(), features=features(),
             models=list_models(cfg.cache_dir), ts=time.time())
 
     async def heartbeat_loop() -> None:
@@ -149,10 +172,26 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                         log.warning("heartbeat to %s failed: %r", url, e)
                 await asyncio.sleep(cfg.heartbeat_s)
 
+    async def rpc_cache_loop() -> None:
+        cache = rpc_cache_dir(Path(cfg.cache_dir) / "llama.cpp")
+        cap = int(cfg.rpc_cache_gb * 1e9)
+        while True:
+            try:
+                await asyncio.to_thread(prune_rpc_cache, cache, cap)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("rpc cache pruning failed")
+            await asyncio.sleep(RPC_CACHE_PRUNE_S)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         psutil.cpu_percent(interval=None)  # prime: the first call always returns 0.0
         await asyncio.to_thread(version)
+        # One source for the build: the features reported and the flags engines get must agree.
+        pm.llama_build = build_number(version())
+        pm._build_probed = True
+        prune_task = asyncio.create_task(rpc_cache_loop()) if cfg.rpc_cache_gb > 0 else None
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None
         try:
@@ -162,10 +201,11 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                 join_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await join_task
-            if task:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+            for t in (task, prune_task):
+                if t:
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await t
             await asyncio.to_thread(pm.stop_all)
 
     app = FastAPI(title="gpupool-agent", lifespan=lifespan)
@@ -202,8 +242,8 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                 if not Path(spec.draft_model_path).is_file():
                     raise HTTPException(
                         422, f"draft model file not found: {spec.draft_model_path}")
-        elif len(spec.devices) != 1:
-            raise HTTPException(422, "rpc engine needs exactly one device")
+        elif not spec.devices or len(set(spec.devices)) != len(spec.devices):
+            raise HTTPException(422, "rpc engine needs one or more distinct devices")
         try:
             return pm.start(spec, spec.model_path)
         except EngineExists:

@@ -41,6 +41,9 @@ EVENTS_KEEP = 1000
 # The measured/estimated memory ratio is clamped before planning uses it: a lucky measurement must
 # never shrink the safety margin below 0.9, and a wild one must not make a model unplaceable.
 CAL_MIN, CAL_MAX = 0.9, 2.0
+# Bumped whenever scheduler/estimate.py changes what it estimates: stored factors then reset.
+# 2: per-layer cache layout (SWA, MLA, recurrent state, on-demand MTP blocks).
+ESTIMATOR_VERSION = 2
 
 
 def planning_factor(raw: float | None) -> float:
@@ -80,10 +83,15 @@ class Store:
         with self._lock:
             if not memory:
                 self._conn.execute("PRAGMA journal_mode=WAL")
+                # WAL + NORMAL never corrupts the database; a power loss can only drop the last
+                # commits. Every agent report is a commit (every 2 s per server), made on the event
+                # loop that also proxies inference: FULL would fsync each one.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
                 # Same as Library (own connection, same file): wait for its writes, don't fail.
                 self._conn.execute("PRAGMA busy_timeout=5000")
             with self._conn:
                 self._conn.executescript(_SCHEMA)
+                self._reset_stale_calibration()
 
     @property
     def version(self) -> int:
@@ -257,6 +265,24 @@ class Store:
 
     def delete_state(self, key: str) -> None:
         self._write("DELETE FROM control_state WHERE key=?", (key,), bump=False)
+
+    def _reset_stale_calibration(self) -> None:
+        """A calibration factor is measured / estimated under one estimator. When the estimator
+        changes (ESTIMATOR_VERSION), an old factor would scale the new estimate by the old one's
+        error: forget them all and let the next launches measure again. Caller holds the lock and
+        a transaction."""
+        rows = self._conn.execute("SELECT value FROM control_state WHERE key='estimator'").fetchall()
+        try:
+            have = json.loads(rows[0][0]).get("version") if rows else None
+        except (ValueError, AttributeError):
+            have = None
+        if have == ESTIMATOR_VERSION:
+            return
+        self._conn.execute("DELETE FROM model_calibration")
+        self._conn.execute(
+            "INSERT INTO control_state(key, value, updated_at) VALUES('estimator', ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (json.dumps({"version": ESTIMATOR_VERSION}), time.time()))
 
     # VRAM calibration: EMA of measured/estimated memory per model (raw; clamp with planning_factor)
     def get_calibration(self, model: str) -> dict | None:

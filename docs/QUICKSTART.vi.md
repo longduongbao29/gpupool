@@ -82,6 +82,9 @@ Client nào tương thích OpenAI cũng dùng được. Chỉ cần đổi hai g
 | Model | tên bạn đặt cho model trên UI |
 | API key | mặc định không cần; nếu đặt `GPUPOOL_API_KEYS` thì dùng một trong các key đó |
 
+Cách thử nhanh nhất không cần client: mở **Playground** trên UI (hoặc **Chat** trên thẻ của model), gửi một tin nhắn
+và xem câu trả lời stream về kèm thời gian tới token đầu và token/giây.
+
 curl:
 
 ```bash
@@ -122,7 +125,7 @@ kê các bản GGUF đã được phát hành của model (`gguf_alternatives`, 
    server** (đường dẫn tuyệt đối của thư mục có `config.json`, các file tokenizer và trọng số; đường dẫn trên máy
    chủ được dịch giống đường dẫn thư viện, xem [Dùng file model có sẵn trên server](#dùng-file-model-có-sẵn-trên-server)).
 2. **Inspect**. Chưa tải gì cả: gpupool chỉ đọc config và danh sách file. Bạn thấy kiến trúc và việc bộ chuyển đổi
-   được ghim (llama.cpp b11342) có hỗ trợ hay không, số tham số, số lớp, độ dài ngữ cảnh, dung lượng tải về, cùng các
+   được ghim (llama.cpp b11413) có hỗ trợ hay không, số tham số, số lớp, độ dài ngữ cảnh, dung lượng tải về, cùng các
    cảnh báo (repo gated, đã lượng tử hoá sẵn, kèm mã tuỳ biến, đã có bản GGUF).
 3. Chọn **loại lượng tử hoá** (mục kế tiếp). Mỗi dòng cho biết dung lượng file và VRAM ước lượng, vừa một GPU hay
    chỉ vừa pool, và loại nào được đề xuất kèm lý do.
@@ -320,7 +323,7 @@ trợ không, và bắt đầu job trả về HTTP 503 kèm lời giải thích 
 Riêng `llama-imatrix` là tuỳ chọn: coordinator thiếu nó vẫn chuyển đổi bình thường mọi loại không cần ma trận. Nơi `download.pytorch.org`
 bị chặn, hãy build với mirror của chỉ mục wheel PyTorch CPU (`--build-arg TORCH_INDEX_URL=https://mirror.corp/pytorch/whl/cpu`;
 `docker-compose.coordinator.yml` đọc `TORCH_INDEX_URL` từ môi trường). Mã nguồn llama.cpp lấy từ
-`vendor/llama.cpp-b11342.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
+`vendor/llama.cpp-b11413.tar.gz` nếu có, giống image agent, xem [Build không cần GitHub](#build-không-cần-github).
 Ngoài Docker, đặt `GPUPOOL_CONVERT_DIR`, `GPUPOOL_CONVERT_PYTHON` và `GPUPOOL_LLAMA_TOOLS_DIR` (xem Thiết lập).
 
 ## Thử trên một máy (cụm 3 server giả lập)
@@ -370,15 +373,19 @@ thoát với mã 1. Cụm được xoá sau khi chạy, trừ khi có `--keep`. 
 | Tùy chọn | Giá trị | Tác dụng | Đo thật (GTX 1650, Qwen2.5-3B) |
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | KV cache nhỏ hơn nên model có thể vừa ít GPU hơn | ctx 8192: −132 / −204 MB, tốc độ gần như không đổi (51.9 / 51.2 / 50.8 tok/s) |
-| Speculative | none, ngram, draft | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Speculative | none, ngram, draft, mtp | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Dùng chung context giữa các slot | tắt, bật | khi có nhiều slot song song, một request có thể dùng cả context thay vì context ÷ số slot; cùng lượng bộ nhớ | chưa đo |
 
-Trong API các tuỳ chọn này là `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`),
-`draft_file` (một model trong thư viện, cho `draft`) và `draft_n_max` (1 đến 16, mặc định 4); xem
+Trong API các tuỳ chọn này là `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: chỉ cho GGUF có layer dự đoán nhiều token),
+`draft_file` (một model trong thư viện, cho `draft`), `draft_n_max` (1 đến 16, mặc định 4) và `kv_unified` (dùng chung context); xem
 [API.vi.md](API.vi.md). Chúng có hiệu lực ở lần chạy model kế tiếp.
 
 N-gram không tốn thêm bộ nhớ nhưng chỉ có lợi khi câu trả lời lặp lại phần văn bản trước đó. Model draft phải
 dùng chung tokenizer với model chính (được kiểm khi lưu) và chạy trên GPU của head (bộ nhớ đã được tính vào kế
-hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo.
+hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo. MTP dùng chính các layer dự đoán nhiều token
+của model (Qwen3.5, GLM-4.5 trở lên, DeepSeek V3...): không cần file thứ hai, không phải khớp tokenizer, và bộ nhớ của
+các layer đó chỉ được tính khi bật MTP. Lưu `mtp` cho model không có các layer này sẽ bị từ chối. Với MTP, nên bắt
+đầu với 2 hoặc 3 token nháp.
 
 ## Không dùng Docker
 
@@ -389,7 +396,7 @@ git clone https://github.com/longduongbao29/gpupool && cd gpupool
 uv sync && uv run gpupool coordinator          # in ra cùng admin key và lệnh join
 ```
 
-Server GPU (cần [uv](https://docs.astral.sh/uv/) và bản build llama.cpp có CUDA và RPC, b11342):
+Server GPU (cần [uv](https://docs.astral.sh/uv/) và bản build llama.cpp có CUDA và RPC, b11413):
 
 ```bash
 uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /path/to/llama.cpp/build/bin
@@ -404,6 +411,24 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 | 9000–9999 | coordinator và server GPU → server GPU | llama.cpp (HTTP và RPC giữa các server) |
 
 RPC của llama.cpp không mã hoá: giữ các server GPU trong mạng nội bộ tin cậy.
+
+Model bị chia gửi activation giữa các server ở mỗi token, nên độ trễ mạng quyết định tốc độ của chúng. Hai thứ
+giúp được:
+
+- **Nhiều GPU trong một server.** Replica dùng từ hai GPU trở lên của cùng một server ở xa chỉ cần một
+  `ggml-rpc-server` cho chúng, server này copy activation giữa các GPU ngay tại chỗ (agent bản này; agent cũ chạy
+  mỗi GPU một cái).
+- **RDMA (InfiniBand / RoCE).** llama.cpp trong image agent nói được RDMA và dùng nó khi cả hai đầu có thiết bị
+  RDMA, nếu không thì quay về TCP. Cấp cho container agent thiết bị và bộ nhớ khoá:
+
+  ```bash
+  docker run -d --name gpupool-agent --gpus all --network host --pid host \
+    --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
+    -v gpupool-agent:/data -e GPUPOOL_JOIN=... ghcr.io/longduongbao29/gpupool-agent
+  ```
+
+  `GGML_RPC_NO_RDMA=1` (`-e GGML_RPC_NO_RDMA=1`) ép dùng TCP. RDMA được thương lượng theo từng kết nối: server không
+  có RDMA vẫn làm việc với các server khác qua TCP.
 
 ## Bảo mật
 
@@ -508,7 +533,7 @@ Những việc bạn vẫn phải tự làm trên mỗi máy chạy Docker:
 | Hiện tượng | Nguyên nhân | Cách sửa |
 | --- | --- | --- |
 | `docker pull` / bước `FROM`: `i/o timeout`, `TLS handshake timeout`, `connection refused` | daemon chưa có proxy | bước 1 (proxy của daemon), restart docker |
-| Bước build `git clone` treo hoặc `Failed to connect to github.com` | GitHub bị chặn kể cả qua proxy | đặt `vendor/llama.cpp-b11342.tar.gz` vào repo, hoặc đặt `LLAMA_CPP_URL` |
+| Bước build `git clone` treo hoặc `Failed to connect to github.com` | GitHub bị chặn kể cả qua proxy | đặt `vendor/llama.cpp-b11413.tar.gz` vào repo, hoặc đặt `LLAMA_CPP_URL` |
 | `uv sync`: `Failed to download ... cpython-3.12` | python-build-standalone đặt trên GitHub | đặt `UV_PYTHON_INSTALL_MIRROR` (xem bên dưới) |
 | `failed to resolve source metadata for ghcr.io/astral-sh/uv` | không vào được ghcr.io | đặt `UV_IMAGE` là bản mirror; coordinator: `UV_FROM_PYPI=1` |
 | `apt-get` hoặc `pip` lỗi trong lúc build | thiếu build arg proxy | truyền `--build-arg http_proxy=... https_proxy=...` hoặc dùng compose / `config.json` |
@@ -526,7 +551,7 @@ phép đi qua GitHub thì không cần phần này.
    rồi chép repo sang server:
 
    ```bash
-   curl -L -o vendor/llama.cpp-b11342.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11342.tar.gz
+   curl -L -o vendor/llama.cpp-b11413.tar.gz https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11413.tar.gz
    ```
 
    Build dùng file này trước, rồi `git clone`, rồi `curl` tới `LLAMA_CPP_URL` (mirror nội bộ của cùng file nén).
@@ -648,6 +673,7 @@ Image Docker đặt sẵn `GPUPOOL_HOST`, `GPUPOOL_PORT`, `GPUPOOL_DB_PATH`, `GP
 | `GPUPOOL_HEARTBEAT_S` | `2` | chu kỳ heartbeat (chỉ dùng khi bật push heartbeat) |
 | `GPUPOOL_PUSH_HEARTBEAT` | `false` | chủ động đẩy heartbeat, cho coordinator cũ chưa có chế độ pull; thường để tắt |
 | `GPUPOOL_RPC_FIREWALL` | `false` | `1` = giới hạn từng cổng RPC bằng iptables, xem [Bảo mật](#bảo-mật); cần root và `NET_ADMIN` |
+| `GPUPOOL_RPC_CACHE_GB` | `100` | giới hạn cache trọng số RPC (`<GPUPOOL_CACHE_DIR>/llama.cpp/rpc`, giúp nạp lại model mà không phải gửi trọng số qua mạng); file ít dùng nhất bị xoá trước, `0` = không giới hạn |
 
 Các biến chương trình có đọc nhưng không nằm trong danh sách thiết lập trên: `GPUPOOL_LOG` (mức log, mặc định
 `INFO`, cho cả hai chương trình), `GPUPOOL_FAKE_DEVICES` (agent: danh sách JSON các GPU giả lập, dùng bởi
@@ -662,7 +688,7 @@ arg ở trên. API HTTP: [API.vi.md](API.vi.md). Thiết kế bên trong: [DESIG
 | --- | --- |
 | Server không bao giờ hiện trên UI | `docker logs gpupool-agent`: "connection refused" → port 8080 bị chặn hoặc sai địa chỉ trong lệnh join (dùng IP LAN của coordinator); "wrong cluster token" → copy lại lệnh join |
 | Log agent báo server đã bị xoá | server đã bị xoá trên UI; thêm lại ở đó (Servers → Add Server → agent URL `http://<ip-server>:7070`) |
-| Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by llama.cpp b11342's converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
+| Chuyển đổi: inspect hoặc job báo kiến trúc không được hỗ trợ ("not supported by the pinned llama.cpp converter", HTTP 422) | họ model mới hơn bộ chuyển đổi được ghim, hoặc không phải model văn bản. Tìm bản GGUF có sẵn của nó (inspect có liệt kê), hoặc chờ bản gpupool dùng llama.cpp mới hơn |
 | Chuyển đổi: HTTP 503 "conversion is not set up ..." | image được build với `WITH_CONVERT=0`, hoặc ngoài Docker thì `GPUPOOL_CONVERT_DIR` / `GPUPOOL_CONVERT_PYTHON` / `GPUPOOL_LLAMA_TOOLS_DIR` thiếu hoặc sai. Dùng image đầy đủ hoặc sửa đường dẫn; thông báo nêu rõ thiếu gì |
 | Chuyển đổi: HTTP 507 "not enough free disk space ..." ngay khi gửi job | đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản trung gian 16 bit + đầu ra* (xem *Đĩa, RAM và thời gian*). Chưa có gì được xếp hàng. Giải phóng dung lượng, hoặc trỏ `GPUPOOL_MODELS_DIR` sang đĩa lớn hơn, rồi gửi lại |
 | Chuyển đổi: job *failed* với "not enough free disk space ..." | lần kiểm tra đầu qua được nhưng một giai đoạn sau thấy ít chỗ hơn (job hoặc tiến trình khác đã dùng đĩa). `failed_stage` của job cho biết ở đâu. Giải phóng dung lượng, rồi **Retry** (bản tải đã xong được dùng lại) |

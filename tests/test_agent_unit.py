@@ -41,6 +41,12 @@ def test_build_rpc():
         "ggml-rpc-server", "-H", "10.0.0.5", "-p", "9001", "-d", "CUDA0", "-c"]
 
 
+def test_build_rpc_serves_several_devices_from_one_process():
+    spec = EngineSpec(engine_id="r-rpc-CUDA0", kind="rpc", port=9001, devices=["CUDA0", "CUDA1"])
+    cmd = build_command(spec, BINS, "10.0.0.5", None)
+    assert cmd[cmd.index("-d") + 1] == "CUDA0,CUDA1"
+
+
 def test_build_server_single():
     spec = EngineSpec(engine_id="r-head", kind="server", port=9000, devices=["CUDA0"],
                       model="m", ctx_size=2048, parallel=2, extra_args=["--foo"])
@@ -90,6 +96,28 @@ def test_build_cache_type():
 def test_build_ngram():
     cmd = build_command(_srv(spec_type="ngram"), BINS, "h", "/m.gguf")
     assert cmd == _BASE + ["--spec-type", "ngram-mod"]
+
+
+def test_build_kv_unified():
+    assert build_command(_srv(kv_unified=True), BINS, "h", "/m.gguf")[-1] == "-kvu"
+    assert "-kvu" not in build_command(_srv(), BINS, "h", "/m.gguf")
+
+
+@pytest.mark.parametrize("build, on", [(None, False), (11342, False), (11413, True), (12000, True)])
+@pytest.mark.parametrize("spec_type", ["draft", "mtp"])
+def test_probabilistic_draft_sampling_only_where_llama_has_it(spec_type, build, on):
+    kw = {"draft_model_path": "/d.gguf", "draft_device": "CUDA0"} if spec_type == "draft" else {}
+    cmd = build_command(_srv(spec_type=spec_type, **kw), BINS, "h", "/m.gguf", build)
+    assert (cmd[-2:] == ["--spec-draft-sampling", "probabilistic"]) is on
+
+
+def test_no_probabilistic_sampling_for_ngram():
+    assert "--spec-draft-sampling" not in build_command(_srv(spec_type="ngram"), BINS, "h", "/m.gguf", 11413)
+
+
+def test_build_mtp():
+    cmd = build_command(_srv(spec_type="mtp", draft_n_max=3), BINS, "h", "/m.gguf")
+    assert cmd == _BASE + ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3"]
 
 
 def test_build_draft():
@@ -210,7 +238,7 @@ def pm(tmp_path):
 
 def patch_cmd(monkeypatch, script):
     monkeypatch.setattr(procs, "build_command",
-                        lambda spec, bins, host, mp: [sys.executable, "-c", script])
+                        lambda spec, bins, host, mp, *_: [sys.executable, "-c", script])
     monkeypatch.setattr(ProcessManager, "_binaries", lambda self: BINS)
 
 
@@ -909,3 +937,27 @@ def test_nvml_compute_cap_failure_keeps_device(tmp_path, monkeypatch):
     _stub_nvml(monkeypatch)  # no nvmlDeviceGetCudaComputeCapability (very old pynvml)
     d = g._cuda_devices(make_cfg(tmp_path))[0]
     assert d.compute_cap is None and d.kernels_ok is None and d.usable_mb > 0
+
+
+ENV_PRINTER = """
+import os
+print("LLAMA_CACHE=" + os.environ.get("LLAMA_CACHE", "<unset>"), flush=True)
+"""
+
+
+@pytest.mark.parametrize("preset", [None, "/user/choice"])
+def test_engines_get_a_persistent_llama_cache(tmp_path, monkeypatch, preset):
+    # ggml-rpc-server -c caches weights under $LLAMA_CACHE/rpc: it must land in the agent's
+    # data dir, not in the container's writable layer; a LLAMA_CACHE the user set wins.
+    if preset:
+        monkeypatch.setenv("LLAMA_CACHE", preset)
+    else:
+        monkeypatch.delenv("LLAMA_CACHE", raising=False)
+    patch_cmd(monkeypatch, ENV_PRINTER)
+    m = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1", llama_cache=tmp_path / "lc")
+    try:
+        m.start(EngineSpec(engine_id="e1", kind="rpc", port=free_port(), devices=["CPU"]))
+        st = wait_state(m, "e1", "exited")
+    finally:
+        m.stop_all()
+    assert st.log_tail == [f"LLAMA_CACHE={preset or tmp_path / 'lc'}"]

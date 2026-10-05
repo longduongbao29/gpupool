@@ -21,6 +21,7 @@ from gpupool.coordinator.store import ServerRecord, gpu_key, planning_factor
 from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
+from gpupool.scheduler.scoring import speed_model
 
 log = logging.getLogger("gpupool.api")
 
@@ -61,6 +62,7 @@ class ModelBody(BaseModel):
     flash_attn: FlashAttn | None = None
     batch: int | None = Field(default=None, ge=32, le=16384)
     ubatch: int | None = Field(default=None, ge=32, le=8192)
+    kv_unified: bool | None = None  # None: keep the stored value, else False
 
 
 class RecommendBody(BaseModel):
@@ -78,6 +80,7 @@ class RecommendBody(BaseModel):
     flash_attn: FlashAttn = "auto"
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
+    kv_unified: bool = False
 
 
 class SimFields(BaseModel):
@@ -99,6 +102,7 @@ class SimFields(BaseModel):
     flash_attn: FlashAttn | None = None
     batch: int | None = Field(default=None, ge=32, le=16384)
     ubatch: int | None = Field(default=None, ge=32, le=8192)
+    kv_unified: bool | None = None
 
     def fields(self) -> dict:
         out = self.model_dump(exclude_none=True, include=set(SimFields.model_fields))
@@ -294,6 +298,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "events": [e.model_dump(mode="json") for e in store.list_events(limit=50)],
             "unread_events": store.unread_count(),
             "rebalance": reconciler.rebalance_state(),
+            # decode-speed model the scheduler ranks with, refined from measured speed
+            "speed_model": {"eta": round(speed_model().eta, 3), "hop_ms": round(speed_model().hop_s * 1000, 3)},
         }
 
     # ------------------------------------------------------------------ servers
@@ -341,10 +347,20 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
     # ------------------------------------------------------------------ models
     async def check_draft(spec: ModelSpec, label: str = "") -> None:
-        """422 unless the draft model of a speculative "draft" spec is usable with its target."""
+        """422 unless the draft model of a speculative "draft" spec is usable with its target, or
+        the model of an "mtp" spec has multi-token-prediction blocks."""
+        pre = f"{label}: " if label else ""
+        if spec.speculative == "mtp":
+            try:
+                meta = await reconciler.meta_for(spec)
+            except Exception as e:
+                raise HTTPException(422, f"{pre}cannot read model metadata: {type(e).__name__}: {e}") from e
+            if not meta.n_nextn:
+                raise HTTPException(422, f"{pre}speculative 'mtp' needs a GGUF with multi-token-prediction "
+                                         "(nextn) blocks that llama.cpp can draft with; this one has none")
+            return
         if spec.speculative != "draft":
             return
-        pre = f"{label}: " if label else ""
         if not spec.draft or not spec.draft.startswith(COORD_PREFIX):
             raise HTTPException(422, f"{pre}speculative 'draft' needs a draft_file from the library")
         file = spec.draft[len(COORD_PREFIX):]
@@ -407,6 +423,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             flash_attn=keep(body.flash_attn, "flash_attn") or "auto",
             ubatch=keep(body.ubatch, "ubatch") or DEFAULT_UBATCH,
             batch=keep(body.batch, "batch") or DEFAULT_BATCH,
+            kv_unified=bool(keep(body.kv_unified, "kv_unified")),
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
@@ -585,7 +602,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 kv_cache_type=body.kv_cache_type, speculative=body.speculative,
                 draft=COORD_PREFIX + body.draft_file if body.speculative == "draft" and body.draft_file else None,
                 draft_n_max=body.draft_n_max, flash_attn=body.flash_attn,
-                ubatch=body.ubatch, batch=max(body.batch, body.ubatch))
+                ubatch=body.ubatch, batch=max(body.batch, body.ubatch), kv_unified=body.kv_unified)
 
         check_attention(spec_for(body.ctx_size))
         await check_draft(spec_for(body.ctx_size))
@@ -606,8 +623,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                     hi = mid - 1
             return best
 
-        ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn}
-        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, **ckw)
+        ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn, "parallel": body.parallel,
+               "kv_unified": body.kv_unified}
+        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, mtp=body.speculative == "mtp", **ckw)
         if dmeta is not None:
             need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type, **ckw)
         try:

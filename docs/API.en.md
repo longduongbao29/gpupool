@@ -27,7 +27,7 @@ Three independent secrets exist. A route that needs a secret that is configured 
 
 | Name | Config | Header | Protects |
 | --- | --- | --- | --- |
-| API key | `api_keys` / `GPUPOOL_API_KEYS` (list) | `Authorization: Bearer <key>` | `/v1/*` (any one key of the list works) |
+| API key | `api_keys` / `GPUPOOL_API_KEYS` (list) | `Authorization: Bearer <key>` | `/v1/*` (any one key of the list works; once the list is non-empty the admin key works there too, for the UI's Playground) |
 | Admin key | `admin_key` / `GPUPOOL_ADMIN_KEY` | `Authorization: Bearer <admin key>` | `/api/*`, `/admin/*` |
 | Cluster token | `cluster_token` / `GPUPOOL_CLUSTER_TOKEN` | `Authorization: Bearer <token>` | `/internal/*`, `/files/{name}`, and every agent route except `GET /health` |
 
@@ -56,7 +56,8 @@ curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/state | jq .summary
 
 ## 1. OpenAI-compatible API (`/v1`)
 
-Served by the coordinator's router. Auth: API key (open when `api_keys` is empty).
+Served by the coordinator's router. Auth: API key or the admin key (open when `api_keys` is empty: the admin key
+is not required then, so existing keyless clients keep working).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -75,7 +76,11 @@ forwarded unchanged except that `cache_prompt` defaults to `true`. Rules the rou
 - `"stream": true` returns `text/event-stream`, passed through as received. If the upstream breaks after the
   stream started, one SSE `data:` frame with an `error` object is sent, then the stream ends.
 - Replica choice: prompt-prefix affinity first (rendezvous hash on the conversation prefix, so the same prefix goes to the same
-  replica, for the llama.cpp prompt cache), falling back to the least-loaded replica when the preferred one has more than 2 more requests in flight than the least loaded.
+  replica, for the llama.cpp prompt cache; a multi-turn chat keeps its replica), weighted by each replica's estimated speed so a
+  faster replica gets a larger share, falling back to the least-loaded replica (requests in flight relative to speed) when the
+  preferred one is more than 2 ahead.
+- Every proxied response carries `x-gpupool-replica: <replica id>`, the replica that answered (the Playground
+  shows it; useful when checking routing).
 - A failed attempt (connection error or upstream status >= 500) is retried on another replica, at most
   2 retries (3 attempts), only while nothing has reached the client.
 - **Cold start**: if the model has `min_replicas = 0`, is started (`replicas > 0`) and has no ready replica,
@@ -120,12 +125,13 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `autoscale` | object or null, null | `{target_busy: 0.7 (0,1], up_after_s: 30 >= 0, down_after_s: 300 >= 0}`; null = those defaults. Add a replica when average busy slots / slots stays above `target_busy` for `up_after_s` (or requests queue); remove one when below `target_busy / 2` for `down_after_s` |
 | `idle_unload_s` | float `> 0` or null, null | only with `min_replicas == 0`: unload after this many seconds without a request; the next request cold-starts it |
 | `kv_cache_type` | `"f16"` / `"q8_0"` / `"q4_0"`, `"f16"` | KV cache element type (`-ctk/-ctv`). Bytes per element 2 / 34/32 / 18/32, so q8_0 / q4_0 roughly halve / quarter the KV memory |
-| `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | speculative decoding: `ngram` guesses from the text so far (no extra memory); `draft` runs a small model with the same tokenizer on the head's first GPU |
+| `speculative` | `"none"` / `"ngram"` / `"draft"` / `"mtp"`, `"none"` | speculative decoding: `ngram` guesses from the text so far (no extra memory); `draft` runs a small model with the same tokenizer on the head's first GPU; `mtp` drafts with the model's own multi-token-prediction (nextn) layers, 422 when the GGUF has none |
 | `draft` | string or null, null | source of the draft model, `coordinator://<file>`; only for `speculative: "draft"` (dropped otherwise) |
 | `draft_n_max` | int 1..16, 4 | tokens drafted per step. On a GTX 1650 (3B + 0.5B draft) 4 gave +5 %, 8 was slower than none |
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | llama.cpp `-fa`. Auto turns it on where the GPU supports it. A quantized `kv_cache_type` needs it (`off` with q8_0/q4_0 is a 422) |
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): prompt tokens per pass. Bigger reads long prompts faster on GPUs with tensor cores (cc 7.0+); the compute buffer, charged on every device, grows with it |
 | `batch` | int 32..16384, 2048 | logical batch (`-b`); raised to `ubatch` when smaller |
+| `kv_unified` | bool, false | `-kvu`: the `parallel` slots share one KV pool, so one request may use up to `ctx_size` tokens while the others are short (false: each slot owns `ctx_size / parallel`); same memory |
 
 Validation applied by `PUT /api/models/{name}` and by `/api/simulate` (the same checks):
 
@@ -172,10 +178,11 @@ model; a new model gets the default.
 | `draft_file` | string or null | keep (stored draft), else none |
 | `draft_n_max` | int 1..16 or null | keep, else 4 |
 | `flash_attn`, `ubatch`, `batch` | as above, or null | keep, else `auto` / 512 / 2048 |
+| `kv_unified` | bool or null | keep, else false |
 
 `replicas` is not in the body: a new model starts with `replicas = 0` and an existing model keeps its value.
 Returns the stored `ModelSpec` (JSON). Errors: 422 (bad name, file not ready, bad pin, min > max, idle
-without min 0, draft checks), 401. The reconciler is woken.
+without min 0, draft checks, `mtp` for a GGUF without nextn layers), 401. The reconciler is woken.
 
 ```bash
 curl -s -X PUT $COORD/api/models/qwen-7b -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{
@@ -363,6 +370,7 @@ Body `RecommendBody`:
 | `draft_file` | string or null | for `speculative: "draft"` (same 422 checks as `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
 | `flash_attn`, `ubatch`, `batch` | as in `PUT /api/models`, `auto` / 512 / 2048 | |
+| `kv_unified` | bool, false | |
 
 Response:
 
@@ -389,8 +397,8 @@ Response:
   ranker against the live pool (a tip never needs more GPUs than the request as sent). `apply` holds the
   `PUT /api/models` fields to change; `kind` is `speed`, `throughput` or `fix`; `tier` / `est_*` describe the
   best placement with the tip applied. Ids: `kv_cache`, `smaller_quant` (a smaller quantization of the same
-  model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `ctx_per_slot`,
-  `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
+  model in the library), `ctx_single` (to fit on one GPU instead of several), `parallel`, `kv_unified` (share the context between slots), `ctx_per_slot`,
+  `mtp` (the GGUF has multi-token-prediction layers), `draft` (a compatible small model in the library), `ngram`, `ubatch`, `flash_attn`, and for GPUs without
   tensor cores (compute capability below 7.0) `flash_attn_old_gpu` / `ubatch_old_gpu`. The GPU generation
   comes from each device's `compute_cap`; `ubatch` is only suggested when every GPU of the placement has
   tensor cores. Empty when nothing would help.
@@ -412,7 +420,7 @@ changes. Body:
 
 - `changes[]`: `model` (existing, else 404) plus any of `replicas`, `min_replicas`, `max_replicas`,
   `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`, `pin_devices`, `kv_cache_type`, `speculative`,
-  `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`. Absent = unchanged.
+  `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`, `kv_unified`. Absent = unchanged.
 - `add[]`: `name` (new, `[A-Za-z0-9._-]{1,64}`), `file` (ready library item), plus the same optional fields.
   A new model starts at its floor (`max(min_replicas, 1)`) when `replicas > 0`.
 - Validation as `PUT /api/models` (422); the result of each model is checked in full.
@@ -478,6 +486,7 @@ Everything the web UI shows, in one call (admin key).
 | `events[]` | the 50 newest events |
 | `unread_events` | count of unread events |
 | `rebalance` | `{"in_progress": {...} or null, "next_run_ts": unix time or null}` |
+| `speed_model` | `{"eta": float, "hop_ms": float}`: the decode-speed model the scheduler ranks with (fraction of peak memory bandwidth, milliseconds per RPC server per token), learned from measured speed |
 
 `models[]` entry:
 
@@ -516,7 +525,9 @@ larger id. Returns `{"events": [...], "unread": n}`. An event is
 Event kinds in the code: `server_added`, `server_removed`, `node_online`, `node_offline`, `model_started`,
 `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
 `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`, `unloaded_idle`, `cold_start`,
-`rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`. Warnings and errors are also POSTed to
+`rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (an `mtp` model's head cannot draft with MTP:
+served without speculation), `llama_version_mismatch` (registered servers
+run different llama.cpp builds; a split model needs the same RPC protocol everywhere). Warnings and errors are also POSTed to
 `webhook_url` when configured.
 
 ## 9. Coordinator: health, metrics and legacy admin API
@@ -566,25 +577,26 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, no auth |
-| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version, cached model files, CPU/RAM |
+| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (by the llama.cpp build: `rpc_multi_device` one rpc engine may serve several devices, `spec_mtp`, `kv_unified`), CPU/RAM |
 | POST | `/engines` | start one llama.cpp process from an `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | per-device buffers llama.cpp reported at load |
 | DELETE | `/engines/{engine_id}` | stop an engine, returns its `EngineStatus` |
 | POST | `/models/ensure` | make sure a model file is in the local cache |
 
-**`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<device_id>"`),
-`kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: exactly one local device; server: ordered list such as
+**`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<first device_id>"`),
+`kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: one or more distinct local devices, served by one process; server: ordered list such as
 `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF on the head), `rpc_endpoints` (`"host:port"`, order of
-`RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
-`spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
-`batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (hosts allowed
+`RPC0..`; each RPC server once), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
+`spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` → `draft-simple`, `mtp` → `draft-mtp`),
+`draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
+`batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (hosts allowed
 to reach an rpc engine; enforced only when the agent runs with `rpc_firewall`). Returns `EngineStatus`
 (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`, `port`, `exit_code`, `log_tail` of at
 most 50 lines). Errors: `422` for `extra_args` (not accepted by this agent, so the token cannot become
 arbitrary llama-server flags), a server engine without `model_path`, a `model_path` or `draft_model_path`
-outside the model cache and not returned by `/models/ensure`, a missing file, an rpc engine without exactly
-one device, or a port in use; `409` engine already running; `500` binary not found.
+outside the model cache and not returned by `/models/ensure`, a missing file, an rpc engine without devices
+or with a device listed twice, or a port in use; `409` engine already running; `500` binary not found.
 
 **`GET /engines/{engine_id}/memory`**: llama.cpp prints its buffer sizes when it loads a model; the agent
 parses the head of the engine's log (first 2 MiB) and returns, per device (`CUDA0`, `RPC0`, ...) in MiB, the
@@ -693,7 +705,7 @@ Status codes used by these routes (the body is always `{"detail": "<message>"}`)
 | 403 | the Hugging Face repo is gated or private: set `HF_TOKEN` and accept the licence |
 | 404 | repo or revision not found on Hugging Face, or unknown job id |
 | 409 | the output name is taken (library, a file in `models_dir`, or another unfinished job); the job is not in a state that allows the action |
-| 422 | the source cannot be converted: architecture not supported by the pinned converter (llama.cpp b11342), pre-quantized in a format the converter cannot read (AWQ, bitsandbytes...), no `config.json`, no safetensors / PyTorch weights; also a malformed body (for example both `hf_repo` and `path`); a type that needs an importance matrix with `advanced.imatrix: "off"`; an unusable `advanced.calibration_path` (not a `.txt`, empty, larger than 20 MB) |
+| 422 | the source cannot be converted: architecture not supported by the pinned converter (llama.cpp b11413), pre-quantized in a format the converter cannot read (AWQ, bitsandbytes...), no `config.json`, no safetensors / PyTorch weights; also a malformed body (for example both `hf_repo` and `path`); a type that needs an importance matrix with `advanced.imatrix: "off"`; an unusable `advanced.calibration_path` (not a `.txt`, empty, larger than 20 MB) |
 | 502 | Hugging Face unreachable or answered with an unexpected error |
 | 503 | the conversion toolchain is not set up (`problem` of `/api/convert/options`); `llama-imatrix` is missing while the job needs an importance matrix (a type that needs one, or `advanced.imatrix: "on"`); the built-in calibration text is missing from the install and no `calibration_path` was given |
 | 507 | not enough free disk space. `POST /api/convert` answers 507 at submit when the disk obviously cannot hold *uncached download + 16-bit intermediate + output* (nothing is queued). The worker repeats the check before each heavy stage, because space can shrink while a job waits; that 507 appears as the `error` of a *failed* job (with `failed_stage` set) |

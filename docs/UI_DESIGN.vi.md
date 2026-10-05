@@ -35,6 +35,7 @@ Toàn bộ đóng gói thành Docker image.
     chạy Docker là thư mục được mount).
   - Mỗi dòng model: tên, dung lượng, trạng thái (stopped / starting / running / failed + lỗi), endpoint,
     số replica, ctx, **server/GPU được phép** (tất cả, hoặc chỉ những cái đã tick; xem mục 10), nút **Start** / **Stop**.
+- **Playground**: chat với một model đã deploy và xem nó trả lời nhanh thế nào (mục 12).
 - **Settings**: hiện API base URL, đoạn code client OpenAI, lệnh cài agent.
 
 ## 3. Thay đổi contract (`common/models.py`, mọi field mới đều tuỳ chọn để agent cũ vẫn chạy)
@@ -278,3 +279,73 @@ Trong form New / Edit model:
 - Pin đã lưu, kể cả ký tự thay thế, được nạp lại vào cây khi mở lại form. Recommend, Check placement và
   Preview impact gửi cùng `pin_devices`.
 - Thẻ model hiện chip như *Limited to server-a, server-b/CUDA1* (`/*` hiển thị bằng tên server).
+
+## 11. Các trường hiệu năng trong form model
+
+Phần *Performance* của form New / Edit model ánh xạ một-một vào các trường `ModelSpec`; Recommend, Check
+placement và Preview impact cũng gửi chúng, nên mọi ước lượng đều thấy cùng một cấu hình.
+
+- **Parallel slots** và, khi có hơn một slot, công tắc **Share the context between slots** (`kv_unified`). Bên
+  dưới là dòng cho biết context mỗi request nhận được: `context ÷ slots` (màu hổ phách khi dưới 2048), hoặc cả
+  context "at most, shared with the other slots" khi bật công tắc.
+- **KV cache** (`kv_cache_type`), **Flash attention**, **Micro-batch** và **Batch**, kèm cảnh báo khi cache lượng
+  tử hóa đi với flash attention *Off*.
+- **Speculative decoding**: *Off*, *N-gram*, *Draft model* (một file trong thư viện và số token) hoặc *MTP* (chính
+  các layer dự đoán của model, kèm số token). Dòng trợ giúp dưới *MTP* nói GGUF nào có các layer này; server trả
+  422 với model không có, hiển thị như mọi lỗi khác.
+- Một gợi ý Recommend có `apply` đặt bất kỳ trường nào ở trên (`kv_unified`, `speculative`, `draft_n_max`, ...)
+  sẽ điền chúng vào form; chip trên thẻ model hiện *Spec: MTP* và *N slots · ctx shared*.
+
+## 12. Playground
+
+Trang chat để thử một model đã deploy và xem độ trễ, tốc độ của nó, đúng như client thấy.
+
+- **Đường đi**: trang gửi tới `/v1/chat/completions`, cùng route mà client dùng (router, balancer, replica),
+  với `stream: true` và `stream_options.include_usage`. Trang xác thực bằng admin key đang đăng nhập: khi đã
+  đặt API key, `/v1` nhận thêm admin key; khi chưa có API key thì `/v1` vốn đã mở. Coordinator cũ hơn
+  Playground trả 401, và trang hiện đúng lỗi đó.
+- **Bố cục**: khung chat bên trái, *Settings* bên phải; hai khung cao đúng bằng cửa sổ (trang không có thanh
+  cuộn), chỉ danh sách tin nhắn cuộn. Đầu khung chat hiện tên model và nút *Clear chat*; ô nhập và nút *Send*
+  cao bằng nhau.
+- **Cột cài đặt**: model (các model đang chạy, và model on-demand đang ngủ kèm ghi chú rằng tin nhắn đầu tiên
+  sẽ nạp nó; model đã dừng hoặc lỗi vẫn hiện nhưng không chọn được), system prompt, temperature, max tokens.
+  Phần cài đặt (không phải nội dung chat) được lưu trong `localStorage` (`gpupool.playground`).
+- **Stream**: câu trả lời được đọc từ luồng SSE bằng `fetch` và hiện ra từng ký tự. Phần chữ đã về nhưng chưa
+  hiện được mở ra vài ký tự mỗi khung hình, nhiều hơn khi tồn đọng tăng, nên phần hiển thị không bao giờ trễ
+  hơn luồng dữ liệu quá vài khung hình; có con trỏ nhấp nháy khi đang chạy. Delta `reasoning_content` (model
+  có suy nghĩ) vào khối *Thinking…*, tự thu gọn khi câu trả lời bắt đầu. *Stop* huỷ request
+  (`AbortController`); Enter để gửi, Shift+Enter để xuống dòng. Khung chat chỉ tự cuộn theo khi người đọc
+  đang ở cuối.
+- **Số đo**: dải phía trên khung chat hiện của câu trả lời gần nhất: *Time to first token* (từ lúc gửi đến
+  token đầu: xếp hàng, cold start, xử lý prompt và mạng), *Generation* (tok/s), *Tokens* và *Total latency*,
+  cập nhật trực tiếp khi đang stream. Dưới mỗi câu trả lời, các chip nhắc lại các số đó, thêm số token và tốc
+  độ xử lý prompt (prefill), tốc độ placement ước tính cho replica đó (*est.*, để so với tốc độ đo được), replica đã
+  trả lời (header phản hồi `x-gpupool-replica`), và *cut at max tokens*
+  hoặc *stopped*. Khi đang stream, tốc độ được đếm trong trình duyệt (llama-server gửi mỗi chunk một token);
+  khi xong, `timings` của chính llama-server (`predicted_per_second`, `prompt_per_second`) thay vào, và dòng
+  dưới các chip ghi rõ nguồn đo.
+- **An toàn**: đầu ra của model chỉ được render bằng `x-text`, không bao giờ dưới dạng HTML.
+- **Lối vào**: mục *Playground* ở thanh bên và nút *Chat* trên thẻ model đang chạy hoặc đang ngủ.
+- **Điện thoại**: khung chat lên trước, phần cài đặt ở dưới; dải số đo xếp 2 × 2.
+
+## 13. Hiển thị phiên bản và tốc độ
+
+- **Bản llama.cpp của từng server**: dòng phụ của thẻ server kết thúc bằng `llama.cpp <build>` lấy từ báo cáo
+  của agent. Khi các server chạy bản khác nhau, server nào khác với bản phổ biến nhất có nhãn *Different
+  llama.cpp* (coordinator phát `llama_version_mismatch` trong cùng trường hợp).
+- **Mô hình tốc độ**: khung *Placement health* hiện những gì coordinator học được từ tốc độ đo thật: GPU đạt
+  bao nhiêu phần băng thông bộ nhớ đỉnh và mỗi hop mạng mất bao lâu (`speed_model` trong `/api/state`).
+- **Why here**: dòng của mỗi replica thêm phần thời gian của một token đi đâu, tính từ các thành phần đã lưu
+  trong placement và mô hình tốc độ hiện tại (đọc weight + các hop mạng + logits qua mạng), đúng tổng mà
+  router dùng để đặt trọng số cho replica.
+- **Điện thoại**: các nút ở đầu khung (Check placement / Rebalance now) xuống dòng thay vì tràn ngang.
+- **Hàng đều nhau**: các thẻ model trên một hàng cao bằng nhau, hàng nút nằm sát đáy thẻ.
+- **Khung thu gọn được**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events và các
+  mục trong Settings có mũi tên ở đầu khung (bấm vào tiêu đề cũng được) để thu khung lại chỉ còn phần đầu, nên một khung
+  quá dài (nhiều conversion hay deployment) không đẩy các khung khác ra khỏi màn hình. Mọi khung mặc định mở; khung đã
+  thu gọn được nhớ theo trình duyệt (`localStorage` `gpupool.folded`). Các nút ở đầu khung (Add model, Rebalance
+  now...) vẫn dùng được khi đã thu gọn, và mọi phần đầu khung cao bằng nhau nên các khung thu gọn thẳng hàng.
+- **Dòng làm mờ** (GPU của server offline, sự kiện đã đọc) làm mờ các ô qua một class: dòng bảng có hiệu ứng xuất
+  hiện giữ opacity cuối, hiệu ứng này đè lên style inline đặt trên dòng.
+- **Ô chọn có option sinh động** (model, file trong thư viện, draft) đánh dấu option đang gắn là `:selected`, nên ô
+  luôn hiện đúng giá trị nó giữ kể cả khi option render sau khi giá trị được gán.

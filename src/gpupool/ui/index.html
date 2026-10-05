@@ -34,6 +34,7 @@
       <button :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
       <button :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
       <button :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
+      <button :class="{active: view==='playground'}" @click="go('playground')"><span x-html="icon('chat')"></span> Playground</button>
       <button :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
         <span class="pill red right" x-show="unread() > 0" x-text="unread()"></span></button>
       <button :class="{active: view==='settings'}" @click="go('settings')"><span x-html="icon('gear')"></span> Settings</button>
@@ -119,8 +120,8 @@
 
     <!-- ============ servers (overview + servers) ============ -->
     <div class="cols view" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
-      <div class="panel">
-        <div class="panel-head"><h2>Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
+      <div :class="{folded: folded('servers')}" class="panel">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('servers')}" @click="toggleFold('servers')" :aria-expanded="String(!folded('servers'))" :title="folded('servers') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Servers" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('servers')">Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
         <div class="empty" x-show="filteredServers().length === 0">No servers yet. Click <b>Add Server</b> to register an agent.</div>
         <template x-for="s in filteredServers()" :key="s.node_id">
           <div class="server" :class="{offline: !s.alive}">
@@ -130,8 +131,9 @@
               <div class="grow">
                 <div class="name"><span x-text="s.node_id"></span>
                   <span class="pill green lead live" x-show="s.alive">Online</span>
-                  <span class="pill red lead" x-show="!s.alive">Offline</span></div>
-                <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span></div>
+                  <span class="pill red lead" x-show="!s.alive">Offline</span>
+                  <span class="pill amber lead" x-show="llamaOdd(s)" :title="'Most servers run llama.cpp ' + llamaMajority() + ', this one ' + llamaVer(s) + '. A model split over servers needs the same RPC protocol on all of them: upgrade every agent to the same image.'">Different llama.cpp</span></div>
+                <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span><span x-show="llamaVer(s)"> &middot; llama.cpp <span x-text="llamaVer(s)"></span></span></div>
               </div>
               <div class="meters" x-show="s.report">
                 <div class="meter"><div class="t"><span>CPU</span><span x-text="pct(s.report && s.report.cpu_pct)"></span></div>
@@ -243,15 +245,15 @@
     </div>
 
     <!-- ============ GPUs ============ -->
-    <div class="panel view" x-show="view==='gpus'">
-      <div class="panel-head"><h2>All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
+    <div :class="{folded: folded('gpus')}" class="panel view" x-show="view==='gpus'">
+      <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('gpus')}" @click="toggleFold('gpus')" :aria-expanded="String(!folded('gpus'))" :title="folded('gpus') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand All GPUs" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('gpus')">All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
       <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
       <div class="tbl-scroll tall" x-show="allGpuRows().length > 0">
       <table>
         <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
         <tbody>
           <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
-            <tr :style="r.s.alive ? '' : 'opacity:.55'">
+            <tr :class="{stale: !r.s.alive}" :title="r.s.alive ? '' : 'Server offline: last reported values'">
               <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
               <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id + (archLabel(r.d) ? ' · ' + archLabel(r.d) : '')" :title="archHelp(r.d)"></div>
                 <span class="pill red lead" x-show="r.d.kernels_ok === false" :title="'The agent\'s llama.cpp was built for ' + ((r.s.report && r.s.report.cuda_archs) || []).join(', ') + '. Rebuild with this GPU in CUDA_ARCHS.'">No kernels in this build</span></td>
@@ -276,8 +278,8 @@
         <div class="grow" x-show="rbMove()">Moving replica <b x-text="rbMove() && rbMove().old"></b> of <b x-text="rbMove() && rbMove().model"></b>
           &rarr; <b x-text="rbMove() && rbMove().new"></b>, started <span x-text="rbMove() && ago(rbMove().since)"></span></div>
       </div>
-      <div class="panel">
-        <div class="panel-head wrap"><h2>Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
+      <div :class="{folded: folded('library')}" class="panel">
+        <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('library')}" @click="toggleFold('library')" :aria-expanded="String(!folded('library'))" :title="folded('library') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Model library" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('library')">Model library</h2><span class="muted small">GGUF files the coordinator can serve</span>
           <div class="row right wrap" style="gap:var(--s-2)">
             <button class="btn" @click="openConvert()" title="Turn a Hugging Face model or a folder of weights into a GGUF file"><span x-html="icon('swap')"></span> Convert a model</button>
             <button class="btn primary" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button></div></div>
@@ -310,8 +312,8 @@
 
 
       <!-- ============ conversions ============ -->
-      <div class="panel mt" id="conversions">
-        <div class="panel-head wrap"><h2>Conversions</h2><span class="muted small">Hugging Face or folder to GGUF</span>
+      <div :class="{folded: folded('conversions')}" class="panel mt" id="conversions">
+        <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('conversions')}" @click="toggleFold('conversions')" :aria-expanded="String(!folded('conversions'))" :title="folded('conversions') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Conversions" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('conversions')">Conversions</h2><span class="muted small">Hugging Face or folder to GGUF</span>
           <button class="btn right" @click="openConvert()"><span x-html="icon('plus')"></span> Convert a model</button></div>
         <div class="notice warn" style="margin:var(--s-3) var(--s-4) 0" x-show="convOpts.loaded && !convOpts.available" role="alert">
           <b>Conversion is not available.</b> <span x-text="convOpts.problem || 'The conversion toolchain is not installed on this coordinator.'"></span>
@@ -411,12 +413,13 @@
         </div>
       </div>
 
-      <div class="panel mt">
-        <div class="panel-head"><h2>Placement health</h2><span class="muted small" x-text="rbNextText()"></span>
+      <div :class="{folded: folded('placement')}" class="panel mt">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('placement')}" @click="toggleFold('placement')" :aria-expanded="String(!folded('placement'))" :title="folded('placement') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Placement health" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('placement')">Placement health</h2><span class="muted small" x-text="rbNextText()"></span>
           <div class="row right">
             <button class="btn" @click="runRebalance(true)" :disabled="rb.busy"><span x-html="icon('search')"></span> Check placement</button>
             <button class="btn primary" @click="runRebalance(false)" :disabled="rb.busy || !!rbMove()" :title="rbMove() ? 'A replica is already being moved' : 'Start moving the replica with the biggest gain'"><span x-html="icon('swap')"></span> Rebalance now</button>
           </div></div>
+        <div class="panel-note muted small" x-show="speedModel()" x-text="speedModelText()"></div>
         <div class="empty" x-show="!rb.checked">Check whether any replica would run clearly better on other GPUs. Nothing changes until you press <b>Rebalance now</b>.</div>
         <div class="empty" x-show="rb.checked && rb.moves.length === 0">All replicas are well placed</div>
         <div class="rb-moves" x-show="rb.checked && rb.moves.length > 0">
@@ -432,8 +435,8 @@
         </div>
       </div>
 
-      <div class="panel mt">
-        <div class="panel-head"><h2>Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
+      <div :class="{folded: folded('deployments')}" class="panel mt">
+        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('deployments')}" @click="toggleFold('deployments')" :aria-expanded="String(!folded('deployments'))" :title="folded('deployments') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Deployments" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('deployments')">Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
           <button class="btn primary right" @click="openForm(null)" :disabled="readyLibrary().length === 0" :title="readyLibrary().length === 0 ? 'Add a model to the library first' : ''"><span x-html="icon('plus')"></span> New model</button></div>
         <div class="empty" x-show="filteredModels().length === 0">No deployments. Pick a file from the library and press <b>Deploy</b>.</div>
         <div class="model-grid" x-show="filteredModels().length > 0">
@@ -527,7 +530,8 @@
                   <summary>Why here</summary>
                   <template x-for="p in placementLines(m)" :key="'w' + p.id">
                     <div class="why-item"><b x-text="p.id"></b> (<span x-text="p.state"></span>, <span x-text="p.tier"></span>): <span x-text="p.text"></span>
-                      <div class="rnote" x-show="p.reasons" x-text="p.reasons"></div></div>
+                      <div class="rnote" x-show="p.reasons" x-text="p.reasons"></div>
+                      <div class="rnote" x-show="p.time" x-text="p.time"></div></div>
                   </template>
                 </details>
               </div>
@@ -542,6 +546,7 @@
                   </div>
                 </template>
                 <button class="btn" x-show="m.state==='running' || m.state==='starting' || m.state==='idle'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
+                <button class="btn" x-show="m.state==='running' || m.state==='idle'" @click="pgOpen(m.spec.name)" title="Chat with this model in the Playground"><span x-html="icon('chat')"></span> Chat</button>
                 <div class="row right" style="gap:var(--s-1)">
                   <button class="btn" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
                   <button class="btn ghost danger icon" @click="deleteModel(m)" title="Delete" aria-label="Delete" x-html="icon('trash')"></button>
@@ -554,8 +559,8 @@
     </div>
 
     <!-- ============ Events ============ -->
-    <div class="panel view" x-show="view==='events'">
-      <div class="panel-head"><h2>Events</h2>
+    <div :class="{folded: folded('events')}" class="panel view" x-show="view==='events'">
+      <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('events')}" @click="toggleFold('events')" :aria-expanded="String(!folded('events'))" :title="folded('events') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Events" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('events')">Events</h2>
         <div class="row right">
           <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
           <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div></div>
@@ -565,7 +570,7 @@
         <thead><tr><th>Level</th><th>Event</th><th>Server</th><th>Model</th><th>Time</th></tr></thead>
         <tbody>
           <template x-for="e in filteredEvents()" :key="e.id">
-            <tr :style="e.read ? 'opacity:.7' : ''">
+            <tr :class="{read: e.read}">
               <td><span class="pill lead" :class="evClass(e)" x-text="e.level"></span></td>
               <td class="wrapc"><div x-text="e.message"></div><div class="muted small" x-text="e.kind.replace(/_/g, ' ')"></div></td>
               <td x-text="e.node_id || dash"></td>
@@ -579,8 +584,93 @@
     </div>
 
     <!-- ============ Settings ============ -->
+    <!-- ============ playground ============ -->
+    <div class="view" x-show="view==='playground'"
+         x-effect="if (view === 'playground' && !pgCurrent()) { var f = pgModels().find(function (m) { return m.ok; }); if (f) pg.model = f.name; }">
+      <div class="pg">
+        <section class="panel pg-chat" aria-label="Chat">
+          <div class="panel-head">
+            <h2>Chat</h2>
+            <span class="chip mono" x-show="pg.model" x-text="pg.model"></span>
+            <button class="btn sm right" @click="pgClear()" :disabled="!pg.msgs.length || pg.busy"><span x-html="icon('trash')"></span> Clear chat</button>
+          </div>
+          <div class="pg-stats" aria-live="polite">
+            <div class="pg-stat" title="Time to first token: from sending until the first token arrived (queueing, a cold start, prompt processing, network)">
+              <div class="l">Time to first token</div><div class="v" x-text="pgLast() ? pgMs(pgLast().m.ttft) : dash"></div></div>
+            <div class="pg-stat" title="Generation speed. While streaming: counted in the browser; at the end: llama-server's own measurement">
+              <div class="l">Generation</div><div class="v" x-text="pgLast() ? pgRate(pgLast().m.tps) : dash"></div></div>
+            <div class="pg-stat" title="Tokens generated by the last reply">
+              <div class="l">Tokens</div><div class="v" x-text="pgLast() && pgLast().m.n ? pgLast().m.n : dash"></div></div>
+            <div class="pg-stat" title="Total time of the last request, sending to last token">
+              <div class="l">Total latency</div><div class="v" x-text="pgLast() ? pgMs(pgLast().streaming ? pgLast().m.elapsed : pgLast().m.total) : dash"></div></div>
+          </div>
+          <div class="pg-log" id="pg-log">
+            <div class="pg-empty" x-show="!pg.msgs.length">
+              <div class="pg-empty-ico" x-html="icon('chat')"></div>
+              <div x-show="!pgBlock()"><b>Send a message to start.</b><br><span class="muted">Replies stream as they are generated, with their latency and speed.</span></div>
+              <div x-show="pgBlock()" class="muted" x-text="pgBlock()"></div>
+            </div>
+            <template x-for="(a, i) in pg.msgs" :key="i">
+              <div class="pg-msg" :class="a.role">
+                <div class="pg-bubble" x-show="a.role === 'user'" x-text="a.content"></div>
+                <template x-if="a.role === 'assistant'">
+                  <div class="pg-reply">
+                    <div class="pg-who"><span class="pg-ava" x-html="icon('cube')"></span><span x-text="a.model"></span></div>
+                    <details class="pg-think" x-show="a.reasoning" :open="a.streaming && !a.full">
+                      <summary x-text="a.streaming && !a.full ? 'Thinking…' : 'Thought process'"></summary>
+                      <div class="pg-text muted" x-text="a.rshown"></div>
+                    </details>
+                    <div class="pg-text" :class="{typing: a.streaming || a.content.length < a.full.length}"><span x-text="a.content"></span><span class="pg-wait muted" x-show="a.streaming && !a.full && !a.reasoning">Waiting for the first token…</span></div>
+                    <div class="notice bad small" x-show="a.error" x-text="a.error"></div>
+                    <div class="pg-meta" x-show="!a.streaming || a.m.ttft != null">
+                      <span class="chip" title="Time to first token" x-show="a.m.ttft != null" x-text="'TTFT ' + pgMs(a.m.ttft)"></span>
+                      <span class="chip" title="Generation speed" x-show="a.m.tps != null" x-text="pgRate(a.m.tps)"></span>
+                      <span class="chip" title="What the placement estimated for this replica (the speed the scheduler and the router rank it by)" x-show="!a.streaming && a.m.tps != null && pgEst(a)" x-text="'est. ' + pgRate(pgEst(a))"></span>
+                      <span class="chip" x-show="a.m.n" x-text="a.m.n + ' tokens'"></span>
+                      <span class="chip" title="Total time, sending to last token" x-show="!a.streaming && a.m.total != null" x-text="pgMs(a.m.total) + ' total'"></span>
+                      <span class="chip" title="Prompt processing (prefill): tokens read and llama-server's speed" x-show="a.m.pn != null" x-text="'Prompt ' + a.m.pn + ' tok' + (a.m.ptps ? ' · ' + pgRate(a.m.ptps) : '')"></span>
+                      <span class="chip mono" title="Replica that answered (x-gpupool-replica)" x-show="a.m.replica" x-text="a.m.replica"></span>
+                      <span class="chip amber" x-show="a.finish === 'length'" title="The reply hit Max tokens">Cut at max tokens</span>
+                      <span class="chip" x-show="a.finish === 'stopped'">Stopped</span>
+                    </div>
+                    <div class="pg-src muted" x-show="!a.streaming && a.m.src" x-text="a.m.src === 'server' ? 'Speeds measured by llama-server' : 'Speeds measured in the browser'"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <div class="pg-compose">
+            <textarea rows="2" x-model="pg.input" @keydown="pgKey($event)" :disabled="!!pgBlock()"
+                      :placeholder="pgBlock() || 'Message ' + pg.model" title="Enter to send, Shift+Enter for a new line" aria-label="Message"></textarea>
+            <button class="btn primary" x-show="!pg.busy" @click="pgSend()" :disabled="!pg.input.trim() || !!pgBlock()"><span x-html="icon('send')"></span> Send</button>
+            <button class="btn" x-show="pg.busy" @click="pgStop()"><span x-html="icon('stop')"></span> Stop</button>
+          </div>
+        </section>
+
+        <aside class="panel pg-side" aria-label="Settings">
+          <div class="panel-head"><h2>Settings</h2></div>
+          <div class="pg-side-body">
+            <label class="field"><span>Model</span>
+              <select x-model="pg.model" @change="pgSave()" :disabled="pg.busy">
+                <template x-for="m in pgModels()" :key="m.name"><option :value="m.name" :selected="m.name === pg.model" x-text="m.label" :disabled="!m.ok"></option></template>
+              </select></label>
+            <div class="notice info small" x-show="pgCurrent() && pgCurrent().state === 'idle'">Unloaded to save memory: the first message loads it (a cold start), so it takes longer.</div>
+            <label class="field"><span>System prompt</span>
+              <textarea rows="6" x-model="pg.system" @change="pgSave()" placeholder="Optional, e.g. You are a concise assistant."></textarea></label>
+            <div class="pg-row">
+              <label class="field"><span>Temperature</span>
+                <input type="number" min="0" max="2" step="0.1" x-model="pg.temperature" @change="pgSave()"></label>
+              <label class="field"><span>Max tokens</span>
+                <input type="number" min="1" max="32768" step="1" x-model="pg.maxTokens" @change="pgSave()"></label>
+            </div>
+            <div class="pg-note">Requests go through <code>/v1/chat/completions</code> (router, balancer, replica), so the numbers are what a client sees. Enter sends, Shift+Enter adds a line.</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
     <div class="view" x-show="view==='settings'">
-      <div class="panel"><div class="panel-head"><h2>API</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-api')}" class="panel"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-api')}" @click="toggleFold('set-api')" :aria-expanded="String(!folded('set-api'))" :title="folded('set-api') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand API" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-api')">API</h2></div><div class="panel-body">
         <div class="muted small">OpenAI-compatible base URL</div>
         <div class="cmd" style="margin:6px 0 16px"><span x-text="endpoint()"></span><button class="btn sm" @click="copy(endpoint())">Copy</button></div>
         <div class="muted small">curl</div>
@@ -590,14 +680,14 @@
         <div class="muted small" x-show="!settings().api_keys_set">API key: no key required (no API keys are configured, the OpenAI endpoint is open).</div>
         <div class="muted small" x-show="settings().api_keys_set">API key: use one of the configured keys as the Bearer token.</div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Add a GPU server</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-agent')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-agent')}" @click="toggleFold('set-agent')" :aria-expanded="String(!folded('set-agent'))" :title="folded('set-agent') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Add a GPU server" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-agent')">Add a GPU server</h2></div><div class="panel-body">
         <div class="muted small">Run on each GPU server; it appears under Servers within a few seconds.</div>
         <div class="muted small" style="margin-top:10px">Docker</div>
         <div class="cmd" style="margin-top:6px"><span x-text="agentCmd()"></span><button class="btn sm" @click="copy(agentCmd())">Copy</button></div>
         <div class="muted small" style="margin-top:12px">Without Docker (uv)</div>
         <div class="cmd" style="margin-top:6px"><span x-text="agentCmdUv()"></span><button class="btn sm" @click="copy(agentCmdUv())">Copy</button></div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Appearance</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-look')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-look')}" @click="toggleFold('set-look')" :aria-expanded="String(!folded('set-look'))" :title="folded('set-look') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Appearance" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-look')">Appearance</h2></div><div class="panel-body">
         <div class="row wrap" style="justify-content:space-between">
           <div><div style="font-weight:500">Theme</div><div class="muted small">System follows your operating system setting.</div></div>
           <div class="seg" role="group" aria-label="Theme">
@@ -606,7 +696,7 @@
             <button type="button" :class="{active: theme==='light'}" @click="setTheme('light')">Light</button>
           </div></div>
       </div></div>
-      <div class="panel mt"><div class="panel-head"><h2>Session</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-session')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-session')}" @click="toggleFold('set-session')" :aria-expanded="String(!folded('set-session'))" :title="folded('set-session') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Session" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-session')">Session</h2></div><div class="panel-body">
         <div class="row" style="margin-bottom:14px"><label class="switch"><input type="checkbox" :checked="desktop" @change="toggleDesktop($event.target.checked)"><span></span></label>
           <div><div>Enable desktop alerts</div><div class="muted small">System notification for warnings and errors while this tab is in the background.</div></div></div>
         <button class="btn" @click="logout()"><span x-html="icon('logout')"></span> Log out</button>
@@ -662,7 +752,7 @@
           <div class="row"><input type="text" x-model="addMdl.repo" placeholder="Qwen/Qwen2.5-3B-Instruct-GGUF" @keydown.enter.prevent="listHf()">
             <button class="btn" @click="listHf()" :disabled="addMdl.listing || !addMdl.repo.trim()"><span class="spin" x-show="addMdl.listing"></span> List files</button></div></label>
         <label class="field" x-show="addMdl.files.length"><span>File</span>
-          <select x-model="addMdl.file"><template x-for="f in addMdl.files" :key="f.file"><option :value="f.file" x-text="f.file + '  (' + bytes(f.bytes) + ')'"></option></template></select></label>
+          <select x-model="addMdl.file"><template x-for="f in addMdl.files" :key="f.file"><option :value="f.file" :selected="f.file === addMdl.file" x-text="f.file + '  (' + bytes(f.bytes) + ')'"></option></template></select></label>
         <div class="notice warn" x-show="addMdl.noGguf" role="status"><b>No .gguf files in this repository.</b> It probably holds the original weights. gpupool can convert them to GGUF for you.
           <div><button type="button" class="btn sm primary" @click="convertFromAdd()"><span x-html="icon('swap')"></span> Convert to GGUF</button></div></div>
         <div class="muted small" x-show="!addMdl.noGguf && !addMdl.files.length">Not a GGUF repository? <button type="button" class="link-btn" style="font-size:inherit" @click="convertFromAdd()" :disabled="!addMdl.repo.trim()">Convert it to GGUF</button></div>
@@ -892,16 +982,18 @@
     <div class="modal-body">
       <label class="field"><span>File (from the library)</span>
         <select x-model="form.file" @change="form.plan = null; form.rec = null; form.sim = null; if (form.draftFile === form.file) form.draftFile = ''">
-          <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" x-text="form.file"></option></template>
-          <template x-for="l in readyLibrary()" :key="l.name"><option :value="l.name" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
+          <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" selected x-text="form.file"></option></template>
+          <template x-for="l in readyLibrary()" :key="l.name"><option :value="l.name" :selected="l.name === form.file" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
         </select></label>
       <label class="field"><span>Name (served as the model id)</span><input type="text" x-model="form.name" :disabled="form.edit"></label>
       <div class="row">
         <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" @input="form.rec = null" style="width:100%"></label>
         <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
       </div>
+      <div class="opt-row" x-show="(parseInt(form.parallel, 10) || 1) > 1" style="margin-bottom:var(--s-2)"><label class="switch"><input type="checkbox" x-model="form.kvu" @change="form.rec = null; form.sim = null" aria-label="Share the context between slots"><span></span></label>
+        <div class="txt"><div>Share the context between slots</div><div class="help">Any one request may use the whole context while the others are short; same memory (llama.cpp <code>-kvu</code>).</div></div></div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)" :class="{warn: ctxPerSlot() < 2048}">
-        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context (context &divide; slots).
+        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context<span x-text="form.kvu && (parseInt(form.parallel, 10) || 1) > 1 ? ' at most, shared with the other slots' : ' (context ÷ slots)'"></span>.
         More slots serve more users at once (continuous batching): total tok/s grows, one request alone slows slightly.</div>
       <div class="row">
         <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" @input="form.sim = null" style="width:100%"></label>
@@ -938,12 +1030,17 @@
         <select x-model="form.spec" @change="form.rec = null; form.sim = null" style="width:100%">
           <option value="none">Off</option>
           <option value="ngram">N-gram (no extra memory)</option>
-          <option value="draft">Draft model</option></select></label>
+          <option value="draft">Draft model</option>
+          <option value="mtp">MTP (the model's own prediction layers)</option></select></label>
+      <div class="row" x-show="form.spec==='mtp'">
+        <label class="field"><span>Draft tokens</span><input type="number" min="1" max="16" step="1" x-model="form.draftN" @input="form.rec = null; form.sim = null" style="width:110px"></label>
+      </div>
+      <div class="muted small" x-show="form.spec==='mtp'" style="margin:-4px 0 var(--s-3)">Only for GGUFs that ship multi-token-prediction (nextn) layers, such as Qwen3.5, GLM-4.5 and newer, DeepSeek V3. No extra file; the server refuses models without them.</div>
       <div class="row" x-show="form.spec==='draft'">
         <label class="field grow"><span>Draft model (from the library)</span>
           <select x-model="form.draftFile" @change="form.rec = null; form.sim = null" style="width:100%">
             <option value="">Select a draft model...</option>
-            <template x-for="l in draftChoices()" :key="l.name"><option :value="l.name" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
+            <template x-for="l in draftChoices()" :key="l.name"><option :value="l.name" :selected="l.name === form.draftFile" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
           </select></label>
         <label class="field"><span>Draft tokens</span><input type="number" min="1" max="16" step="1" x-model="form.draftN" @input="form.rec = null; form.sim = null" style="width:110px"></label>
       </div>

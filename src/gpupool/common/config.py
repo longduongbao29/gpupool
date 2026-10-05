@@ -44,6 +44,9 @@ class AgentConfig(BaseModel):
     # ggml-rpc-server has no authentication: anyone who reaches its port can use the GPU. When
     # on, each RPC engine's port only accepts its head node (iptables; needs root/NET_ADMIN).
     rpc_firewall: bool = False
+    # Cap on ggml-rpc-server's weight cache ($LLAMA_CACHE/rpc), in GB; least recently used tensor
+    # files are deleted above it. 0 = no cap (llama.cpp itself never deletes them).
+    rpc_cache_gb: float = Field(default=100.0, ge=0)
 
 
 class CoordinatorConfig(BaseModel):

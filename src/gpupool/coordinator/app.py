@@ -41,6 +41,7 @@ from gpupool.coordinator.store import ServerRecord, Store, gpu_key
 from gpupool.router.balancer import Balancer
 from gpupool.router.proxy import RouterMetrics, make_router, prom_label_escape
 from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
+from gpupool.scheduler.scoring import current_tps
 
 log = logging.getLogger("gpupool.coordinator")
 
@@ -115,6 +116,13 @@ def _safe_file(models_dir: Path, name: str) -> Path:
     if not p.is_file():
         raise FileNotFoundError(f"no such file: {name}")
     return p
+
+
+def router_keys(cfg: CoordinatorConfig) -> list[str]:
+    """Keys /v1 accepts. The admin key also works there once API keys are set, so the UI's
+    Playground can chat with the admin login; with no API key /v1 stays open (requiring the
+    admin key then would lock out every client)."""
+    return [*cfg.api_keys, cfg.admin_key] if cfg.api_keys and cfg.admin_key else list(cfg.api_keys)
 
 
 def create_app(
@@ -353,10 +361,13 @@ def create_app(
         if cur[0] == v:
             return cur
         names = [m.name for m in store.list_models()]
-        ready: dict[str, list[tuple[str, str, int]]] = {}
+        ready: dict[str, list[tuple]] = {}  # (replica, head, port, speed parts or None, est tps)
         for r in store.list_replicas(states={"ready"}):
+            p = r.placement
             ready.setdefault(r.model, []).append(
-                (r.replica_id, r.placement.head_node, r.placement.head_port))
+                (r.replica_id, p.head_node, p.head_port,
+                 (p.est_bw_s, p.est_hops, p.est_logits_s) if p.est_bw_s else None,
+                 p.est_decode_tps or 0.0))
         nodes = {n.report.node_id: n for n in store.list_nodes()}
         snap = cur = (v, names, ready, nodes)
         return cur
@@ -364,19 +375,28 @@ def create_app(
     def get_candidates(model: str) -> list[ReplicaEndpoint]:
         now = reconciler.clock()
         _, _, ready, nodes = _snapshot()
+        # Weight = the placement's estimated speed, recomputed with the current speed model (which
+        # learns from measured speed). Not llama-server's measured rate itself: it covers the last
+        # scrape interval only (its bucket resets on every /metrics read), 0 when idle and lower when
+        # busy, and every change of a weight moves prefixes away from their KV cache.
+        rows = [(rid, head, port, current_tps(*parts) if parts else tps)
+                for rid, head, port, parts, tps in ready.get(model, ())]
+        known = [tps for *_, tps in rows if tps > 0]
+        default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []
-        for replica_id, head_node, head_port in ready.get(model, ()):
+        for replica_id, head_node, head_port, tps in rows:
             n = nodes.get(head_node)
             if n is None or not reconciler.node_alive(n, now):
                 continue
             out.append(ReplicaEndpoint(
-                replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}"))
+                replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}",
+                weight=tps if tps > 0 else default))
         return out
 
     app.include_router(make_router(
         get_candidates=get_candidates,
         list_models=lambda: list(_snapshot()[1]),
-        balancer=balancer, metrics=metrics, api_keys=cfg.api_keys,
+        balancer=balancer, metrics=metrics, api_keys=router_keys(cfg),
         on_replica_error=reconciler.note_error,
         max_body_bytes=cfg.max_request_mb * 1024 * 1024,
         on_request=autoscaler.note_request, can_cold_start=autoscaler.can_cold_start,

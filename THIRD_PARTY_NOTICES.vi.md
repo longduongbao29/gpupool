@@ -35,9 +35,9 @@ phát hành đặt ra.
 
 | Thành phần | Phiên bản | Giấy phép | Liên kết |
 | --- | --- | --- | --- |
-| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11342` | MIT (theo upstream) | <https://github.com/ggml-org/llama.cpp> |
+| llama.cpp (`llama-server`, `ggml-rpc-server`, `llama-quantize`, `llama-imatrix`, `llama-tokenize`, ggml) | tag `b11413` | MIT (theo upstream) | <https://github.com/ggml-org/llama.cpp> |
 
-- **Image agent** (`docker/agent.Dockerfile`) biên dịch llama.cpp b11342 với CUDA và chứa các tệp thực thi.
+- **Image agent** (`docker/agent.Dockerfile`) biên dịch llama.cpp b11413 với CUDA và chứa các tệp thực thi.
 - **Image coordinator** build với `WITH_CONVERT=1` (`docker/coordinator.Dockerfile`) biên dịch các công cụ CPU
   `llama-quantize`, `llama-tokenize`, `llama-simple`, `llama-imatrix`, và sao chép `convert_hf_to_gguf.py`,
   `conversion/`, `gguf-py/` từ cùng tag vào `/opt/llama.cpp`, kèm tệp `LICENSE` của upstream
@@ -94,7 +94,7 @@ Apache-2.0, BSD-3-Clause, MIT, MIT và BSD-2-Clause (đã xác minh).
 ## Môi trường chuyển đổi (image coordinator với `WITH_CONVERT=1`)
 
 Image chứa một virtualenv riêng, `/opt/convert-venv`, cài từ `requirements/requirements-convert_hf_to_gguf.txt` của
-llama.cpp tại tag b11342 (bản PyTorch CPU). Các gói này không được cài trong môi trường của kho mã này nên giấy phép
+llama.cpp tại tag b11413 (bản PyTorch CPU). Các gói này không được cài trong môi trường của kho mã này nên giấy phép
 được ghi theo upstream; nếu cần chắc chắn, xem danh sách chính xác trong image bằng
 `docker run --rm --entrypoint /opt/convert-venv/bin/python <image> -m pip list`.
 
@@ -119,7 +119,7 @@ các thành phần bên thứ ba kèm thông báo riêng; xem <https://github.co
 | `python:3.12-slim` (image nền của coordinator) | Python theo Giấy phép PSF; image còn chứa các gói Debian, mỗi gói có giấy phép riêng | <https://docs.python.org/3/license.html>, <https://hub.docker.com/_/python>; văn bản từng gói nằm ở `/usr/share/doc/*/copyright` trong image |
 | `nvidia/cuda:*-devel-ubuntu*` và `nvidia/cuda:*-runtime-ubuntu*` (image nền của agent, mặc định CUDA 12.8.1 trên Ubuntu 22.04) | NVIDIA CUDA EULA và giấy phép NVIDIA Deep Learning Container, cùng giấy phép các gói Ubuntu | xem lưu ý bên dưới |
 | Python 3.12 (image agent; bản CPython do uv tải) | Giấy phép PSF | python-build-standalone, <https://github.com/astral-sh/python-build-standalone> |
-| iptables, libgomp1 và các gói Debian/Ubuntu khác cài trong image | GPL/LGPL và khác, theo từng gói | văn bản ở `/usr/share/doc/*/copyright` trong image |
+| iptables, libgomp1, libibverbs1 / ibverbs-providers (rdma-core) và các gói Debian/Ubuntu khác cài trong image | GPL/LGPL và khác, theo từng gói | văn bản ở `/usr/share/doc/*/copyright` trong image |
 
 ### Điều khoản của NVIDIA đối với image agent
 

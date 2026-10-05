@@ -18,8 +18,10 @@ Spread = Literal["gpu", "node", "none"]
 # KV cache element type. Bytes per element: f16 2, q8_0 34/32, q4_0 18/32 (llama.cpp block formats).
 KvCacheType = Literal["f16", "q8_0", "q4_0"]
 # Speculative decoding: "ngram" guesses from the text so far (no extra memory); "draft" runs a small
-# model with the same tokenizer on the head's GPU. Fewer target passes = fewer RPC round trips.
-SpecMode = Literal["none", "ngram", "draft"]
+# model with the same tokenizer on the head's GPU; "mtp" drafts with the model's own multi-token-
+# prediction (nextn) blocks, for GGUFs that ship them (Qwen3.5, GLM-4.5+, DeepSeek...).
+# Fewer target passes = fewer RPC round trips.
+SpecMode = Literal["none", "ngram", "draft", "mtp"]
 # llama.cpp -fa. "auto" turns flash attention on wherever the backend supports it (b11342 default).
 FlashAttn = Literal["auto", "on", "off"]
 # Logical (-b) and physical (-ub) batch sizes, llama.cpp defaults. A bigger micro-batch processes long
@@ -77,10 +79,11 @@ class Device(BaseModel):
 class EngineSpec(BaseModel):
     """Coordinator -> agent: start one llama.cpp process."""
 
-    engine_id: str  # "<replica_id>-head" | "<replica_id>-rpc-<device_id>"
+    engine_id: str  # "<replica_id>-head" | "<replica_id>-rpc-<first device_id it serves>"
     kind: EngineKind
     port: int
-    # rpc: exactly one local device. server: full ordered list, e.g. ["CUDA0", "RPC0", "RPC1"].
+    # rpc: the local devices one ggml-rpc-server serves, in -d order (one for agents before 0.6).
+    # server: full ordered list, e.g. ["RPC0", "RPC1", "CUDA0"] (the head's own GPUs last).
     devices: list[str]
     model: str | None = None  # server: alias served at /v1/models
     model_path: str | None = None  # server: GGUF path on the head node
@@ -97,6 +100,7 @@ class EngineSpec(BaseModel):
     draft_n_max: int = 4
     # Optional since 0.5; an older agent ignores them (llama.cpp defaults: auto, 2048, 512).
     flash_attn: FlashAttn = "auto"
+    kv_unified: bool = False  # -kvu (optional since 0.6)
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
     # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
@@ -128,6 +132,10 @@ class NodeReport(BaseModel):
     cuda_archs: list[str] | None = None
     models: list[str]  # GGUF file names present in the local cache
     ts: float
+    # What this agent can do beyond the 0.5 baseline; the coordinator only uses a capability the
+    # agent reports, so a coordinator can be upgraded before its agents.
+    #   "rpc_multi_device": one ggml-rpc-server process serves several devices (-d CUDA0,CUDA1).
+    features: list[str] = Field(default_factory=list)
     # Optional host telemetry for the UI.
     cpu_pct: float | None = None
     ram_used_mb: int | None = None
@@ -166,6 +174,9 @@ class ModelSpec(BaseModel):
     # Measured on a GTX 1650 (Qwen2.5-3B + 0.5B draft): 4 drafted tokens +5 %, 8 slower than none.
     draft_n_max: int = Field(default=4, ge=1, le=16)
     flash_attn: FlashAttn = "auto"
+    # llama.cpp -kvu: the slots share one KV pool, so one request may use the whole ctx_size while
+    # the others are short (False: each slot owns ctx_size / parallel). Same memory either way.
+    kv_unified: bool = False
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)  # -b, never below ubatch at launch
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)  # -ub; sizes the compute buffer
 
@@ -210,6 +221,20 @@ class ModelMeta(BaseModel):
     # Tokenizer identity, to check a draft model matches its target (llama.cpp refuses otherwise).
     vocab_size: int | None = None
     tokenizer_model: str | None = None  # tokenizer.ggml.model, e.g. "gpt2", "llama"
+    # Per-layer cache layout as llama.cpp b11342 allocates it (None: unknown, every layer is
+    # estimated with n_head_kv x head_dim for K and V, the old rule). Elements per cached token:
+    kv_k: list[int] | None = None  # K row (0: the layer has no KV cache, e.g. recurrent)
+    kv_v: list[int] | None = None  # V row (0 with MLA: V is a view of the latent K)
+    swa: list[bool] | None = None  # sliding-window layer: caches only n_swa (+ ubatch) tokens
+    n_swa: int = 0
+    state_bytes: list[int] | None = None  # recurrent state per sequence (f32 conv + ssm)
+    # Multi-token-prediction layers at the end of the block list. llama.cpp loads them (and
+    # caches for them) only for --spec-type draft-mtp; their weights are kept apart.
+    n_nextn: int = 0
+    nextn_bytes: int = 0
+    # Bytes one decoded token reads per layer: MoE layers read only the routed experts.
+    # None: every byte of the layer (dense).
+    active_bytes: list[int] | None = None
 
 
 class DeviceAssignment(BaseModel):
@@ -234,9 +259,16 @@ class Placement(BaseModel):
     # Why the scheduler chose this placement (absent on placements made before 0.3).
     score: float | None = None
     est_decode_tps: float | None = None  # bandwidth-based estimate, None when unknown
+    # What est_decode_tps is made of, so it can be recomputed with the current speed model
+    # (scheduler/scoring.py): seconds to stream the weights at full bandwidth, RPC servers on the
+    # way, seconds for logits crossing the network. est_bw_s None: unknown (older placement).
+    est_bw_s: float | None = None
+    est_hops: int = 0
+    est_logits_s: float = 0.0
     reasons: list[str] = Field(default_factory=list)
     # Speculative "draft": the draft model's memory, placed on the head's first local CUDA device
-    # (assignments[0]); included in that assignment's est_mb and in est_total_mb.
+    # (its first local CUDA assignment; the head's GPUs come last in the order); included in that
+    # assignment's est_mb and in est_total_mb.
     draft_est_mb: int | None = None
     # Calibrated memory factor every est_mb above was multiplied by. Calibration divides it back out:
     # a sample against already-scaled estimates would converge on sqrt(true ratio), not the ratio.
@@ -270,3 +302,6 @@ class ReplicaEndpoint(BaseModel):
     replica_id: str
     model: str
     base_url: str  # "http://10.0.0.5:9001" (llama-server on the head)
+    # Relative serving speed (the placement's estimated decode tok/s): a replica twice as fast gets
+    # twice the share of new prefixes. Only ratios between replicas of one model matter.
+    weight: float = 1.0

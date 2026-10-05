@@ -2,6 +2,30 @@
 
 > English version. Vietnamese version: [TEST_REPORT.vi.md](TEST_REPORT.vi.md). Keep both in sync.
 
+## 2026-10-05 (engine pass: RPC topology, MTP, KV layout)
+
+Changes: one `ggml-rpc-server` per server and replica, `draft-mtp` speculative decoding, `kv_unified`, per-layer
+KV estimate (SWA, MLA, hybrid, on-demand MTP blocks), MoE decode speed, calibration reset on an estimator change,
+stable routing key for multi-turn chats, uncapped router pool, body forwarding, cold-start overlap, RPC cache on
+`/data` with a size cap, RDMA in the agent image (pull request #5; design in [DESIGN.en.md](DESIGN.en.md)).
+
+### Results
+
+| Check | How | Result |
+| --- | --- | --- |
+| Unit and API tests | `uv run pytest -q` | 885 passed, 5 skipped |
+| Flags against llama.cpp | every flag, KV-layout rule and RPC behaviour read from the b11342 source (`common/arg.cpp`, `llama-hparams.cpp`, `llama-kv-cache*.cpp`, `src/models/*.cpp`, `ggml-rpc.cpp`, `transport.cpp`) | `-kvu`, `--spec-type draft-mtp`, `-d CUDA0,CUDA1` exist; RDMA falls back to TCP; a missing cache file only resends the tensor |
+| KV layout | synthetic GGUFs per family (gemma3 SWA, deepseek2 MLA, qwen35 hybrid + MTP, nemotron_h, MoE) | sizes match the llama.cpp formulas, unknown architectures keep the old rule |
+| UI | Chromium against `scripts/ui_mock_server.py` | shared-context switch and MTP option render, no page errors |
+| Images | CI `agent` / `coordinator` / `e2e` jobs | run on the pull request |
+
+### Still to do
+
+- Run a split model on real GPUs: decode speed with one RPC server for two GPUs of one server versus one per GPU;
+  `draft-mtp` acceptance and speed on a Qwen3.5 or GLM GGUF; measured buffers of a SWA and a hybrid model against
+  the new estimate.
+- RDMA on real InfiniBand / RoCE hardware.
+
 ## 2026-10-03 (conversion, round 2: importance matrices, IQ types, early disk check)
 
 Features: IQ1/IQ2/IQ3 quantization types with importance matrices (the *calibrating* stage), the disk check at

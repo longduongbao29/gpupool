@@ -230,3 +230,15 @@ def test_calibration_roundtrip_planning_clamp_and_delete_model():
     s.put_state("autoscaler:m", {"desired": 0})
     s.delete_model("m")
     assert s.get_calibration("m") is None and s.get_state("autoscaler:m") is None
+
+
+def test_calibration_resets_when_the_estimator_changes(tmp_path, monkeypatch):
+    import gpupool.coordinator.store as store_mod
+    db = tmp_path / "c.db"
+    s = store_mod.Store(db)
+    s.put_calibration("m", 0.5, 3)
+    s._conn.close()
+    assert store_mod.Store(db).get_calibration("m") is not None  # same estimator: kept
+    monkeypatch.setattr(store_mod, "ESTIMATOR_VERSION", store_mod.ESTIMATOR_VERSION + 1)
+    s = store_mod.Store(db)
+    assert s.get_calibration("m") is None and s.mem_factor("m") == 1.0

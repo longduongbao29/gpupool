@@ -35,6 +35,7 @@ one button. Everything ships as Docker images.
     in Docker, a mounted folder).
   - Each model row: name, size, status (stopped / starting / running / failed + error), endpoint,
     replicas, ctx, **allowed servers/GPUs** (all, or only the ticked ones; see section 10), **Start** / **Stop** buttons.
+- **Playground**: chat with a deployed model and see how fast it answers (section 12).
 - **Settings**: shows the API base URL, the OpenAI client snippet, the agent install command.
 
 ## 3. Contract changes (`common/models.py`, all new fields optional, so old agents keep working)
@@ -280,3 +281,73 @@ In the New / Edit model form:
   Check placement and Preview impact send the same `pin_devices`.
 - The model card shows a chip such as *Limited to server-a, server-b/CUDA1* (`/*` is shown as the
   server name).
+
+## 11. Performance fields of the model form
+
+The *Performance* part of the New / Edit model form maps one to one to `ModelSpec` fields; Recommend,
+Check placement and Preview impact send them too, so every estimate sees the same settings.
+
+- **Parallel slots** and, once there is more than one slot, a **Share the context between slots** switch
+  (`kv_unified`). Under them a line states the context one request gets: `context ÷ slots` (amber below
+  2048), or the whole context "at most, shared with the other slots" when the switch is on.
+- **KV cache** (`kv_cache_type`), **Flash attention**, **Micro-batch** and **Batch**, with a warning when
+  a quantized cache meets flash attention *Off*.
+- **Speculative decoding**: *Off*, *N-gram*, *Draft model* (a library file and a token count) or
+  *MTP* (the model's own prediction layers, with a token count). The help line under *MTP* says which
+  GGUFs have such layers; the server answers 422 for a model without them, shown like any other error.
+- A Recommend tip whose `apply` sets any of these fields (`kv_unified`, `speculative`, `draft_n_max`,
+  ...) fills them in the form; the model card's chips show *Spec: MTP* and *N slots · ctx shared*.
+
+## 12. Playground
+
+A chat page for trying a deployed model and seeing its latency and speed, as a client would.
+
+- **Route**: the page posts to `/v1/chat/completions`, the same route clients use (router, balancer,
+  replica), with `stream: true` and `stream_options.include_usage`. It authenticates with the admin key it
+  is signed in with: once API keys are set, `/v1` also accepts the admin key; with no API key `/v1` is open
+  anyway. A coordinator older than the Playground answers 401, shown as such.
+- **Layout**: the chat on the left, *Settings* on the right; both panels are exactly as tall as the window
+  (no page scrollbar), and only the message log scrolls. The chat panel's header shows the model and a
+  *Clear chat* button; the message box and *Send* are the same height.
+- **Settings column**: model (running models, and idle on-demand ones with a note that the first message
+  loads them; stopped or failed models are listed but disabled), system prompt, temperature, max tokens.
+  These settings, not the chat, are kept in `localStorage` (`gpupool.playground`).
+- **Streaming**: the reply is read from the SSE stream with `fetch` and appears character by character. Text
+  that has arrived but is not shown yet is revealed a few characters per frame, more when the backlog grows,
+  so the display never trails the stream by more than a few frames, with a blinking cursor while it runs.
+  `reasoning_content` deltas (thinking models) go to a *Thinking…* block, collapsed once the answer starts.
+  *Stop* aborts the request (`AbortController`); Enter sends, Shift+Enter adds a line. The log follows the
+  reply only while the reader is at the bottom.
+- **Numbers**: a strip above the log shows the last reply's *Time to first token* (from sending to the first
+  token: queueing, a cold start, prompt processing and network), *Generation* (tok/s), *Tokens* and *Total
+  latency*, updated live while it streams. Under each reply, chips repeat them and add the prompt (prefill)
+  tokens and speed, the placement's estimate for that replica (*est.*, to compare with the measured speed) and the
+  replica that answered (`x-gpupool-replica` response header), plus *cut at max
+  tokens* or *stopped*. While streaming, speed is counted in the browser (llama-server sends one token per
+  chunk); at the end llama-server's own `timings` (`predicted_per_second`, `prompt_per_second`) replace it,
+  and the line under the chips says which source was used.
+- **Safety**: model output is rendered with `x-text` only, never as HTML.
+- **Entry points**: the *Playground* item in the sidebar and a *Chat* button on running and idle model cards.
+- **Phone**: the chat comes first and the settings below it; the stats strip is two by two.
+
+## 13. Build and speed visibility
+
+- **llama.cpp build per server**: the server card's subtitle ends with `llama.cpp <build>` from the agent's
+  report. When servers run different builds, the ones that differ from the most common build get a
+  *Different llama.cpp* badge (the coordinator raises `llama_version_mismatch` for the same case).
+- **Speed model**: the *Placement health* panel shows what the coordinator learned from measured speed:
+  the share of peak memory bandwidth GPUs reach and the time per network hop (`speed_model` in `/api/state`).
+- **Why here**: each replica's line adds where a token's time goes, from its placement's stored parts and the
+  current speed model (reading weights + network hops + logits over the network), the same sum the router
+  weighs replicas by.
+- **Phone**: panel header buttons (Check placement / Rebalance now) wrap instead of overflowing.
+- **Even rows**: model cards in a row share its height, with their action row at the bottom.
+- **Collapsible panels**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events and
+  the Settings sections have a chevron in their header (a click on the title works too) that folds the panel down to
+  its header, so a long one (many conversions or deployments) does not push the others off screen. Every panel starts
+  open; folded ones are remembered per browser (`localStorage` `gpupool.folded`). Header buttons (Add model, Rebalance
+  now...) keep working while folded, and every header has the same height, so folded panels line up.
+- **Dimmed rows** (a GPU of an offline server, an event already read) dim their cells through a class: table rows
+  play an enter animation that keeps its final opacity, which would override an inline style on the row.
+- **Selects with generated options** (model, library file, draft) mark the bound option `:selected`, so the
+  box shows the value it holds even when the options render after the value is set.

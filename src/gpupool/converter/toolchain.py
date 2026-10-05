@@ -367,18 +367,23 @@ class Toolchain:
         return cmd
 
     def imatrix_cmd(self, model: Path, calibration: Path, out: Path, chunks: int = 100,
-                    threads: int = 0) -> list[str]:
+                    threads: int = 0, nextn: bool = False) -> list[str]:
         """llama-imatrix at b11342 (flags from common/arg.cpp, defaults from imatrix.cpp):
         -m model, -f calibration text, -o output (GGUF by default, which llama-quantize
         --imatrix reads), --chunks N (max chunks to process), -c 512 (the usual imatrix context:
         short sequences keep the CPU run fast), --no-ppl (skip the perplexity pass, it only
-        costs time), -ngl 0 (CPU only, like the rest of the toolchain), -t threads when given."""
+        costs time), -ngl 0 (CPU only, like the rest of the toolchain), -t threads when given.
+        nextn (b11413): also collect data for the model's MTP (nextn) layers, which llama.cpp
+        otherwise skips; without it a type that needs a matrix has none for those tensors. It needs
+        one sequence per batch, so the batch is capped at the 512-token context."""
         base = self._tool_cmd("llama-imatrix")
         if base is None:
             from gpupool.converter.models import ConvertError
             raise ConvertError(IMATRIX_NOT_INSTALLED, 503)
         cmd = [*base, "-m", str(model), "-f", str(calibration), "-o", str(out),
                "--chunks", str(max(1, int(chunks))), "-c", "512", "--no-ppl", "-ngl", "0"]
+        if nextn:
+            cmd += ["--nextn", "-b", "512"]
         if threads > 0:
             cmd += ["-t", str(threads)]
         return cmd

@@ -26,7 +26,7 @@ kiểm tra khi chưa cấu hình khóa nào khác rỗng).
 
 | Tên | Cấu hình | Header | Bảo vệ |
 | --- | --- | --- | --- |
-| API key | `api_keys` / `GPUPOOL_API_KEYS` (danh sách) | `Authorization: Bearer <key>` | `/v1/*` (một khóa bất kỳ trong danh sách là được) |
+| API key | `api_keys` / `GPUPOOL_API_KEYS` (danh sách) | `Authorization: Bearer <key>` | `/v1/*` (một khóa bất kỳ trong danh sách là được; khi danh sách không rỗng thì admin key cũng dùng được ở đây, cho Playground của UI) |
 | Admin key | `admin_key` / `GPUPOOL_ADMIN_KEY` | `Authorization: Bearer <admin key>` | `/api/*`, `/admin/*` |
 | Cluster token | `cluster_token` / `GPUPOOL_CLUSTER_TOKEN` | `Authorization: Bearer <token>` | `/internal/*`, `/files/{name}` và mọi route của agent trừ `GET /health` |
 
@@ -55,7 +55,8 @@ curl -s -H "Authorization: Bearer $ADMIN" $COORD/api/state | jq .summary
 
 ## 1. API tương thích OpenAI (`/v1`)
 
-Do router của coordinator phục vụ. Xác thực: API key (mở khi `api_keys` trống).
+Do router của coordinator phục vụ. Xác thực: API key hoặc admin key (mở khi `api_keys` trống: khi đó không
+đòi admin key, nên các client không dùng khóa vẫn chạy như cũ).
 
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
@@ -74,8 +75,11 @@ chuyển tiếp nguyên vẹn, chỉ có `cache_prompt` mặc định là `true`
 - `"stream": true` trả `text/event-stream`, chuyển tiếp nguyên như nhận được. Nếu upstream đứt sau khi
   stream đã bắt đầu, router gửi một frame SSE `data:` chứa object `error` rồi đóng stream.
 - Chọn replica: ưu tiên theo prefix của prompt (rendezvous hash trên phần đầu hội thoại, nên cùng prefix đi
-  vào cùng replica, để tận dụng prompt cache của llama.cpp), và chuyển sang replica ít tải nhất khi replica
-  được ưu tiên đang có nhiều hơn replica ít tải nhất quá 2 request.
+  vào cùng replica, để tận dụng prompt cache của llama.cpp; hội thoại nhiều lượt giữ nguyên replica), có trọng số
+  theo tốc độ ước lượng của từng replica nên replica nhanh hơn nhận nhiều hơn, và chuyển sang replica ít tải nhất
+  (số request đang chạy so với tốc độ) khi replica được ưu tiên vượt quá 2.
+- Mọi phản hồi được chuyển tiếp đều có header `x-gpupool-replica: <replica id>`, tức replica đã trả lời
+  (Playground hiện nó; hữu ích khi kiểm tra định tuyến).
 - Lần thử lỗi (lỗi kết nối hoặc upstream trả status >= 500) được thử lại trên replica khác, tối đa 2 lần
   thử lại (3 lần thử), và chỉ khi chưa có byte nào tới client.
 - **Khởi động lạnh**: nếu model có `min_replicas = 0`, đã start (`replicas > 0`) và chưa có replica sẵn
@@ -120,12 +124,13 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `autoscale` | object hoặc null, null | `{target_busy: 0.7 (0,1], up_after_s: 30 >= 0, down_after_s: 300 >= 0}`; null = các giá trị mặc định đó. Thêm replica khi (slot bận / tổng slot) trung bình vượt `target_busy` liên tục `up_after_s` (hoặc có request xếp hàng); bớt một replica khi dưới `target_busy / 2` liên tục `down_after_s` |
 | `idle_unload_s` | float `> 0` hoặc null, null | chỉ khi `min_replicas == 0`: dỡ model sau chừng này giây không có request; request kế tiếp sẽ khởi động lạnh nó |
 | `kv_cache_type` | `"f16"` / `"q8_0"` / `"q4_0"`, `"f16"` | kiểu phần tử của KV cache (`-ctk/-ctv`). Byte mỗi phần tử 2 / 34/32 / 18/32, nên q8_0 / q4_0 giảm bộ nhớ KV còn khoảng một nửa / một phần tư |
-| `speculative` | `"none"` / `"ngram"` / `"draft"`, `"none"` | giải mã suy đoán: `ngram` đoán từ văn bản đã có (không tốn thêm bộ nhớ); `draft` chạy một model nhỏ cùng tokenizer trên GPU đầu tiên của head |
+| `speculative` | `"none"` / `"ngram"` / `"draft"` / `"mtp"`, `"none"` | giải mã suy đoán: `ngram` đoán từ văn bản đã có (không tốn thêm bộ nhớ); `draft` chạy một model nhỏ cùng tokenizer trên GPU đầu tiên của head; `mtp` nháp bằng chính các layer dự đoán nhiều token (nextn) của model, 422 khi GGUF không có |
 | `draft` | string hoặc null, null | nguồn của model draft, `coordinator://<file>`; chỉ dùng với `speculative: "draft"` (bị bỏ nếu không) |
 | `draft_n_max` | int 1..16, 4 | số token draft mỗi bước. Trên GTX 1650 (3B + draft 0.5B) mức 4 nhanh hơn 5 %, mức 8 chậm hơn không dùng |
 | `flash_attn` | `"auto"` / `"on"` / `"off"`, `"auto"` | `-fa` của llama.cpp. Auto bật ở nơi GPU hỗ trợ. `kv_cache_type` lượng tử hóa cần nó (`off` cùng q8_0/q4_0 trả 422) |
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): số token prompt mỗi lượt. Lớn hơn thì đọc prompt dài nhanh hơn trên GPU có tensor core (cc 7.0+); compute buffer, tính trên mọi thiết bị, tăng theo |
 | `batch` | int 32..16384, 2048 | batch logic (`-b`); được nâng lên bằng `ubatch` khi nhỏ hơn |
+| `kv_unified` | bool, false | `-kvu`: các slot `parallel` dùng chung một vùng KV, nên một request có thể dùng tới `ctx_size` token khi các request khác ngắn (false: mỗi slot giữ `ctx_size / parallel`); cùng lượng bộ nhớ |
 
 Kiểm tra do `PUT /api/models/{name}` và `/api/simulate` áp dụng (giống nhau):
 
@@ -172,10 +177,11 @@ mới lấy giá trị mặc định.
 | `draft_file` | string hoặc null | giữ (draft đã lưu), nếu không có thì không dùng |
 | `draft_n_max` | int 1..16 hoặc null | giữ, nếu không có thì 4 |
 | `flash_attn`, `ubatch`, `batch` | như trên, hoặc null | giữ, nếu không có thì `auto` / 512 / 2048 |
+| `kv_unified` | bool hoặc null | giữ, nếu không có thì false |
 
 `replicas` không nằm trong body: model mới bắt đầu với `replicas = 0`, model đã có giữ giá trị cũ. Trả về
 `ModelSpec` đã lưu (JSON). Lỗi: 422 (tên sai, file chưa ready, pin sai, min > max, idle mà min khác 0, các
-kiểm tra draft), 401. Reconciler được đánh thức.
+kiểm tra draft, `mtp` với GGUF không có layer nextn), 401. Reconciler được đánh thức.
 
 ```bash
 curl -s -X PUT $COORD/api/models/qwen-7b -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{
@@ -362,6 +368,7 @@ Body `RecommendBody`:
 | `draft_file` | string hoặc null | cho `speculative: "draft"` (cùng các kiểm tra 422 như `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
 | `flash_attn`, `ubatch`, `batch` | như ở `PUT /api/models`, `auto` / 512 / 2048 | |
+| `kv_unified` | bool, false | |
 
 Phản hồi:
 
@@ -388,8 +395,8 @@ Phản hồi:
   ranker trên pool thật (một gợi ý không bao giờ cần nhiều GPU hơn yêu cầu gốc). `apply` chứa các trường của
   `PUT /api/models` cần đổi; `kind` là `speed`, `throughput` hoặc `fix`; `tier` / `est_*` mô tả phương án tốt
   nhất khi áp dụng gợi ý. Các id: `kv_cache`, `smaller_quant` (bản lượng tử hóa nhỏ hơn của cùng model trong thư
-  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `ctx_per_slot`, `draft` (model nhỏ tương
-  thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
+  viện), `ctx_single` (để vừa một GPU thay vì nhiều), `parallel`, `kv_unified` (dùng chung context giữa các slot), `ctx_per_slot`, `mtp` (GGUF có layer dự đoán nhiều
+  token), `draft` (model nhỏ tương thích trong thư viện), `ngram`, `ubatch`, `flash_attn`, và với GPU không có tensor core (compute capability
   dưới 7.0) là `flash_attn_old_gpu` / `ubatch_old_gpu`. Thế hệ GPU lấy từ `compute_cap` của từng thiết bị;
   `ubatch` chỉ được gợi ý khi mọi GPU của phương án đều có tensor core. Rỗng khi không có gì giúp được.
 
@@ -410,7 +417,7 @@ Body:
 
 - `changes[]`: `model` (đã tồn tại, nếu không là 404) cùng bất kỳ trường nào trong `replicas`,
   `min_replicas`, `max_replicas`, `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`,
-  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`.
+  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`, `kv_unified`.
   Vắng = không đổi.
 - `add[]`: `name` (mới, `[A-Za-z0-9._-]{1,64}`), `file` (mục thư viện ready), cùng các trường tùy chọn
   như trên. Model mới bắt đầu ở mức sàn (`max(min_replicas, 1)`) khi `replicas > 0`.
@@ -477,6 +484,7 @@ Toàn bộ những gì web UI hiển thị, trong một lời gọi (admin key).
 | `events[]` | 50 event mới nhất |
 | `unread_events` | số event chưa đọc |
 | `rebalance` | `{"in_progress": {...} hoặc null, "next_run_ts": thời gian unix hoặc null}` |
+| `speed_model` | `{"eta": float, "hop_ms": float}`: mô hình tốc độ decode scheduler dùng để xếp hạng (tỉ lệ băng thông bộ nhớ đỉnh, mili giây mỗi RPC server mỗi token), học từ tốc độ đo được |
 
 Mục trong `models[]`:
 
@@ -515,7 +523,9 @@ Trả `{"events": [...], "unread": n}`. Một event là
 Các loại event có trong code: `server_added`, `server_removed`, `node_online`, `node_offline`,
 `model_started`, `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`,
 `realloc_started`, `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`,
-`unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`. Cảnh
+`unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (head của model `mtp` không nháp được bằng MTP: phục
+vụ không speculative), `llama_version_mismatch` (các server đã đăng ký chạy bản llama.cpp khác nhau; model bị chia
+cần cùng giao thức RPC ở mọi nơi). Cảnh
 báo và lỗi còn được POST tới `webhook_url` khi có cấu hình.
 
 ## 9. Coordinator: health, metrics và admin API cũ
@@ -564,7 +574,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, không xác thực |
-| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp, file model đã cache, CPU/RAM |
+| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (theo bản build llama.cpp: `rpc_multi_device` một engine rpc có thể phục vụ nhiều thiết bị, `spec_mtp`, `kv_unified`), CPU/RAM |
 | POST | `/engines` | khởi động một tiến trình llama.cpp từ `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | các buffer theo thiết bị mà llama.cpp báo lúc load |
@@ -572,16 +582,17 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | POST | `/models/ensure` | đảm bảo file model có trong cache cục bộ |
 
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` hoặc
-`"<replica_id>-rpc-<device_id>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: đúng một thiết bị
-cục bộ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
-`rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1),
-`extra_args`, `cache_type` (`f16`), `spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max`
-(4), `flash_attn` (`auto`, `-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
+`"<replica_id>-rpc-<device_id đầu tiên>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: một hoặc nhiều
+thiết bị cục bộ khác nhau, do một process phục vụ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
+`rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`; mỗi RPC server một lần), `tensor_split`, `ctx_size` (4096),
+`parallel` (1), `extra_args`, `cache_type` (`f16`), `spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` →
+`draft-simple`, `mtp` → `draft-mtp`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`,
+`-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
 `rpc_firewall`). Trả `EngineStatus` (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`,
 `port`, `exit_code`, `log_tail` tối đa 50 dòng). Lỗi: `422` với `extra_args` (agent này không chấp nhận, để
 token không biến thành cờ llama-server tùy ý), engine server thiếu `model_path`, `model_path` hoặc
 `draft_model_path` nằm ngoài cache model và không do `/models/ensure` trả về, file không tồn tại, engine rpc
-không có đúng một thiết bị, hoặc cổng đang bị dùng; `409` engine đã chạy; `500` không tìm thấy binary.
+không có thiết bị nào hoặc có thiết bị bị lặp, hoặc cổng đang bị dùng; `409` engine đã chạy; `500` không tìm thấy binary.
 
 **`GET /engines/{engine_id}/memory`**: llama.cpp in kích thước các buffer khi load model; agent phân tích
 phần đầu log của engine (2 MiB đầu) và trả, theo từng thiết bị (`CUDA0`, `RPC0`, ...), đơn vị MiB, giá trị
@@ -690,7 +701,7 @@ Các mã trạng thái mà những route này dùng (body luôn là `{"detail": 
 | 403 | repo Hugging Face là gated hoặc riêng tư: đặt `HF_TOKEN` và chấp nhận giấy phép |
 | 404 | không tìm thấy repo hoặc revision trên Hugging Face, hoặc job id không tồn tại |
 | 409 | tên đầu ra đã bị dùng (thư viện, một file trong `models_dir`, hoặc job khác chưa xong); job không ở trạng thái cho phép thao tác đó |
-| 422 | nguồn không chuyển đổi được: kiến trúc không được bộ chuyển đổi được ghim (llama.cpp b11342) hỗ trợ, đã lượng tử hoá sẵn theo định dạng bộ chuyển đổi không đọc được (AWQ, bitsandbytes...), không có `config.json`, không có trọng số safetensors / PyTorch; cũng là body sai cấu trúc (ví dụ đưa cả `hf_repo` và `path`); loại cần importance matrix mà `advanced.imatrix: "off"`; `advanced.calibration_path` không dùng được (không phải `.txt`, rỗng, lớn hơn 20 MB) |
+| 422 | nguồn không chuyển đổi được: kiến trúc không được bộ chuyển đổi được ghim (llama.cpp b11413) hỗ trợ, đã lượng tử hoá sẵn theo định dạng bộ chuyển đổi không đọc được (AWQ, bitsandbytes...), không có `config.json`, không có trọng số safetensors / PyTorch; cũng là body sai cấu trúc (ví dụ đưa cả `hf_repo` và `path`); loại cần importance matrix mà `advanced.imatrix: "off"`; `advanced.calibration_path` không dùng được (không phải `.txt`, rỗng, lớn hơn 20 MB) |
 | 502 | không tới được Hugging Face hoặc nó trả lỗi bất ngờ |
 | 503 | bộ công cụ chuyển đổi chưa được cài đặt (`problem` của `/api/convert/options`); thiếu `llama-imatrix` trong khi job cần importance matrix (loại bắt buộc phải có, hoặc `advanced.imatrix: "on"`); văn bản hiệu chỉnh có sẵn bị thiếu trong bản cài và không có `calibration_path` |
 | 507 | không đủ dung lượng đĩa trống. `POST /api/convert` trả 507 ngay lúc gửi khi đĩa rõ ràng không chứa nổi *bản tải chưa có trong cache + bản trung gian 16 bit + đầu ra* (không có gì được xếp hàng). Worker kiểm tra lại trước mỗi giai đoạn nặng, vì dung lượng có thể giảm khi job chờ; mã 507 đó xuất hiện trong `error` của job *failed* (kèm `failed_stage`) |

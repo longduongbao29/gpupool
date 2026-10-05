@@ -25,8 +25,12 @@ from gpupool.common.models import (
 from gpupool.scheduler.estimate import device_need_mb as _raw_need_mb
 from gpupool.scheduler.estimate import draft_need_mb as _raw_draft_mb
 from gpupool.scheduler.estimate import overhead_mb as _raw_overhead_mb
+from gpupool.scheduler.estimate import layer_prefix_bytes
 from gpupool.scheduler.estimate import total_need_mb as _raw_total_mb
-from gpupool.scheduler.scoring import CUDA_BW_FALLBACK_GBPS, default_cuda_bw, device_bw, est_decode_tps
+from gpupool.scheduler.scoring import (
+    CUDA_BW_FALLBACK_GBPS, bandwidth_seconds, decode_bytes, default_cuda_bw, device_bw, est_decode_tps,
+    logits_seconds,
+)
 
 
 class NoFit(Exception):
@@ -36,7 +40,7 @@ class NoFit(Exception):
 class _Dev(NamedTuple):
     node: NodeReport
     dev: Device
-    pin: bool = False  # draft planning: this device must be the head's first device (and the head)
+    pin: bool = False  # draft planning: this device must be the head's first local GPU (and the head)
 
 
 # Per-model correction from measured buffers (self-calibration). A context variable, not a
@@ -48,14 +52,25 @@ _MEM_FACTOR: ContextVar[float] = ContextVar("gpupool_mem_factor", default=1.0)
 _COMPUTE: ContextVar[dict] = ContextVar("gpupool_compute", default={})
 
 
+# Per-call cache of layer_prefix_bytes, keyed by (id(meta), ctx, cache type). Fresh for each
+# plan / rank call, so a later call never sees sizes from different spec settings. The entry
+# keeps the meta itself and is used only for that very object (an id alone could be reused).
+_PREFIX: ContextVar[dict | None] = ContextVar("gpupool_layer_prefix", default=None)
+
+
 @contextlib.contextmanager
 def _with_factor(f: float, spec: ModelSpec | None = None) -> Iterator[None]:
     tok = _MEM_FACTOR.set(f)
-    ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn})
+    ptok = _PREFIX.set({})
+    ctok = _COMPUTE.set({} if spec is None else {"ubatch": spec.ubatch, "flash_attn": spec.flash_attn,
+                                                 "parallel": spec.parallel,
+                                                 "mtp": spec.speculative == "mtp",
+                                                 "kv_unified": spec.kv_unified})
     try:
         yield
     finally:
         _COMPUTE.reset(ctok)
+        _PREFIX.reset(ptok)
         _MEM_FACTOR.reset(tok)
 
 
@@ -73,15 +88,31 @@ def total_need_mb(*a, **kw) -> int:
 
 
 def draft_need_mb(*a, **kw) -> int:
-    return _raw_draft_mb(*a, **_COMPUTE.get(), **kw)
+    return _raw_draft_mb(*a, **{k: v for k, v in _COMPUTE.get().items() if k != "mtp"}, **kw)
 
 
 def overhead_mb(meta, kind, ctx_size: int = 0) -> int:
-    return _raw_overhead_mb(meta, kind, ctx_size=ctx_size, **_COMPUTE.get())
+    c = _COMPUTE.get()
+    return _raw_overhead_mb(meta, kind, ctx_size=ctx_size,
+                            **{k: v for k, v in c.items() if k in ("ubatch", "flash_attn")})
+
+
+def _prefix(meta, ctx, ct) -> list[int] | None:
+    cache = _PREFIX.get()
+    if cache is None:
+        return None
+    hit = cache.get((id(meta), ctx, ct))
+    if hit is None or hit[0] is not meta:
+        c = _COMPUTE.get()
+        hit = (meta, layer_prefix_bytes(
+            meta, ctx, ct, **{k: v for k, v in c.items() if k not in ("flash_attn",)}))
+        cache[(id(meta), ctx, ct)] = hit
+    return hit[1]
 
 
 def _need(meta, ctx, ct, d: _Dev, start: int, count: int, is_last: bool) -> int:
-    return device_need_mb(meta, range(start, start + count), ctx, d.dev.kind, is_last, ct)
+    return device_need_mb(meta, range(start, start + count), ctx, d.dev.kind, is_last, ct,
+                          prefix=_prefix(meta, ctx, ct))
 
 
 def _check(meta, ctx, ct, order: list[_Dev], counts: list[int]) -> list[int]:
@@ -129,13 +160,27 @@ def _split(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev]) -> list[int] |
 def _decode_s(meta: ModelMeta, bws: list[float], counts: list[int]) -> float:
     """Seconds per token up to a constant (the est_decode_tps sum without ETA and hops)."""
     t, start = 0.0, 0
+    read = decode_bytes(meta)
     for i, (bw, c) in enumerate(zip(bws, counts)):
-        b = sum(meta.layer_bytes[start:start + c])
+        b = sum(read[start:start + c])
         if i == len(counts) - 1:
             b += meta.output_bytes
         t += b / bw
         start += c
     return t
+
+
+def _fits_between(meta, ctx, ct, order: list[_Dev], counts: list[int], lo: int, hi: int) -> bool:
+    """Whether devices lo..hi fit. Moving one layer between devices lo and hi shifts the layer
+    ranges of those two and of every device between them; the others keep theirs, so their
+    (already feasible) slack is unchanged and need not be recomputed."""
+    start = sum(counts[:lo])
+    last = len(order) - 1
+    for i in range(lo, hi + 1):
+        if _need(meta, ctx, ct, order[i], start, counts[i], i == last) > order[i].dev.usable_mb:
+            return False
+        start += counts[i]
+    return True
 
 
 def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: list[int]) -> list[int]:
@@ -160,12 +205,18 @@ def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: l
             for src in reversed(fast_first):
                 if bws[src] >= bws[dst] or counts[src] <= 1:
                     continue
-                trial = counts.copy()
-                trial[src] -= 1
-                trial[dst] += 1
-                t = _decode_s(meta, bws, trial)
-                if t < cur * (1 - 1e-9) and min(_check(meta, ctx, ct, order, trial)) >= 0:
+                # keep moving along this pair while it helps: rescanning every pair after each
+                # single-layer move made the search quadratic in the number of layers moved
+                while counts[src] > 1:
+                    trial = counts.copy()
+                    trial[src] -= 1
+                    trial[dst] += 1
+                    t = _decode_s(meta, bws, trial)
+                    if not (t < cur * (1 - 1e-9) and _fits_between(
+                            meta, ctx, ct, order, trial, min(src, dst), max(src, dst))):
+                        break
                     counts, cur, moved = trial, t, True
+                if moved:
                     break
             if moved:
                 break
@@ -175,7 +226,13 @@ def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: l
 
 
 def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
-    """Head cuda devices first, then head cpu, then other nodes by usable desc."""
+    """Other nodes first (by usable desc), then the head's cpu, then the head's cuda devices.
+
+    The last device holds the output layer, and llama-server reads n_vocab x 4 bytes of logits
+    from it for every token (llama-context.cpp, ggml_backend_tensor_get_async on t_logits): 0.5 MB
+    for a 128k vocabulary. With a remote device last that crossed the network on every token; with
+    the head's own GPU last only the hidden state (n_embd x 4 bytes) does. The input embeddings are
+    computed on the head's CPU either way, so the first device costs n_embd x 4 bytes too."""
     by_usable = lambda d: (not d.pin, -d.dev.usable_mb)  # noqa: E731
     head = [d for d in devs if d.node.node_id == head_id]
     head_cuda = sorted((d for d in head if d.dev.kind == "cuda"), key=by_usable)
@@ -185,9 +242,10 @@ def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
         totals[d.node.node_id] = totals.get(d.node.node_id, 0) + d.dev.usable_mb
     others = sorted(
         (d for d in devs if d.node.node_id != head_id),
-        key=lambda d: (-totals[d.node.node_id], d.node.node_id, -d.dev.usable_mb),
+        # within a node, GPUs before CPU: same-kind devices stay adjacent, so one RPC server serves them
+        key=lambda d: (-totals[d.node.node_id], d.node.node_id, d.dev.kind != "cuda", -d.dev.usable_mb),
     )
-    return head_cuda + head_cpu + others
+    return others + head_cpu + head_cuda
 
 
 def _solve(meta, ctx, ct, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str] | None:
@@ -254,6 +312,7 @@ class _Scored(NamedTuple):
     tps: float
     reasons: list[str]
     cand: _Cand
+    parts: tuple[float, int, float] = (0.0, 0, 0.0)  # _speed_parts
 
 
 def _fits_single(meta, ctx, ct, pool) -> list[_Dev]:
@@ -293,14 +352,55 @@ def _is_local(d: _Dev, head_id: str) -> bool:
     return d.node.node_id == head_id and d.dev.kind == "cuda"
 
 
+RPC_MULTI_DEVICE = "rpc_multi_device"  # NodeReport.features
+
+
+def rpc_groups(order: Sequence[_Dev], head_id: str) -> list[list[int]]:
+    """Indices into `order` per ggml-rpc-server: one server for each run of consecutive remote
+    devices of one node (and kind), when that node's agent can serve several devices from one
+    process and the head's can use such a server; one per device otherwise. Within a server llama.cpp copies activations from one
+    device to the next itself; between servers they go through the head."""
+    groups: list[list[int]] = []
+    # The head's llama-server must also know that one endpoint can serve several devices.
+    head_multi = any(d.node.node_id == head_id and RPC_MULTI_DEVICE in d.node.features for d in order)
+    for i, d in enumerate(order):
+        if _is_local(d, head_id):
+            continue
+        if groups and groups[-1][-1] == i - 1:
+            prev = order[i - 1]
+            if (head_multi and prev.node.node_id == d.node.node_id and prev.dev.kind == d.dev.kind
+                    and RPC_MULTI_DEVICE in d.node.features):
+                groups[-1].append(i)
+                continue
+        groups.append([i])
+    return groups
+
+
+def _head_first(c: _Cand) -> _Dev:
+    """The head's first local GPU, else its first device (the score tie-break)."""
+    head = [d for d in c.order if d.node.node_id == c.head_id]
+    return next((d for d in head if d.dev.kind == "cuda"), head[0] if head else c.order[0])
+
+
+def _speed_parts(meta, c: _Cand, cuda_bw: float) -> tuple[float, int, float]:
+    """(bandwidth seconds at eta 1, RPC hops, logits seconds) of a candidate: what its decode
+    speed is made of, so the router can recompute it as the speed model learns."""
+    bw = bandwidth_seconds(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], cuda_bw)
+    logits = logits_seconds(meta) if c.order[-1].node.node_id != c.head_id else 0.0
+    return bw, _n_rpc(c), logits
+
+
 def _n_rpc(c: _Cand) -> int:
-    return sum(1 for d in c.order if not _is_local(d, c.head_id))
+    """Network hops per token: one per RPC server the graph passes through."""
+    return len(rpc_groups(c.order, c.head_id))
 
 
 def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
     cuda_bw = default_cuda_bw(nodes)
+    parts = {id(c): _speed_parts(meta, c, cuda_bw) for c in cands}
     tps_of = [
-        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw)
+        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw,
+                       remote_last=c.order[-1].node.node_id != c.head_id)
         for c in cands
     ]
     best_tps = max(tps_of, default=0.0) or 1.0
@@ -345,10 +445,10 @@ def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupant
             reasons.append(f"split over {n_dev} GPUs")
         if n_rpc:
             reasons.append(f"{n_rpc} network hop{'s' if n_rpc > 1 else ''} (RPC)")
-        out.append(_Scored(score, tps, reasons[:4], c))
-    # deterministic: score, then smaller tier, then the first device's name
-    out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier],
-                            s.cand.order[0].node.node_id, s.cand.order[0].dev.device_id))
+        out.append(_Scored(score, tps, reasons[:4], c, parts[id(c)]))
+    # deterministic: score, then smaller tier, then the head and its first device's name
+    out.sort(key=lambda s: (-round(s.score, 6), _TIER_ORDER[s.cand.tier], s.cand.head_id,
+                            _head_first(s.cand).node.node_id, _head_first(s.cand).dev.device_id))
     return out
 
 
@@ -357,7 +457,7 @@ _DRAFT_TOP_HEADS = 8
 
 
 def _draft_candidates(meta, spec, pool: list[_Dev], draft_mb: int) -> tuple[list[_Cand], list[_Dev]]:
-    """Candidates whose head-local first device carries the draft model.
+    """Candidates whose head's first local GPU carries the draft model.
 
     The draft runs on the head's first local CUDA device, so for each possible head device D
     the split is solved on a pool where only D gives up `draft_mb`. Shrinking every CUDA
@@ -385,8 +485,9 @@ def _draft_candidates(meta, spec, pool: list[_Dev], draft_mb: int) -> tuple[list
         cands, used_r = _all_candidates(meta, ctx, ct, reduced)
         used = [orig[ident(d)] for d in used_r]
         for c in cands:
-            if c.head_id != h.node.node_id or ident(c.order[0]) != hid:
-                continue  # candidates that dropped D lost the pin; D must lead the head's devices
+            first_local = next((d for d in c.order if _is_local(d, c.head_id)), None)
+            if c.head_id != h.node.node_id or first_local is None or ident(first_local) != hid:
+                continue  # candidates that dropped D lost the pin; D must lead the head's GPUs
             cand = _Cand(c.tier, [orig[ident(d)] for d in c.order], list(c.counts), c.head_id)
             out.setdefault(_cand_key(cand), cand)
     return list(out.values()), used
@@ -436,6 +537,7 @@ def _finish(meta, spec, s: _Scored, replica_id, port_alloc, draft_mb: int | None
     pl = _build(meta, spec, replica_id, port_alloc, c.tier, c.order, c.counts, c.head_id, draft_mb)
     pl.score = round(s.score, 1)
     pl.est_decode_tps = round(s.tps, 1)
+    pl.est_bw_s, pl.est_hops, pl.est_logits_s = s.parts
     pl.reasons = s.reasons
     return pl
 
@@ -526,6 +628,7 @@ def _rank(meta, spec, nodes, occupants, limit, extra, draft_meta) -> list[Placem
         if pl is not None:
             out.append(pl.model_copy(update={
                 "score": round(s.score, 1), "est_decode_tps": round(s.tps, 1),
+                "est_bw_s": s.parts[0], "est_hops": s.parts[1], "est_logits_s": s.parts[2],
                 "reasons": s.reasons}, deep=True))
         elif n_cand < limit:
             n_cand += 1
@@ -651,8 +754,9 @@ def _multi_node_subsets(meta, ctx, ct, pool, node_ids: list[str]):
                 continue
             min_size = min_size or size
             order, counts, head = solved
-            n_rpc = sum(1 for d in order if not (d.node.node_id == head and d.dev.kind == "cuda"))
-            tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw)
+            n_rpc = len(rpc_groups(order, head))
+            tps = est_decode_tps(meta, [(d.dev, k) for d, k in zip(order, counts)], n_rpc, cuda_bw,
+                                 remote_last=order[-1].node.node_id != head)
             found.append((tps, subset, solved))
     found.sort(key=lambda f: (-f[0], f[1]))
     return [f[2] for f in found]
@@ -686,16 +790,24 @@ def _build(meta, spec, replica_id, port_alloc, tier, order, counts, head_id,
     ctx, ct = spec.ctx_size, spec.kv_cache_type
     head_port = port_alloc(head_id)
     assignments: list[DeviceAssignment] = []
+    # One endpoint per RPC server. llama.cpp names the devices of the servers in --rpc order
+    # RPC0, RPC1, ... (a server's own devices consecutively, in its -d order), which is `order`.
+    endpoint_of: dict[int, str] = {}
+    for group in rpc_groups(order, head_id):
+        node = order[group[0]].node
+        ep = f"{node.host}:{port_alloc(node.node_id)}"
+        endpoint_of.update({i: ep for i in group})
+    draft_at = next((i for i, d in enumerate(order) if _is_local(d, head_id)), None)
     start, rpc_i = 0, 0
     for i, (d, c) in enumerate(zip(order, counts)):
         est = _need(meta, ctx, ct, d, start, c, i == len(order) - 1)
-        if i == 0 and draft_mb is not None:
-            est += draft_mb  # the draft lives on the first (head-local CUDA) device
-        if d.node.node_id == head_id and d.dev.kind == "cuda":
+        if i == draft_at and draft_mb is not None:
+            est += draft_mb  # the draft lives on the head's first local CUDA device
+        if i not in endpoint_of:
             llama_dev, endpoint = d.dev.device_id, None
         else:
             llama_dev = f"RPC{rpc_i}"
-            endpoint = f"{d.node.host}:{port_alloc(d.node.node_id)}"
+            endpoint = endpoint_of[i]
             rpc_i += 1
         assignments.append(
             DeviceAssignment(

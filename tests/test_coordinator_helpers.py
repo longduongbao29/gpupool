@@ -183,6 +183,9 @@ class FakeAutoscaler:
         self.requests.append(model)
         return False
 
+    def measured_tps(self, replica_id) -> float | None:
+        return None
+
     def view(self, model) -> dict:
         return {"model": model, "avg_busy": self.avg_busy}
 
