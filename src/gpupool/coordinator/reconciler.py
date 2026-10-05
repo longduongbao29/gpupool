@@ -1119,23 +1119,6 @@ class Reconciler:
                 raise LaunchError(f"head node {p.head_node} unknown")
             head_url = agent(p.head_node)
 
-            rpc_ids: list[tuple[str, str]] = []
-            for a in p.assignments:
-                if not a.rpc_endpoint:
-                    continue
-                eid = f"{rid}-rpc-{a.device_id}"
-                url = agent(a.node_id)
-                created.append((url, eid))
-                await self.client.start_engine(url, EngineSpec(
-                    engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id],
-                    allowed_peers=[head_host]))  # only the head connects to an RPC engine
-                rpc_ids.append((url, eid))
-            for url, eid in rpc_ids:
-                await self._wait_running(url, eid)
-
-            name, src = self._model_source(spec)
-            path = await self.client.ensure_model(head_url, name, src)
-
             extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
                            "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch}
             if spec.speculative == "draft":
@@ -1146,9 +1129,20 @@ class Reconciler:
                 if first.node_id != p.head_node or first.rpc_endpoint or not first.llama_device.startswith("CUDA"):
                     raise LaunchError(f"the draft model needs a local CUDA device on the head node, but the "
                                       f"first device is {first.node_id}/{first.llama_device}")
-                dname, dsrc = self._model_source(spec, spec.draft)
-                extra.update(draft_model_path=await self.client.ensure_model(head_url, dname, dsrc),
-                             draft_device=first.llama_device, draft_n_max=spec.draft_n_max)
+
+            # The head's model files are fetched while the RPC engines start: on a cold start the
+            # download, not the engines, is the long pole, and the two do not depend on each other.
+            models = asyncio.create_task(self._ensure_head_models(spec, head_url))
+            try:
+                await self._start_rpc_engines(rid, p, agent, head_host, created)
+                path, draft_path = await models
+            finally:
+                if not models.done():
+                    models.cancel()
+                    await asyncio.gather(models, return_exceptions=True)
+            if draft_path is not None:
+                extra.update(draft_model_path=draft_path, draft_device=p.assignments[0].llama_device,
+                             draft_n_max=spec.draft_n_max)
 
             head_id = f"{rid}-head"
             created.append((head_url, head_id))
@@ -1204,6 +1198,39 @@ class Reconciler:
                     await self._calibrate(rec, spec, head_url)
             finally:
                 self._launches.pop(rid, None)
+
+    async def _start_rpc_engines(self, rid: str, p: Placement, agent: Callable[[str], str],
+                                 head_host: str, created: list[tuple[str, str]]) -> None:
+        """Start every RPC engine of `p`, then wait until all of them listen. Each one is added to
+        `created` before its start call, so a failure anywhere rolls back what may already run."""
+        rpc_ids: list[tuple[str, str]] = []
+        for a in p.assignments:
+            if not a.rpc_endpoint:
+                continue
+            eid = f"{rid}-rpc-{a.device_id}"
+            url = agent(a.node_id)
+            created.append((url, eid))
+            await self.client.start_engine(url, EngineSpec(
+                engine_id=eid, kind="rpc", port=_port_of(a.rpc_endpoint), devices=[a.device_id],
+                allowed_peers=[head_host]))  # only the head connects to an RPC engine
+            rpc_ids.append((url, eid))
+        for url, eid in rpc_ids:
+            await self._wait_running(url, eid)
+
+    async def _ensure_head_models(self, spec: ModelSpec, head_url: str) -> tuple[str, str | None]:
+        """(model path, draft path or None) on the head node; both files are fetched at once."""
+        name, src = self._model_source(spec)
+        if spec.speculative != "draft":
+            return await self.client.ensure_model(head_url, name, src), None
+        dname, dsrc = self._model_source(spec, spec.draft)
+        tasks = [asyncio.create_task(self.client.ensure_model(head_url, name, src)),
+                 asyncio.create_task(self.client.ensure_model(head_url, dname, dsrc))]
+        try:
+            return await tasks[0], await tasks[1]
+        finally:  # one failed or we were cancelled: do not leave the other request running
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # ------------------------------------------------------------------ calibration
     @staticmethod

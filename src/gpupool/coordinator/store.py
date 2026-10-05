@@ -80,6 +80,10 @@ class Store:
         with self._lock:
             if not memory:
                 self._conn.execute("PRAGMA journal_mode=WAL")
+                # WAL + NORMAL never corrupts the database; a power loss can only drop the last
+                # commits. Every agent report is a commit (every 2 s per server), made on the event
+                # loop that also proxies inference: FULL would fsync each one.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
                 # Same as Library (own connection, same file): wait for its writes, don't fail.
                 self._conn.execute("PRAGMA busy_timeout=5000")
             with self._conn:

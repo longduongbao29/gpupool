@@ -1848,3 +1848,63 @@ async def test_launch_sends_attention_and_batches(mock_health):
     hs = next(c[3] for c in client.calls if c[0] == "start")
     assert (hs.flash_attn, hs.ubatch, hs.batch) == ("on", 1024, 4096)
     await rec.shutdown()
+
+
+async def test_launch_downloads_the_model_while_rpc_engines_start(mock_health):
+    # The download must already be running when the RPC engines start: here it only finishes
+    # once an RPC engine was started, which a download-after-engines order would never allow.
+    class Overlap(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.rpc_started = asyncio.Event()
+
+        async def start_engine(self, url, spec):
+            if spec.kind == "rpc":
+                await asyncio.sleep(0)  # let the download begin first
+                self.rpc_started.set()
+            return await super().start_engine(url, spec)
+
+        async def ensure_model(self, url, name, source):
+            self.calls.append(("ensure", url, name, source))
+            await asyncio.wait_for(self.rpc_started.wait(), 2)
+            return "/cache/" + name
+
+    client = Overlap()
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    assert client.kinds() == ["ensure", "start", "start"]  # head last, after both
+    await rec.shutdown()
+
+
+async def test_failed_rpc_start_cancels_the_download_and_rolls_back(mock_health):
+    class SlowDownload(FakeClient):
+        cancelled = False
+
+        async def start_engine(self, url, spec):
+            await asyncio.sleep(0.01)  # the download is under way when this start fails
+            return await super().start_engine(url, spec)
+
+        async def ensure_model(self, url, name, source):
+            self.calls.append(("ensure", url, name, source))
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    client = SlowDownload()
+    client.fail_start_on = "-rpc-CUDA0"
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await asyncio.wait_for(settle(rec), 5)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "boom" in (r.error or "")
+    assert client.cancelled and client.engines == {}
+    assert not any(c[0] == "start" and c[2].endswith("-head") for c in client.calls)
+    await rec.shutdown()

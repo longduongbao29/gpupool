@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- Khởi động nguội nhanh hơn: head tải model (và draft, song song với model) trong lúc các engine RPC khởi
+  động, thay vì đợi chúng chạy xong mới tải.
+- SQLite của coordinator chạy với `synchronous=NORMAL` (an toàn khi dùng WAL): báo cáo của agent, mỗi máy chủ
+  một commit mỗi 2 s trên chính event loop chuyển tiếp suy luận, không còn fsync mỗi lần.
+
 ### Sửa lỗi
 
 - Hội thoại nhiều lượt ở yên trên một bản sao. Router lấy khoá theo mọi tin nhắn trừ tin cuối, nên khoá đổi ở

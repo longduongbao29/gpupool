@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Faster cold starts: the head downloads its model (and the draft, in parallel with it) while the RPC
+  engines start, instead of after they are running.
+- The coordinator's SQLite store runs with `synchronous=NORMAL` (safe under WAL): agent reports, one commit
+  every 2 s per server on the event loop that also proxies inference, no longer fsync each time.
+
 ### Fixed
 
 - Multi-turn chats stay on one replica. The router keyed a conversation on every message but the last, so the
