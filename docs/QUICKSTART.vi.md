@@ -371,14 +371,18 @@ thoát với mã 1. Cụm được xoá sau khi chạy, trừ khi có `--keep`. 
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | KV cache nhỏ hơn nên model có thể vừa ít GPU hơn | ctx 8192: −132 / −204 MB, tốc độ gần như không đổi (51.9 / 51.2 / 50.8 tok/s) |
 | Speculative | none, ngram, draft, mtp | model lớn chạy ít lượt hơn cho mỗi token, tức ít vòng RPC hơn khi bị chia | chia qua 2 server: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Dùng chung context giữa các slot | tắt, bật | khi có nhiều slot song song, một request có thể dùng cả context thay vì context ÷ số slot; cùng lượng bộ nhớ | chưa đo |
 
 Trong API các tuỳ chọn này là `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: chỉ cho GGUF có layer dự đoán nhiều token),
-`draft_file` (một model trong thư viện, cho `draft`) và `draft_n_max` (1 đến 16, mặc định 4); xem
+`draft_file` (một model trong thư viện, cho `draft`), `draft_n_max` (1 đến 16, mặc định 4) và `kv_unified` (dùng chung context); xem
 [API.vi.md](API.vi.md). Chúng có hiệu lực ở lần chạy model kế tiếp.
 
 N-gram không tốn thêm bộ nhớ nhưng chỉ có lợi khi câu trả lời lặp lại phần văn bản trước đó. Model draft phải
 dùng chung tokenizer với model chính (được kiểm khi lưu) và chạy trên GPU của head (bộ nhớ đã được tính vào kế
-hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo.
+hoạch). Mặc định đoán 4 token; 8 token chậm hơn trong các lần đo. MTP dùng chính các layer dự đoán nhiều token
+của model (Qwen3.5, GLM-4.5 trở lên, DeepSeek V3...): không cần file thứ hai, không phải khớp tokenizer, và bộ nhớ của
+các layer đó chỉ được tính khi bật MTP. Lưu `mtp` cho model không có các layer này sẽ bị từ chối. Với MTP, nên bắt
+đầu với 2 hoặc 3 token nháp.
 
 ## Không dùng Docker
 
@@ -404,6 +408,24 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 | 9000–9999 | coordinator và server GPU → server GPU | llama.cpp (HTTP và RPC giữa các server) |
 
 RPC của llama.cpp không mã hoá: giữ các server GPU trong mạng nội bộ tin cậy.
+
+Model bị chia gửi activation giữa các server ở mỗi token, nên độ trễ mạng quyết định tốc độ của chúng. Hai thứ
+giúp được:
+
+- **Nhiều GPU trong một server.** Replica dùng từ hai GPU trở lên của cùng một server ở xa chỉ cần một
+  `ggml-rpc-server` cho chúng, server này copy activation giữa các GPU ngay tại chỗ (agent bản này; agent cũ chạy
+  mỗi GPU một cái).
+- **RDMA (InfiniBand / RoCE).** llama.cpp trong image agent nói được RDMA và dùng nó khi cả hai đầu có thiết bị
+  RDMA, nếu không thì quay về TCP. Cấp cho container agent thiết bị và bộ nhớ khoá:
+
+  ```bash
+  docker run -d --name gpupool-agent --gpus all --network host --pid host \
+    --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
+    -v gpupool-agent:/data -e GPUPOOL_JOIN=... ghcr.io/longduongbao29/gpupool-agent
+  ```
+
+  `GGML_RPC_NO_RDMA=1` (`-e GGML_RPC_NO_RDMA=1`) ép dùng TCP. RDMA được thương lượng theo từng kết nối: server không
+  có RDMA vẫn làm việc với các server khác qua TCP.
 
 ## Bảo mật
 

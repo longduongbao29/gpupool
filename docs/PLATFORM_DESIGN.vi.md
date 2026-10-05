@@ -53,7 +53,10 @@ t_{token} = \sum_{d \in \text{devices}} \frac{\text{bytes}_d}{BW_d \cdot \eta} +
 ```
 
 `bytes_d` là tổng `layer_bytes` của các layer đặt trên thiết bị d (đã có trong `ModelMeta`; tensor đầu ra
-tính vào thiết bị cuối). η là hiệu suất thực tế: số đo trong `TEST_REPORT` cho η ≈ 0.45 với 0.5B (182
+tính vào thiết bị cuối). Với layer MoE chỉ tính số byte một token đọc: phần weight dùng chung
+cộng `expert_used_count / expert_count` của các expert được định tuyến (`ModelMeta.active_bytes`). `n_rpc` đếm số
+RPC server, không phải số thiết bị ở xa: các GPU của một server mà replica dùng nằm sau một `ggml-rpc-server`
+(agent có tính năng `rpc_multi_device`), server này tự copy activation giữa chúng. η là hiệu suất thực tế: số đo trong `TEST_REPORT` cho η ≈ 0.45 với 0.5B (182
 tok/s trên lý thuyết ~400) và ≈ 0.6 với 3B (51 tok/s trên lý thuyết ~84). Code dùng hằng số **η = 0.5** và
 `t_hop` = 2 ms mỗi bước nhảy RPC (`scheduler/scoring.py`). GPU chưa biết băng thông được gán giá trị mặc
 định. Prefill phụ thuộc compute hơn băng thông; ước lượng chỉ xếp hạng theo decode. Tốc độ decode đo được
@@ -83,7 +86,7 @@ Mọi trường đều tùy chọn và có giá trị mặc định giữ hành 
 | `spread` | `"gpu"` | `gpu`: các replica ưu tiên khác GPU; `node`: khác server; `none`: không quan tâm |
 | `pin_devices` | rỗng | các mục `"node_id/device_id"` mà replica được dùng; rỗng = chọn tự do |
 | `preemptible` | true | false = không bao giờ bị giành chỗ |
-| `kv_cache_type`, `speculative`, `draft`, `draft_n_max` | `f16`, `none`, null, 4 | tùy chọn bộ nhớ/tốc độ mà phần ước lượng và planner tính đến (thêm sau thiết kế này) |
+| `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` | `f16`, `none`, null, 4, `auto`, 2048, 512, false | tùy chọn bộ nhớ/tốc độ mà phần ước lượng và planner tính đến (thêm sau thiết kế này); `speculative` là `none`, `ngram`, `draft` hoặc `mtp` |
 
 `replicas` là công tắc bật/tắt: 0 là dừng model bất kể `min/max`. Khi `min_replicas` và `max_replicas` chưa
 đặt thì cả hai bằng `replicas`, nên model số lượng cố định hành xử như trước.
@@ -132,7 +135,7 @@ speculative được đặt nguyên khối trên thiết bị CUDA đầu tiên 
   phạt GPU dùng chung; chỉ `node` phạt server dùng chung).
 - `waste`: trung bình của `usable / usable lớn nhất` trên các GPU được chọn. Đây là cách giữ lại ưu điểm
   của best-fit: không xé nhỏ một GPU lớn khi GPU vừa khít còn trống.
-- `n_dev`, `n_rpc`: số thiết bị thêm và số lần nhảy qua mạng.
+- `n_dev`, `n_rpc`: số thiết bị thêm và số lần nhảy qua mạng (mỗi RPC server một lần).
 
 Hòa điểm thì chọn tier nhỏ hơn, rồi tên thiết bị đầu tiên, nên kết quả xác định. Phương án thắng được lưu
 cùng replica (`score`, `est_decode_tps`, `reasons`), để UI giải thích được vì sao model nằm ở đó.
@@ -375,7 +378,11 @@ Khác biệt so với bản nháp đầu: không có endpoint nhãn (`PUT /api/s
 ## 8. Thay đổi dữ liệu
 
 - `ModelSpec`: các trường chính sách (JSON trong bảng `models`, không cần migration), về sau thêm
-  `kv_cache_type`, `speculative`, `draft`, `draft_n_max`.
+  `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`.
+- `NodeReport.features`: khả năng của agent ngoài bản 0.5 (`rpc_multi_device`); coordinator chỉ dùng khả năng agent
+  báo, nên có thể nâng cấp coordinator trước các agent.
+- `ModelMeta`: bố cục cache theo layer (`kv_k`, `kv_v`, `swa`, `n_swa`, `state_bytes`), block MTP (`n_nextn`,
+  `nextn_bytes`) và `active_bytes` của MoE, đều tùy chọn (metadata không có chúng giữ ước lượng cũ).
 - `Device`: `bandwidth_gbps` (agent đọc từ NVML), `uuid`, `budget_mb`. Agent cũ không gửi thì coi như bằng
   nhau.
 - `Placement`: `score`, `est_decode_tps`, `reasons`, `draft_est_mb`.
@@ -383,7 +390,8 @@ Khác biệt so với bản nháp đầu: không có endpoint nhãn (`PUT /api/s
   `labels`/`reserve_mb` (xem mục 3).
 - Bảng `control_state(key, value, updated_at)`: trạng thái autoscaler theo từng model, `preempted`,
   `backoff`, `move`.
-- Bảng `model_calibration(model, factor, samples, updated_at)`.
+- Bảng `model_calibration(model, factor, samples, updated_at)`; bị xoá một lần khi phiên bản bộ ước lượng đổi
+  (khoá `control_state` là `estimator`).
 - Bảng `convert_jobs`: các job chuyển đổi và trạng thái của chúng; file của job đã xong là một mục thư viện bình
   thường có `source` là `"convert"` (mục 6).
 - Thời điểm request gần nhất của từng model nằm trong autoscaler (lưu với nhịp chậm); router chỉ báo request
@@ -398,6 +406,7 @@ Khác biệt so với bản nháp đầu: không có endpoint nhãn (`PUT /api/s
 | 3. Giành chỗ | preemption + cooldown + claim; `POST /api/simulate` | trung bình: gỡ replica đang phục vụ, cần drain đúng | xong |
 | 4. Cân bằng lại | rebalance make-before-break; `POST /api/rebalance` | cao nhất: load lại model lớn tốn thời gian | xong |
 | Sau 4 | tự hiệu chỉnh VRAM (4.7); lưu bền trạng thái điều khiển (4.8) | thấp | xong |
+| Tối ưu engine | một `ggml-rpc-server` mỗi server và replica; speculative decoding `mtp`; `kv_unified`; ước lượng KV theo layer (SWA, MLA, model lai, MTP) và tốc độ decode MoE; transport RDMA trong image agent | trung bình: đổi những gì chạy trên mọi replica bị chia | xong, chưa chạy trên phần cứng thật nhiều GPU |
 | Chuyển đổi | Hugging Face / thư mục sang GGUF ngay tại coordinator; chọn kiểu lượng tử hóa theo dung lượng cụm; imatrix; cổng kiểm tra (mục 6) | trung bình: nặng CPU, RAM, đĩa, chạy cạnh router | xong |
 
 **Trạng thái giai đoạn 1:** xong. Chạy thật trên GTX 1650: model `priority` 80 thắng model có tên đứng trước; replica và model mới dàn sang GPU khác (mô phỏng với scheduler thật); tok/s ước lượng 41.6 so với đo thật 51.8 (model 3B) và 204 so với 182 (0.5B). `budget_mb` giờ trừ cả VRAM do chính các replica của gpupool đang giữ. Chưa có cụm thật nhiều GPU để kiểm phần dàn replica trên phần cứng.
@@ -448,3 +457,9 @@ Vẫn còn mở:
   chưa có phép đo nào cho biết có đáng với độ phức tạp thêm vào hay không.
 - **Dàn replica và rebalance trên phần cứng thật nhiều GPU, nhiều server** mới chỉ được kiểm với agent giả
   lập và một máy một GPU.
+- **Đợt tối ưu engine trên phần cứng thật.** Một RPC server mỗi server, `draft-mtp`, `kv_unified`, bố cục KV theo
+  layer và RDMA làm theo mã nguồn llama.cpp b11342 và có unit test, nhưng chưa được đo trên một model bị chia thật.
+  Kỳ vọng: ít vòng RPC hơn mỗi token khi hai GPU cùng server; ước lượng nhỏ hơn và sát hơn cho model SWA / MLA / lai
+  (hiệu chỉnh sẽ sửa phần còn lại).
+- **Chi phí mỗi hop.** `t_hop` = 2 ms mỗi RPC server là con số đoán từ một máy; với RDMA hoặc LAN nhanh nó nhỏ hơn
+  nhiều và nên được đo (hoặc hiệu chỉnh từ tốc độ decode đo được) trước khi dùng để xếp hạng placement.

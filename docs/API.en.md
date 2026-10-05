@@ -173,10 +173,11 @@ model; a new model gets the default.
 | `draft_file` | string or null | keep (stored draft), else none |
 | `draft_n_max` | int 1..16 or null | keep, else 4 |
 | `flash_attn`, `ubatch`, `batch` | as above, or null | keep, else `auto` / 512 / 2048 |
+| `kv_unified` | bool or null | keep, else false |
 
 `replicas` is not in the body: a new model starts with `replicas = 0` and an existing model keeps its value.
 Returns the stored `ModelSpec` (JSON). Errors: 422 (bad name, file not ready, bad pin, min > max, idle
-without min 0, draft checks), 401. The reconciler is woken.
+without min 0, draft checks, `mtp` for a GGUF without nextn layers), 401. The reconciler is woken.
 
 ```bash
 curl -s -X PUT $COORD/api/models/qwen-7b -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{
@@ -364,6 +365,7 @@ Body `RecommendBody`:
 | `draft_file` | string or null | for `speculative: "draft"` (same 422 checks as `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
 | `flash_attn`, `ubatch`, `batch` | as in `PUT /api/models`, `auto` / 512 / 2048 | |
+| `kv_unified` | bool, false | |
 
 Response:
 
@@ -413,7 +415,7 @@ changes. Body:
 
 - `changes[]`: `model` (existing, else 404) plus any of `replicas`, `min_replicas`, `max_replicas`,
   `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`, `pin_devices`, `kv_cache_type`, `speculative`,
-  `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`. Absent = unchanged.
+  `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`, `kv_unified`. Absent = unchanged.
 - `add[]`: `name` (new, `[A-Za-z0-9._-]{1,64}`), `file` (ready library item), plus the same optional fields.
   A new model starts at its floor (`max(min_replicas, 1)`) when `replicas > 0`.
 - Validation as `PUT /api/models` (422); the result of each model is checked in full.
@@ -567,7 +569,7 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, no auth |
-| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version, cached model files, CPU/RAM |
+| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (`["rpc_multi_device"]`: one rpc engine may serve several devices), CPU/RAM |
 | POST | `/engines` | start one llama.cpp process from an `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | per-device buffers llama.cpp reported at load |
@@ -577,15 +579,16 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<first device_id>"`),
 `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: one or more distinct local devices, served by one process; server: ordered list such as
 `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF on the head), `rpc_endpoints` (`"host:port"`, order of
-`RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
-`spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
-`batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (hosts allowed
+`RPC0..`; each RPC server once), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
+`spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` → `draft-simple`, `mtp` → `draft-mtp`),
+`draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
+`batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (hosts allowed
 to reach an rpc engine; enforced only when the agent runs with `rpc_firewall`). Returns `EngineStatus`
 (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`, `port`, `exit_code`, `log_tail` of at
 most 50 lines). Errors: `422` for `extra_args` (not accepted by this agent, so the token cannot become
 arbitrary llama-server flags), a server engine without `model_path`, a `model_path` or `draft_model_path`
-outside the model cache and not returned by `/models/ensure`, a missing file, an rpc engine without exactly
-one device, or a port in use; `409` engine already running; `500` binary not found.
+outside the model cache and not returned by `/models/ensure`, a missing file, an rpc engine without devices
+or with a device listed twice, or a port in use; `409` engine already running; `500` binary not found.
 
 **`GET /engines/{engine_id}/memory`**: llama.cpp prints its buffer sizes when it loads a model; the agent
 parses the head of the engine's log (first 2 MiB) and returns, per device (`CUDA0`, `RPC0`, ...) in MiB, the

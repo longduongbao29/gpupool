@@ -75,7 +75,12 @@ llama.cpp chia model **theo layer** lên các device (`--split-mode layer`). GPU
 - **Chỉ node head cần file GGUF.** Coordinator không bao giờ copy model sang các node RPC; head nạp model và
   gửi cho từng device từ xa các tensor của nó qua TCP khi model được nạp.
 - Mỗi `ggml-rpc-server` chạy với `-c`, bật **cache tensor cục bộ**: lần nạp sau của cùng model gần như không
-  truyền gì.
+  truyền gì. Cache nằm ở `$LLAMA_CACHE/rpc` (mỗi tensor trên 10 MiB một file, đặt tên theo hash); agent đặt
+  `LLAMA_CACHE=<cache_dir>/llama.cpp` (volume `/data` trong image, trừ khi người dùng đã đặt `LLAMA_CACHE`) và cứ
+  10 phút cắt nó về `rpc_cache_gb` (100 GB), xoá file ít dùng nhất trước. llama.cpp không bao giờ xoá file
+  cache, và thiếu một file chỉ khiến head gửi lại tensor đó.
+- RPC dùng TCP, hoặc RDMA (RoCE / InfiniBand) khi cả hai đầu có thiết bị RDMA: image agent build ggml-rpc với
+  libibverbs và llama.cpp tự thương lượng cho từng kết nối (`GGML_RPC_NO_RDMA=1` ép dùng TCP).
 - Activation đi qua mạng một lần cho mỗi token mỗi chặng (hop), nên chia qua RPC là đổi tốc độ lấy dung
   lượng. Scheduler mô hình hóa việc này bằng chi phí cố định mỗi hop (mục 6.3) và chỉ dùng placement
   multi-node khi không có GPU đơn hay node đơn nào chứa vừa.
@@ -94,6 +99,12 @@ Dòng lệnh của head (`agent/procs.py`, `build_command`) luôn có `-ngl 999`
 đọc; mức 5 thêm một lượt dry-run nên phải đúng là 4). `--tensor-split` là số layer, được truyền khi có hơn
 một device.
 
+Tuỳ chọn theo model chỉ thêm cờ khi khác mặc định của llama.cpp: `-ctk/-ctv` (kiểu KV cache), `-fa` (flash
+attention), `-b` / `-ub` (batch, micro-batch), `-kvu` (`kv_unified`: các slot dùng chung một vùng KV thay vì mỗi
+slot `ctx_size / parallel`), và với speculative decoding là `--spec-type ngram-mod`, `--spec-type draft-simple
+-md ...` hoặc `--spec-type draft-mtp` (mục 8.2). `--rpc` liệt kê mỗi RPC server một lần, theo thứ tự các device
+`RPCi` của nó.
+
 ## 4. Hợp đồng dữ liệu
 
 Nguồn sự thật: `src/gpupool/common/models.py` (pydantic v2). Đổi một field là đổi giao thức; agent và
@@ -102,12 +113,12 @@ coordinator khác phiên bản phải vẫn nói chuyện được, nên mọi f
 | Model | Hướng | Field chính |
 | --- | --- | --- |
 | `Device` | agent tới coordinator | `device_id` ("CUDA0", "CPU"), `kind`, `total_mb`, `free_mb`, `usable_mb` = max(0, min(free - margin, budget)), `budget_mb` (mức trần đã cấu hình; coordinator còn trừ ước lượng của các replica đang chạy của chính nó vì free memory không cho thấy phần đó), `uuid` / `pci_bus_id` (định danh ổn định), `bandwidth_gbps` (độ rộng bus NVML x xung nhớ; dùng để xếp hạng GPU), telemetry (`util_pct`, `temp_c`, `power_w`, `processes`, `driver`, `cuda`) |
-| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `models` (file GGUF trong cache local), telemetry CPU/RAM |
-| `EngineSpec` | coordinator tới agent | `engine_id`, `kind` rpc/server, `port`, `devices` (thứ tự = `--device`), `rpc_endpoints`, `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type`, `draft_model_path`, `draft_device`, `draft_n_max`, `allowed_peers` (rpc: host được phép kết nối) |
+| `NodeReport` | agent tới coordinator (`GET /report`) | `node_id`, `agent_url`, `host` (IP các node khác dùng cho RPC), devices, engines, `llama_version`, `cuda_archs`, `models` (file GGUF trong cache local), `features` (khả năng ngoài bản 0.5, ví dụ `rpc_multi_device`; coordinator chỉ dùng khả năng mà agent báo), telemetry CPU/RAM |
+| `EngineSpec` | coordinator tới agent | `engine_id`, `kind` rpc/server, `port`, `devices` (server: thứ tự = `--device`; rpc: các device một `ggml-rpc-server` phục vụ, theo thứ tự `-d`), `rpc_endpoints` (mỗi RPC server một cái), `tensor_split`, `ctx_size`, `parallel`, `cache_type`, `spec_type` (`none`/`ngram`/`draft`/`mtp`), `draft_model_path`, `draft_device`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`, `allowed_peers` (rpc: host được phép kết nối) |
 | `EngineStatus` | agent tới coordinator | `state` starting/running/exited/failed, `exit_code`, `log_tail` (tối đa 50 dòng) |
-| `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = dừng), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max` |
+| `ModelSpec` | admin | `name`, `source`, `ctx_size`, `parallel`, `replicas` (0 = dừng), `pin_devices`, `priority`, `spread`, `min_replicas`, `max_replicas`, `autoscale`, `idle_unload_s`, `preemptible`, `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` |
 | `AutoscalePolicy` | nằm trong `ModelSpec` | `target_busy` 0.7, `up_after_s` 30, `down_after_s` 300 |
-| `ModelMeta` | đọc từ header GGUF | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model` |
+| `ModelMeta` | đọc từ header GGUF | `n_layers`, `n_embd`, `n_head_kv`, `head_dim`, `layer_bytes[i]`, `output_bytes`, `vocab_size`, `tokenizer_model`; bố cục cache theo layer `kv_k[i]` / `kv_v[i]` (kích thước hàng được cache), `swa[i]` + `n_swa`, `state_bytes[i]` (state hồi quy mỗi sequence); `n_nextn` / `nextn_bytes` (block MTP chỉ nạp khi `draft-mtp`); `active_bytes[i]` (MoE: số byte mỗi token đọc) |
 | `Placement` | scheduler | `tier`, `head_node`, `head_port`, `assignments` (node, device, `device_uuid`, `llama_device`, `rpc_endpoint`, layers, `est_mb`), `tensor_split`, `est_total_mb`, `score`, `est_decode_tps`, `reasons`, `draft_est_mb`, `mem_factor` (hệ số calibration đã nhân vào các ước lượng) |
 | `Occupant` | reconciler tới scheduler | một engine đang chiếm GPU: node, device, model, `est_mb`, `busy` (0..1) |
 | `ReplicaRecord` | store | placement + trạng thái `pending`, `launching`, `ready`, `draining`, `stopped`, hoặc `failed` |
@@ -145,6 +156,7 @@ cache_bytes[i]     = cells[i] x (k_row[i] + v_row[i]) x bytes_per_element(kv_cac
                      + state_bytes[i] x parallel
 cells[i]           = ctx_size, hoặc với layer sliding-window
                      parallel x pad256(min(pad256(ctx_size / parallel), n_swa + ubatch))
+                     (kv_unified: pad256(min(ctx_size, n_swa x parallel + ubatch)))
 compute_buffer     = ceil(21 x 512 x n_embd x 4 bytes)      (ubatch mặc định 512)
 runtime_context    = 128 MB (CUDA) | 32 MB (CPU)
 ```
@@ -214,8 +226,12 @@ est_decode_tps = 1 / thời gian mỗi token
 
 (0.5 = tỉ lệ băng thông đỉnh mà llama.cpp đạt được; hiệu chỉnh trên GTX 1650, 160 GB/s, nơi Qwen2.5-0.5B
 q4_k_m đo được 182 tok/s.) Băng thông chưa biết: CPU 25 GB/s; GPU CUDA không biết được xếp như GPU chậm nhất
-đã biết (100 GB/s khi không biết cái nào). Với layer MoE, byte mỗi token là
-phần weight dùng chung cộng `expert_used_count / expert_count` của các expert được định tuyến (`ffn_*_exps`).
+đã biết (100 GB/s khi không biết cái nào). Với layer MoE, byte mỗi token là phần weight dùng chung cộng
+`expert_used_count / expert_count` của các expert được định tuyến (`ffn_*_exps`).
+
+`số_hop_rpc` là số RPC server mà đồ thị đi qua, không phải số device ở xa: các device liền nhau của một node
+dùng chung một `ggml-rpc-server` khi agent của nó báo `rpc_multi_device` (mục 3.1), và llama.cpp copy activation
+giữa chúng ngay trong server đó.
 
 Điểm của một ứng viên (cao hơn thắng):
 
@@ -336,6 +352,14 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
 - `draft_n_max` (1..16, mặc định 4): đo trên GTX 1650 với Qwen2.5-3B cộng draft 0.5B, 4 token nháp cho +5 %,
   8 chậm hơn không dùng.
 
+### 8.3 Vùng KV dùng chung (`kv_unified`)
+
+Với `parallel` > 1, llama.cpp cho mỗi slot một luồng riêng `ctx_size / parallel` ô, nên một request dài thất bại
+trong khi các slot khác giữ request ngắn. `kv_unified` thêm `-kvu`: một vùng `ctx_size` ô cho mọi slot, nên bất kỳ
+request nào cũng có thể dùng hết. Bộ nhớ không đổi; chỉ layer sliding-window đổi, từ `parallel` cửa sổ
+`n_swa + ubatch` thành một cửa sổ `n_swa x parallel + ubatch` (mục 6.1). Recommend gợi ý nó (tip `kv_unified`) cho
+mọi model có nhiều slot.
+
 ## 9. Router (`router/`)
 
 - Ứng viên = các replica `ready` của model mà node head còn sống. Router đọc một snapshot của store, chỉ được
@@ -348,7 +372,11 @@ cache lượng tử hóa thật sự cho phép context dài hơn vừa bộ nh�
   tự đầu của prompt.
 - Rendezvous hash(prefix, replica) chọn replica ưu tiên; nếu nó có nhiều hơn replica rảnh nhất quá 2 request
   đang chờ thì dùng replica rảnh nhất.
-- Gửi `cache_prompt: true`; head chạy với `--cache-reuse 256 --metrics`.
+- Gửi `cache_prompt: true`; head chạy với `--cache-reuse 256 --metrics`. Body được chuyển tiếp đúng như client
+  gửi: khi thiếu `cache_prompt`, `"cache_prompt":true,` được chèn ngay sau dấu ngoặc mở thay vì serialize lại hàng
+  MB JSON trên event loop (body có BOM hoặc UTF-16 thì được mã hoá lại).
+- HTTP client của router không giới hạn số kết nối tới upstream (httpx sẽ giữ request thứ 101 trở đi trong
+  coordinator mà không có timeout); giới hạn là các slot của llama-server và bộ cân bằng tải.
 - Thử lại khi lỗi kết nối hoặc 5xx **trước byte đầu tiên**, tối đa hai lần, không bao giờ sau khi đã gửi byte.
   Mọi lỗi đều đưa vào `note_error`, khiến reconciler kiểm tra `/health` của replica đó ở tick tiếp theo.
 - Lỗi giữa chừng khi stream kết thúc luồng SSE bằng một sự kiện lỗi; bộ đếm outstanding được trả đúng một
@@ -479,10 +507,16 @@ placement thì mẫu bị bỏ (dữ liệu thiếu sẽ làm lệch tỉ lệ x
   chặn dịch chuyển hơn 5 %. Hệ số và số mẫu hiển thị trong `/api/state`.
 - Hiệu chỉnh chỉ là sổ sách về một replica đã phục vụ: nó không bao giờ làm launch thất bại, và agent cũ, log
   không có `-lv 4` hay thiếu device chỉ đơn giản để nguyên hệ số.
+- **Phiên bản bộ ước lượng**: một hệ số được đo theo một phiên bản của ước lượng. Khi `estimate.py` đổi cách ước
+  lượng, `ESTIMATOR_VERSION` (trong `store.py`) được tăng và store xoá mọi hệ số một lần lúc khởi động (khoá
+  `control_state` là `estimator`); nếu không, hệ số cũ sẽ nhân ước lượng mới với sai số của cái cũ (bị chặn ở
+  0.9, tức thiếu tới 10 %). Phiên bản 2: bố cục cache theo layer.
 
 ## 13. Lưu trạng thái và phục hồi sau sự cố
 
-SQLite (WAL, busy timeout 5 s). Các bảng: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
+SQLite (WAL, `synchronous=NORMAL`, busy timeout 5 s). NORMAL không bao giờ làm hỏng database WAL; mất điện chỉ có
+thể làm mất vài commit cuối, còn riêng báo cáo của agent đã commit mỗi 2 s cho mỗi server trên chính event loop
+chuyển tiếp suy luận, mà FULL thì fsync từng lần. Các bảng: `nodes`, `models`, `replicas`, `servers`, `removed_servers`,
 `gpu_flags`, `events` (1000 dòng cuối), `control_state`, `model_calibration`, `convert_jobs` (mục 17.6), cộng các bảng riêng của library.
 
 | Được lưu | Ở đâu | Sống sót sau restart |
@@ -491,7 +525,7 @@ SQLite (WAL, busy timeout 5 s). Các bảng: `nodes`, `models`, `replicas`, `ser
 | Sự kiện | `events` | có; gửi webhook là best effort |
 | Cooldown preemption và tập nạn nhân, backoff crash-loop, move đang chạy | `control_state` khóa `preempted`, `backoff`, `move` | có |
 | Số lượng mong muốn, request cuối, quyết định cuối của autoscaler | `control_state` khóa `autoscaler:<model>` | có (bộ đếm thì không) |
-| Hệ số hiệu chỉnh | `model_calibration` | có |
+| Hệ số hiệu chỉnh | `model_calibration` | có, cho tới khi phiên bản bộ ước lượng đổi (mục 12) |
 | Bộ đếm `_last_rebalance` | bộ nhớ | không, cố ý (báo cáo cũ sau khi khởi động) |
 
 Control state được ghi ngay mỗi khi đổi (đây là các sự kiện hiếm) và thời gian là giờ đồng hồ thật nên có cùng ý
@@ -528,8 +562,9 @@ src/gpupool/
     memlog.py                 kích thước buffer theo device từ log llama-server
     gpu.py                    dò device NVML / psutil, budget, margin
     models_cache.py           tải vào .part, đổi tên nguyên tử, GGUF chia nhỏ
+    rpc_cache.py              giới hạn dung lượng cache trọng số của ggml-rpc-server (LRU)
   scheduler/
-    gguf_meta.py              parser header GGUF (file hoặc URL)
+    gguf_meta.py              parser header GGUF (file hoặc URL), bố cục cache theo layer, kích thước MoE / MTP
     estimate.py               ước lượng bộ nhớ
     scoring.py                ước lượng tốc độ decode theo băng thông
     placement.py              ứng viên, chia layer, chấm điểm, giữ chỗ draft, plan / rank

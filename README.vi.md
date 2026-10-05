@@ -64,8 +64,9 @@ Khi có phương án đặt tốt hơn, replica mới sẵn sàng rồi replica 
 <tr>
 <td valign="top">
 
-**Lượng tử hóa KV cache**<br>
-`f16`, `q8_0`, `q4_0` để model vừa với ít GPU hơn.
+**KV cache: lượng tử hoá, dùng chung, tính đúng**<br>
+`f16`, `q8_0`, `q4_0`; một vùng dùng chung cho các slot; ước lượng theo đúng bố cục cache của từng model
+(sliding window, MLA, model lai).
 
 </td>
 <td valign="top">
@@ -292,7 +293,8 @@ huggingface.co; `--skip-convert` bỏ qua giai đoạn này.
 Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo cáo kiểm thử](docs/TEST_REPORT.vi.md) và
 [thiết kế nền tảng](docs/PLATFORM_DESIGN.vi.md#10-câu-hỏi-mở-và-các-quyết-định).
 
-- [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding qua mạng thật
+- [ ] Chạy trên mạng LAN nhiều server thật, và đo speculative decoding (n-gram, draft, MTP), một RPC server cho mỗi
+  server nhiều GPU và RDMA qua mạng thật
 - [ ] API key và quota theo từng client, `/v1/embeddings`, TLS
 - [ ] Đổi model không gián đoạn (zero-downtime)
 - [ ] Nâng cấp llama.cpp
@@ -306,7 +308,19 @@ Lấy từ các danh sách "còn phải làm" và câu hỏi mở trong [báo c�
 <summary><b>Mọi server đều cần file model không?</b></summary>
 
 Không. Chỉ head (`llama-server`) giữ file GGUF. Trong cụm giả lập, model 2,1 GB chỉ nằm ở head, còn RPC server chỉ
-giữ cache tensor khoảng 724 MB.
+giữ cache tensor khoảng 724 MB. Cache đó nằm trên volume `/data` của agent, nên lần nạp model sau gần như không gửi gì
+qua mạng, và bị giới hạn ở `GPUPOOL_RPC_CACHE_GB` (100 GB).
+
+</details>
+
+<details>
+<summary><b>Model chia qua mạng chạy nhanh cỡ nào?</b></summary>
+
+Mỗi token sinh ra đi qua mỗi liên kết RPC một lần, nên độ trễ quan trọng hơn băng thông. gpupool giữ số chặng ở mức
+thấp: ưu tiên một GPU hoặc một server khi model vừa, các GPU mà một replica dùng trong cùng một server ở xa nằm sau một
+RPC server duy nhất (activation giữa chúng không rời khỏi máy đó), speculative decoding (n-gram, model draft, hoặc
+chính các layer MTP của model) giảm số lượt chạy cho mỗi token, và image agent dùng RDMA (InfiniBand / RoCE) khi các
+server có. Xem [Mạng](docs/QUICKSTART.vi.md#mạng).
 
 </details>
 
@@ -352,7 +366,7 @@ trong mạng riêng hoặc VPN, và đặt một proxy kết thúc TLS trước 
 <summary><b>Trộn các loại GPU khác nhau được không?</b></summary>
 
 Được. Scheduler đọc bộ nhớ của từng GPU và xếp hạng các phương án theo tốc độ decode ước tính dựa trên băng thông bộ
-nhớ, số chặng mạng và việc chia sẻ GPU. Ước tính dùng một hiệu suất cố định cho mọi GPU, nên hãy
+nhớ, số chặng mạng và việc chia sẻ GPU (với model MoE chỉ tính các expert mà một token đọc). Ước tính dùng một hiệu suất cố định cho mọi GPU, nên hãy
 xem các con số tok/s như thứ hạng, không phải cam kết. Việc dàn trải trên phần cứng nhiều GPU, nhiều server thật mới
 chỉ được kiểm chứng bằng agent giả lập.
 

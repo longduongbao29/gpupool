@@ -278,3 +278,19 @@ Trong form New / Edit model:
 - Pin đã lưu, kể cả ký tự thay thế, được nạp lại vào cây khi mở lại form. Recommend, Check placement và
   Preview impact gửi cùng `pin_devices`.
 - Thẻ model hiện chip như *Limited to server-a, server-b/CUDA1* (`/*` hiển thị bằng tên server).
+
+## 11. Các trường hiệu năng trong form model
+
+Phần *Performance* của form New / Edit model ánh xạ một-một vào các trường `ModelSpec`; Recommend, Check
+placement và Preview impact cũng gửi chúng, nên mọi ước lượng đều thấy cùng một cấu hình.
+
+- **Parallel slots** và, khi có hơn một slot, công tắc **Share the context between slots** (`kv_unified`). Bên
+  dưới là dòng cho biết context mỗi request nhận được: `context ÷ slots` (màu hổ phách khi dưới 2048), hoặc cả
+  context "at most, shared with the other slots" khi bật công tắc.
+- **KV cache** (`kv_cache_type`), **Flash attention**, **Micro-batch** và **Batch**, kèm cảnh báo khi cache lượng
+  tử hóa đi với flash attention *Off*.
+- **Speculative decoding**: *Off*, *N-gram*, *Draft model* (một file trong thư viện và số token) hoặc *MTP* (chính
+  các layer dự đoán của model, kèm số token). Dòng trợ giúp dưới *MTP* nói GGUF nào có các layer này; server trả
+  422 với model không có, hiển thị như mọi lỗi khác.
+- Một gợi ý Recommend có `apply` đặt bất kỳ trường nào ở trên (`kv_unified`, `speculative`, `draft_n_max`, ...)
+  sẽ điền chúng vào form; chip trên thẻ model hiện *Spec: MTP* và *N slots · ctx shared*.

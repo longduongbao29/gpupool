@@ -173,10 +173,11 @@ mới lấy giá trị mặc định.
 | `draft_file` | string hoặc null | giữ (draft đã lưu), nếu không có thì không dùng |
 | `draft_n_max` | int 1..16 hoặc null | giữ, nếu không có thì 4 |
 | `flash_attn`, `ubatch`, `batch` | như trên, hoặc null | giữ, nếu không có thì `auto` / 512 / 2048 |
+| `kv_unified` | bool hoặc null | giữ, nếu không có thì false |
 
 `replicas` không nằm trong body: model mới bắt đầu với `replicas = 0`, model đã có giữ giá trị cũ. Trả về
 `ModelSpec` đã lưu (JSON). Lỗi: 422 (tên sai, file chưa ready, pin sai, min > max, idle mà min khác 0, các
-kiểm tra draft), 401. Reconciler được đánh thức.
+kiểm tra draft, `mtp` với GGUF không có layer nextn), 401. Reconciler được đánh thức.
 
 ```bash
 curl -s -X PUT $COORD/api/models/qwen-7b -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" -d '{
@@ -363,6 +364,7 @@ Body `RecommendBody`:
 | `draft_file` | string hoặc null | cho `speculative: "draft"` (cùng các kiểm tra 422 như `PUT /api/models`) |
 | `draft_n_max` | int 1..16, 4 | |
 | `flash_attn`, `ubatch`, `batch` | như ở `PUT /api/models`, `auto` / 512 / 2048 | |
+| `kv_unified` | bool, false | |
 
 Phản hồi:
 
@@ -411,7 +413,7 @@ Body:
 
 - `changes[]`: `model` (đã tồn tại, nếu không là 404) cùng bất kỳ trường nào trong `replicas`,
   `min_replicas`, `max_replicas`, `priority`, `preemptible`, `ctx_size`, `parallel`, `spread`,
-  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`.
+  `pin_devices`, `kv_cache_type`, `speculative`, `draft_file`, `draft_n_max`, `flash_attn`, `ubatch`, `batch`, `kv_unified`.
   Vắng = không đổi.
 - `add[]`: `name` (mới, `[A-Za-z0-9._-]{1,64}`), `file` (mục thư viện ready), cùng các trường tùy chọn
   như trên. Model mới bắt đầu ở mức sàn (`max(min_replicas, 1)`) khi `replicas > 0`.
@@ -565,7 +567,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, không xác thực |
-| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp, file model đã cache, CPU/RAM |
+| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (`["rpc_multi_device"]`: một engine rpc có thể phục vụ nhiều thiết bị), CPU/RAM |
 | POST | `/engines` | khởi động một tiến trình llama.cpp từ `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | các buffer theo thiết bị mà llama.cpp báo lúc load |
@@ -575,14 +577,15 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` hoặc
 `"<replica_id>-rpc-<device_id đầu tiên>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: một hoặc nhiều
 thiết bị cục bộ khác nhau, do một process phục vụ; server: danh sách có thứ tự như `["CUDA0","RPC0"]`), `model` (alias), `model_path` (GGUF trên head),
-`rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`), `tensor_split`, `ctx_size` (4096), `parallel` (1),
-`extra_args`, `cache_type` (`f16`), `spec_type` (`none`), `draft_model_path`, `draft_device`, `draft_n_max`
-(4), `flash_attn` (`auto`, `-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
+`rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`; mỗi RPC server một lần), `tensor_split`, `ctx_size` (4096),
+`parallel` (1), `extra_args`, `cache_type` (`f16`), `spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` →
+`draft-simple`, `mtp` → `draft-mtp`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`,
+`-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
 `rpc_firewall`). Trả `EngineStatus` (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`,
 `port`, `exit_code`, `log_tail` tối đa 50 dòng). Lỗi: `422` với `extra_args` (agent này không chấp nhận, để
 token không biến thành cờ llama-server tùy ý), engine server thiếu `model_path`, `model_path` hoặc
 `draft_model_path` nằm ngoài cache model và không do `/models/ensure` trả về, file không tồn tại, engine rpc
-không có đúng một thiết bị, hoặc cổng đang bị dùng; `409` engine đã chạy; `500` không tìm thấy binary.
+không có thiết bị nào hoặc có thiết bị bị lặp, hoặc cổng đang bị dùng; `409` engine đã chạy; `500` không tìm thấy binary.
 
 **`GET /engines/{engine_id}/memory`**: llama.cpp in kích thước các buffer khi load model; agent phân tích
 phần đầu log của engine (2 MiB đầu) và trả, theo từng thiết bị (`CUDA0`, `RPC0`, ...), đơn vị MiB, giá trị

@@ -63,8 +63,9 @@ When a better placement exists, the new replica is ready before the old one stop
 <tr>
 <td valign="top">
 
-**KV cache quantization**<br>
-`f16`, `q8_0`, `q4_0` to fit a model on fewer GPUs.
+**KV cache: quantized, shared, sized right**<br>
+`f16`, `q8_0`, `q4_0`; one pool shared by the slots; estimates follow each model's real cache layout
+(sliding window, MLA, hybrid).
 
 </td>
 <td valign="top">
@@ -292,7 +293,8 @@ huggingface.co; `--skip-convert` leaves it out.
 From the "still to do" and open-question lists in the [test report](docs/TEST_REPORT.en.md) and the
 [platform design](docs/PLATFORM_DESIGN.en.md#10-open-questions-and-decisions).
 
-- [ ] Run on a real multi-server LAN, and measure speculative decoding over a real network
+- [ ] Run on a real multi-server LAN, and measure speculative decoding (n-gram, draft, MTP), one RPC server per
+  multi-GPU server and RDMA over a real network
 - [ ] Per-client API keys and quotas, `/v1/embeddings`, TLS
 - [ ] Zero-downtime model swap
 - [ ] Upgrade llama.cpp
@@ -306,7 +308,19 @@ From the "still to do" and open-question lists in the [test report](docs/TEST_RE
 <summary><b>Do all servers need the model file?</b></summary>
 
 No. Only the head (`llama-server`) holds the GGUF. In the simulated cluster, a 2.1 GB model was held by the head only,
-while the RPC server held a tensor cache of about 724 MB.
+while the RPC server held a tensor cache of about 724 MB. That cache lives on the agent's `/data` volume, so the next
+load of the model sends almost nothing over the network, and is capped at `GPUPOOL_RPC_CACHE_GB` (100 GB).
+
+</details>
+
+<details>
+<summary><b>How fast is a model split over the network?</b></summary>
+
+Every generated token crosses each RPC link once, so latency matters more than bandwidth. gpupool keeps the hops
+down: one GPU or one server is preferred whenever the model fits, the GPUs a replica uses inside one remote server sit
+behind a single RPC server (activations between them never leave that machine), speculative decoding (n-gram, a
+draft model, or the model's own MTP layers) cuts the number of passes per token, and the agent image uses RDMA
+(InfiniBand / RoCE) when the servers have it. See [Network](docs/QUICKSTART.en.md#network).
 
 </details>
 
@@ -352,7 +366,8 @@ on a private network or VPN, and put a TLS-terminating proxy in front of the coo
 <summary><b>Can I mix different GPUs?</b></summary>
 
 Yes. The scheduler reads each GPU's memory and ranks placements by estimated decode speed using memory bandwidth,
-network hops and GPU sharing. The estimate uses one fixed efficiency for every GPU, so treat its tok/s figures as a ranking,
+network hops and GPU sharing (for MoE models, only the experts a token reads count). The estimate uses one fixed
+efficiency for every GPU, so treat its tok/s figures as a ranking,
 not a promise. Spreading over real multi-GPU, multi-server hardware is verified only with
 simulated agents.
 

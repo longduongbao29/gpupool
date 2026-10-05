@@ -379,14 +379,18 @@ The model is cached in `GPUPOOL_CI_MODELS_DIR` (default `<repo>/.cache/ci-models
 | --- | --- | --- | --- |
 | KV cache | f16, q8_0, q4_0 | smaller KV cache, so a model can fit on fewer GPUs | ctx 8192: −132 / −204 MB, speed unchanged (51.9 / 51.2 / 50.8 tok/s) |
 | Speculative | none, ngram, draft, mtp | fewer passes of the big model per token, i.e. fewer RPC round trips when split | split over 2 servers: none 48.9, ngram 53.6, draft 0.5B 53.9 tok/s |
+| Share the context between slots | off, on | with several parallel slots, one request may use the whole context instead of context ÷ slots; same memory | not measured |
 
 In the API these are `kv_cache_type` (`f16`, `q8_0`, `q4_0`), `speculative` (`none`, `ngram`, `draft`, `mtp`: only for GGUFs with multi-token-prediction layers),
-`draft_file` (a library model, for `draft`) and `draft_n_max` (1 to 16, default 4); see [API.en.md](API.en.md).
+`draft_file` (a library model, for `draft`), `draft_n_max` (1 to 16, default 4) and `kv_unified` (shared context); see [API.en.md](API.en.md).
 They apply the next time the model starts.
 
 N-gram needs no extra memory but only helps when the output repeats earlier text. A draft model must share
 the tokenizer of the main model (checked when saving) and runs on the head's GPU (its memory is planned for).
-Drafting 4 tokens is the default; 8 was slower in our measurements.
+Drafting 4 tokens is the default; 8 was slower in our measurements. MTP uses the model's own
+multi-token-prediction layers (Qwen3.5, GLM-4.5 and newer, DeepSeek V3...): no second file and no tokenizer to
+match, and the layers' memory is planned only when MTP is on. Saving `mtp` for a model without such layers is
+refused. With MTP 2 or 3 drafted tokens is a good start.
 
 ## Without Docker
 
@@ -412,6 +416,24 @@ uv run gpupool agent --join "http://10.0.0.1:8080#<cluster-token>" --llama-dir /
 | 9000–9999 | coordinator and GPU servers → GPU servers | llama.cpp (HTTP and RPC between servers) |
 
 llama.cpp RPC is not encrypted: keep the GPU servers on a trusted internal network.
+
+Split models send activations between servers on every token, so network latency sets their speed. Two
+things help:
+
+- **Several GPUs in one server.** A replica that uses two or more GPUs of one remote server gets a single
+  `ggml-rpc-server` for them, which copies activations between them locally (agents of this version; older
+  agents run one per GPU).
+- **RDMA (InfiniBand / RoCE).** The agent image's llama.cpp speaks RDMA and uses it whenever both ends have an
+  RDMA device, falling back to TCP otherwise. Give the agent container the device and locked memory:
+
+  ```bash
+  docker run -d --name gpupool-agent --gpus all --network host --pid host \
+    --device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 \
+    -v gpupool-agent:/data -e GPUPOOL_JOIN=... ghcr.io/longduongbao29/gpupool-agent
+  ```
+
+  `GGML_RPC_NO_RDMA=1` (`-e GGML_RPC_NO_RDMA=1`) forces TCP. RDMA is negotiated per connection: a server
+  without it still works with the others over TCP.
 
 ## Security
 

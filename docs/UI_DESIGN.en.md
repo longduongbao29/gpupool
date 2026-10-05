@@ -280,3 +280,19 @@ In the New / Edit model form:
   Check placement and Preview impact send the same `pin_devices`.
 - The model card shows a chip such as *Limited to server-a, server-b/CUDA1* (`/*` is shown as the
   server name).
+
+## 11. Performance fields of the model form
+
+The *Performance* part of the New / Edit model form maps one to one to `ModelSpec` fields; Recommend,
+Check placement and Preview impact send them too, so every estimate sees the same settings.
+
+- **Parallel slots** and, once there is more than one slot, a **Share the context between slots** switch
+  (`kv_unified`). Under them a line states the context one request gets: `context ÷ slots` (amber below
+  2048), or the whole context "at most, shared with the other slots" when the switch is on.
+- **KV cache** (`kv_cache_type`), **Flash attention**, **Micro-batch** and **Batch**, with a warning when
+  a quantized cache meets flash attention *Off*.
+- **Speculative decoding**: *Off*, *N-gram*, *Draft model* (a library file and a token count) or
+  *MTP* (the model's own prediction layers, with a token count). The help line under *MTP* says which
+  GGUFs have such layers; the server answers 422 for a model without them, shown like any other error.
+- A Recommend tip whose `apply` sets any of these fields (`kv_unified`, `speculative`, `draft_n_max`,
+  ...) fills them in the form; the model card's chips show *Spec: MTP* and *N slots · ctx shared*.

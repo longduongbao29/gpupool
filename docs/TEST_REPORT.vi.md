@@ -2,6 +2,31 @@
 
 > Bản tiếng Việt. Bản tiếng Anh: [TEST_REPORT.en.md](TEST_REPORT.en.md). Hai bản phải được cập nhật cùng nhau.
 
+## 2026-10-05 (tối ưu engine: cấu trúc RPC, MTP, bố cục KV)
+
+Thay đổi: một `ggml-rpc-server` mỗi server và replica, speculative decoding `draft-mtp`, `kv_unified`, ước lượng KV
+theo layer (SWA, MLA, model lai, block MTP nạp khi cần), tốc độ decode MoE, xoá hiệu chỉnh khi bộ ước lượng đổi, khoá
+định tuyến ổn định cho hội thoại nhiều lượt, bỏ giới hạn pool của router, chuyển tiếp nguyên body, tải model song
+song khi khởi động nguội, cache RPC trên `/data` có giới hạn dung lượng, RDMA trong image agent (pull request #5;
+thiết kế ở [DESIGN.vi.md](DESIGN.vi.md)).
+
+### Kết quả
+
+| Kiểm tra | Cách làm | Kết quả |
+| --- | --- | --- |
+| Unit test và API test | `uv run pytest -q` | 885 đạt, 5 bỏ qua |
+| Cờ so với llama.cpp | mọi cờ, quy tắc bố cục KV và hành vi RPC đều đọc từ mã nguồn b11342 (`common/arg.cpp`, `llama-hparams.cpp`, `llama-kv-cache*.cpp`, `src/models/*.cpp`, `ggml-rpc.cpp`, `transport.cpp`) | có `-kvu`, `--spec-type draft-mtp`, `-d CUDA0,CUDA1`; RDMA quay về TCP; thiếu file cache chỉ khiến gửi lại tensor |
+| Bố cục KV | GGUF tổng hợp cho từng họ (gemma3 SWA, deepseek2 MLA, qwen35 lai + MTP, nemotron_h, MoE) | kích thước khớp công thức của llama.cpp, kiến trúc chưa biết giữ quy tắc cũ |
+| UI | Chromium với `scripts/ui_mock_server.py` | công tắc dùng chung context và lựa chọn MTP hiển thị đúng, không có lỗi trang |
+| Image | các job CI `agent` / `coordinator` / `e2e` | chạy trên pull request |
+
+### Còn phải làm
+
+- Chạy một model bị chia trên GPU thật: tốc độ decode khi một RPC server cho hai GPU cùng server so với mỗi GPU một
+  server; tỉ lệ chấp nhận và tốc độ của `draft-mtp` trên GGUF Qwen3.5 hoặc GLM; buffer đo được của một model SWA và
+  một model lai so với ước lượng mới.
+- RDMA trên phần cứng InfiniBand / RoCE thật.
+
 ## 2026-10-03 (chuyển đổi, đợt 2: importance matrix, loại IQ, kiểm tra đĩa sớm)
 
 Tính năng: các loại lượng tử hoá IQ1/IQ2/IQ3 với importance matrix (giai đoạn *calibrating*), kiểm tra đĩa lúc gửi,

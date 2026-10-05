@@ -56,7 +56,10 @@ t_{token} = \sum_{d \in \text{devices}} \frac{\text{bytes}_d}{BW_d \cdot \eta} +
 ```
 
 `bytes_d` is the sum of `layer_bytes` of the layers placed on device d (already in `ModelMeta`; the output
-tensors count on the last device). η is the real-world efficiency: the numbers in `TEST_REPORT` give
+tensors count on the last device). For a MoE layer only the bytes a token reads count: the shared weights
+plus `expert_used_count / expert_count` of the routed experts (`ModelMeta.active_bytes`). `n_rpc` counts RPC
+servers, not remote devices: the GPUs of one server that a replica uses sit behind one `ggml-rpc-server`
+(agents with the `rpc_multi_device` feature), which copies activations between them locally. η is the real-world efficiency: the numbers in `TEST_REPORT` give
 η ≈ 0.45 for 0.5B (182 tok/s against ~400 in theory) and ≈ 0.6 for 3B (51 tok/s against ~84). The code uses
 a constant **η = 0.5** and `t_hop` = 2 ms per RPC hop (`scheduler/scoring.py`). A GPU without a known
 bandwidth gets a default. Prefill depends on compute more than on bandwidth; the estimate ranks by decode
@@ -86,7 +89,7 @@ field table, with types and limits, is in [API.en.md](API.en.md#2-modelspec).
 | `spread` | `"gpu"` | `gpu`: replicas prefer different GPUs; `node`: different servers; `none`: don't care |
 | `pin_devices` | empty | `"node_id/device_id"` entries a replica may use; empty = free choice |
 | `preemptible` | true | false = never preempted |
-| `kv_cache_type`, `speculative`, `draft`, `draft_n_max` | `f16`, `none`, null, 4 | memory/speed options that the estimate and the planner take into account (added after this design) |
+| `kv_cache_type`, `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified` | `f16`, `none`, null, 4, `auto`, 2048, 512, false | memory/speed options that the estimate and the planner take into account (added after this design); `speculative` is `none`, `ngram`, `draft` or `mtp` |
 
 `replicas` is the on/off switch: 0 stops the model whatever `min/max` say. With `min_replicas` and
 `max_replicas` unset both equal `replicas`, so a fixed-count model behaves as before.
@@ -135,7 +138,7 @@ device's `est_mb`.
   `node` penalise a shared GPU; only `node` penalises a shared server).
 - `waste`: mean of `usable / biggest usable` over the chosen GPUs. This keeps best-fit's strength: do not
   carve up a large GPU while a snug one is free.
-- `n_dev`, `n_rpc`: extra devices and network hops.
+- `n_dev`, `n_rpc`: extra devices and network hops (one per RPC server).
 
 Ties break by smaller tier, then the first device's name, so results are deterministic. The winning
 placement is stored with the replica (`score`, `est_decode_tps`, `reasons`), so the UI can explain why a
@@ -378,14 +381,19 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 ## 8. Data changes
 
 - `ModelSpec`: the policy fields (JSON in the `models` table, no migration), later also `kv_cache_type`,
-  `speculative`, `draft`, `draft_n_max`.
+  `speculative`, `draft`, `draft_n_max`, `flash_attn`, `batch`, `ubatch`, `kv_unified`.
+- `NodeReport.features`: capabilities an agent has beyond 0.5 (`rpc_multi_device`); the coordinator only uses
+  what an agent reports, so it can be upgraded before its agents.
+- `ModelMeta`: per-layer cache layout (`kv_k`, `kv_v`, `swa`, `n_swa`, `state_bytes`), MTP blocks (`n_nextn`,
+  `nextn_bytes`) and MoE `active_bytes`, all optional (metadata without them keeps the old estimate).
 - `Device`: `bandwidth_gbps` (the agent reads it from NVML), `uuid`, `budget_mb`. Old agents omit them, and
   their GPUs count as equal.
 - `Placement`: `score`, `est_decode_tps`, `reasons`, `draft_est_mb`.
 - `gpu_flags` is keyed by the card's uuid when reported. There is no `server_labels` table and no
   `labels`/`reserve_mb` column (see section 3).
 - Table `control_state(key, value, updated_at)`: autoscaler state per model, `preempted`, `backoff`, `move`.
-- Table `model_calibration(model, factor, samples, updated_at)`.
+- Table `model_calibration(model, factor, samples, updated_at)`; cleared once when the estimator version changes
+  (`control_state` key `estimator`).
 - Table `convert_jobs`: conversion jobs and their state; a finished job's file is an ordinary library item
   with `source` `"convert"` (section 6).
 - The last request time per model lives in the autoscaler (persisted at a slow cadence); the router only
@@ -400,6 +408,7 @@ Differences from the first draft: there are no label endpoints (`PUT /api/server
 | 3. Preemption | preemption + cooldown + claim; `POST /api/simulate` | medium: removes serving replicas, draining must be right | done |
 | 4. Rebalancing | make-before-break rebalance; `POST /api/rebalance` | highest: reloading large models takes time | done |
 | After 4 | VRAM self-calibration (4.7); persisted control state (4.8) | low | done |
+| Engine pass | one `ggml-rpc-server` per server and replica; `mtp` speculative decoding; `kv_unified`; per-layer KV estimate (SWA, MLA, hybrid, MTP) and MoE decode speed; RDMA transport in the agent image | medium: changes what runs on every split replica | done, not yet run on real multi-GPU hardware |
 | Conversion | Hugging Face / folder to GGUF in the coordinator; quantization type chosen against cluster capacity; importance matrices; validation gate (section 6) | medium: CPU, RAM and disk heavy, runs beside the router | done |
 
 **Phase 1 status:** done. Real run on a GTX 1650: a `priority` 80 model wins over one whose name sorts first; replicas and new models spread to other GPUs (simulated with the real scheduler); estimated vs measured decode 41.6 vs 51.8 tok/s (3B) and 204 vs 182 (0.5B). `budget_mb` now also subtracts the VRAM gpupool's own replicas hold. Spreading has not been checked on real multi-GPU hardware.
@@ -450,3 +459,9 @@ Still open:
   measures yet whether it would be worth the complexity.
 - **Spreading and rebalancing on real multi-GPU, multi-server hardware** are verified only with simulated
   agents and a single-GPU machine.
+- **The engine pass on real hardware.** One RPC server per server, `draft-mtp`, `kv_unified`, the per-layer KV
+  layout and RDMA follow the llama.cpp b11342 source and are unit-tested, but have not been measured on a real
+  split model. Expected: fewer RPC round trips per token for two GPUs on one server; smaller, closer estimates
+  for SWA / MLA / hybrid models (calibration then corrects the rest).
+- **Hop cost.** `t_hop` = 2 ms per RPC server is a guess from one machine; with RDMA or on a fast LAN it is far
+  smaller and should be measured (or calibrated from the measured decode speed) before it ranks placements.
