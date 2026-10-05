@@ -18,6 +18,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   chủ hơn mức cần. Kiến trúc chưa biết giữ quy tắc cũ.
 - Tốc độ decode của model MoE chỉ tính các expert mà mỗi token thực sự đọc, nên placement của model MoE được
   chấm điểm theo tốc độ sát thực tế.
+- Hệ số hiệu chỉnh VRAM đã lưu được xoá một lần khi bộ ước lượng thay đổi (lần này), vì hệ số học theo ước
+  lượng cũ sẽ nhân ước lượng mới với sai số của cái cũ.
 
 - Khởi động nguội nhanh hơn: head tải model (và draft, song song với model) trong lúc các engine RPC khởi
   động, thay vì đợi chúng chạy xong mới tải.

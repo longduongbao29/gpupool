@@ -18,6 +18,8 @@ All notable changes to gpupool are documented here. The format follows
   them onto more GPUs or servers than needed. Unknown architectures keep the old rule.
 - Decode speed of MoE models counts only the routed experts a token reads, so placements of MoE models are
   scored on realistic speeds.
+- Stored VRAM calibration factors reset once when the estimator changes (now: this release), since a factor
+  learned against the old estimate would scale the new one by the old error.
 
 - Faster cold starts: the head downloads its model (and the draft, in parallel with it) while the RPC
   engines start, instead of after they are running.
