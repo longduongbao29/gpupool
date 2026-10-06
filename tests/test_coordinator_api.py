@@ -68,7 +68,7 @@ async def test_auth_required_on_every_route(env):
                          ("PUT", "/api/servers/a/gpus/CUDA0"), ("PUT", "/api/models/m"),
                          ("POST", "/api/models/m/start"), ("POST", "/api/models/m/stop"),
                          ("DELETE", "/api/models/m"), ("POST", "/api/models/m/plan"),
-                         ("GET", "/api/events"), ("POST", "/api/events/read"),
+                         ("GET", "/api/events"), ("POST", "/api/events/read"), ("DELETE", "/api/events"),
                          ("GET", "/api/capacity"), ("POST", "/api/recommend"),
                          ("POST", "/api/simulate"), ("POST", "/api/rebalance")]:
         r = await c.request(method, path, headers={"Authorization": "Bearer wrong"})
@@ -367,6 +367,16 @@ async def test_events_endpoints_and_unread(env):
     assert r.json() == {"unread": 1}
     assert (await c.get("/api/state")).json()["unread_events"] == 1
     assert (await c.post("/api/events/read", json={})).status_code == 422
+
+
+async def test_events_can_be_cleared_up_to_the_listed_ones(env):
+    c, store, rec, *_ = env
+    ids = [rec.notifier.emit("warning", "k", f"e{i}").id for i in range(3)]
+    r = (await c.delete(f"/api/events?up_to_id={ids[1]}")).json()
+    assert r == {"deleted": 2, "unread": 1}  # one that arrived after the list the user saw stays
+    assert [e["message"] for e in (await c.get("/api/events")).json()["events"]] == ["e2"]
+    assert (await c.delete("/api/events")).json()["deleted"] == 1
+    assert (await c.get("/api/state")).json()["events"] == []
 
 
 # ---------------------------------------------------------------- policy fields, capacity, recommend

@@ -351,3 +351,34 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   play an enter animation that keeps its final opacity, which would override an inline style on the row.
 - **Selects with generated options** (model, library file, draft) mark the bound option `:selected`, so the
   box shows the value it holds even when the options render after the value is set.
+
+## 14. Dialogs, events and the GPU picker (0.6.1)
+
+- **Confirm dialog**: every confirmation (delete a deployment or a library file, delete or cancel a conversion,
+  accept a conversion that failed a check, rebalance, clear events) is an in-app dialog, not the browser's
+  `confirm()`: a title, the details, and a button named after the action (*Stop and delete*, *Remove*...), red
+  when it deletes. Esc or a click outside cancels, Enter confirms (the action button has the focus).
+- **Clearing events**: *Clear all* on the Events page and *Clear* in the notifications menu delete the events up
+  to the newest one listed (`DELETE /api/events?up_to_id=`), after a confirmation.
+- **GPU picker** (model form, *Only selected ones*): a GPU switched off in the pool cannot be ticked (it says
+  "off in the pool (Servers tab)"); one ticked earlier can still be unticked. The sticky server header stays above
+  dimmed rows while the list scrolls.
+- **Model form footer**: *Save* and *Save & Start* stay on the right, also when the row wraps.
+- **Playground**: a model that no longer exists (deleted, or remembered from an earlier visit) is never shown: the
+  selection moves to the first model that can chat, or is cleared with a hint to start one.
+
+## 15. Visual language: icons and motion
+
+- **Icons** are drawn for gpupool, duotone: a body (`.b`, a soft fill of the text colour), a shaded face (`.b2`),
+  solid details (`.f`), lines outside the body (`.o`) and plain detail lines. Inside a `.vivid` container (the
+  navigation, stat cards, Playground) the body is a gradient (`<defs>` at the top of `index.html`: blue, green,
+  purple, amber, red, cyan) with white details and a soft glow; navigation items each have a tone. The logo is an
+  isometric cube with a lit top face.
+- **Page changes** use the View Transitions API: the old page blurs, shrinks slightly and fades out while the new
+  view's blocks rise in one after another (70 ms apart); browsers without the API get only the rise. The sidebar
+  and header stay still; the navigation highlight glides to the new item with a slight spring.
+- **Dialogs and menus** pop in with a spring and a short blur; toasts slide in; switches spring; stat cards and
+  model cards lift under the pointer; primary buttons are a blue-violet gradient.
+- **Sign-in**: a slow aurora behind a glass card.
+- Entrances fill `backwards`, so hover transforms work once they end. With "reduce motion" set in the OS, all of
+  this is off (no view transition, no floating logo or aurora).

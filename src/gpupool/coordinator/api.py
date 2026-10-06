@@ -433,6 +433,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         check_attention(spec)
         await check_draft(spec)
         store.put_model(spec)
+        reconciler.retry_now(name)  # new settings deserve a fresh attempt
         reconciler.wake()
         return spec.model_dump(mode="json")
 
@@ -442,6 +443,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         spec = spec.model_copy(update={"replicas": (body or StartBody()).replicas})
         store.put_model(spec)
         emit("info", "model_started", f"Model {name} started ({spec.replicas} replica(s) requested)", model=name)
+        reconciler.retry_now(name)  # Start after a failure is a retry: no backoff wait
         reconciler.wake()  # not tick(): that waits on the tick lock and agent HTTP calls
         return spec.model_dump(mode="json")
 
@@ -692,5 +694,11 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     async def mark_read(body: ReadBody) -> dict:
         store.mark_read(body.up_to_id)
         return {"unread": store.unread_count()}
+
+    @router.delete("/events")
+    async def clear_events(up_to_id: int | None = None) -> dict:
+        """Delete the events (all, or up to `up_to_id`, so ones that arrived after the list the
+        user looked at survive)."""
+        return {"deleted": store.clear_events(up_to_id), "unread": store.unread_count()}
 
     return router

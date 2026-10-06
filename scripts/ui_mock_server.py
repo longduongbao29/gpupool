@@ -860,6 +860,14 @@ def list_events(limit: int = 200, after_id: int = 0) -> list[dict]:
     return [e for e in EVENTS if e["id"] > after_id][:limit]
 
 
+@app.delete("/api/events", dependencies=[api])
+def clear_events(up_to_id: int | None = None) -> dict:
+    keep = [e for e in EVENTS if up_to_id is not None and e["id"] > up_to_id]
+    deleted = len(EVENTS) - len(keep)
+    EVENTS[:] = keep
+    return {"deleted": deleted, "unread": sum(1 for e in EVENTS if not e["read"])}
+
+
 @app.post("/api/events/read", dependencies=[api])
 def read_events(body: dict) -> dict:
     up = int(body.get("up_to_id", 0))

@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -200,6 +201,10 @@ class _Engine:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+LOG_KEEP = 200  # engine logs kept besides those of engines still known: enough to debug recent launches
+LOG_MAX_AGE_S = 7 * 86400
+
+
 class ProcessManager:
     def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str, rpc_firewall: bool = False,
                  firewall: RpcFirewall | None = None, llama_cache: Path | None = None):
@@ -227,6 +232,34 @@ class ProcessManager:
                         "--cap-add NET_ADMIN) or firewall those ports to cluster hosts only.",
                         bind_host or "0.0.0.0")
         self.reap_orphans()
+
+    def prune_logs(self, keep: int = LOG_KEEP, max_age_s: float = LOG_MAX_AGE_S,
+                   now: float | None = None) -> int:
+        """Delete engine logs (`<engine_id>.log`) of engines this agent no longer has: past the
+        `keep` newest, or older than `max_age_s`. Every launch writes new ones (replica ids are
+        unique), so without this a model that keeps failing to start filled the log directory.
+        Returns how many were deleted."""
+        now = time.time() if now is None else now
+        with self._lock:
+            known = set(self._engines)
+        files = []
+        for path in self.log_dir.glob("*.log"):
+            if path.stem in known:
+                continue
+            try:
+                files.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        files.sort(reverse=True)  # newest first
+        deleted = 0
+        for i, (mtime, path) in enumerate(files):
+            if i >= keep or now - mtime > max_age_s:
+                try:
+                    path.unlink()
+                    deleted += 1
+                except OSError:
+                    pass
+        return deleted
 
     # A hard-killed agent (OOM killer, kill -9, server reboot of the agent only) leaves its
     # llama.cpp children running: they keep holding VRAM on a shared GPU and no coordinator

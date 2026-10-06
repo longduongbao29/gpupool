@@ -225,17 +225,23 @@ def _favor_fast(meta: ModelMeta, ctx: int, ct: str, order: list[_Dev], counts: l
     return counts
 
 
-def _order(devs: list[_Dev], head_id: str) -> list[_Dev]:
+def _order(devs: list[_Dev], head_id: str, big_last: bool = False) -> list[_Dev]:
     """Other nodes first (by usable desc), then the head's cpu, then the head's cuda devices.
 
     The last device holds the output layer, and llama-server reads n_vocab x 4 bytes of logits
     from it for every token (llama-context.cpp, ggml_backend_tensor_get_async on t_logits): 0.5 MB
     for a 128k vocabulary. With a remote device last that crossed the network on every token; with
     the head's own GPU last only the hidden state (n_embd x 4 bytes) does. The input embeddings are
-    computed on the head's CPU either way, so the first device costs n_embd x 4 bytes too."""
+    computed on the head's CPU either way, so the first device costs n_embd x 4 bytes too.
+
+    big_last: the head's largest GPU goes last instead of its smallest. The last device also holds
+    the output tensors (2.5 GB for a 248k vocabulary at 5120 wide, BF16), which a small GPU may
+    not take; _solve tries this only when the default order has no feasible split, so placements
+    that already fit are unchanged. The draft's pinned GPU stays the head's first local GPU."""
     by_usable = lambda d: (not d.pin, -d.dev.usable_mb)  # noqa: E731
     head = [d for d in devs if d.node.node_id == head_id]
-    head_cuda = sorted((d for d in head if d.dev.kind == "cuda"), key=by_usable)
+    head_cuda = sorted((d for d in head if d.dev.kind == "cuda"),
+                       key=(lambda d: (not d.pin, d.dev.usable_mb)) if big_last else by_usable)
     head_cpu = sorted((d for d in head if d.dev.kind != "cuda"), key=by_usable)
     totals: dict[str, int] = {}
     for d in devs:
@@ -278,12 +284,39 @@ def _solve(meta, ctx, ct, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str]
         head = max((k for k in per if per[k] == top), key=lambda k: (totals[k], k))
     # no self-consistent head; keep a feasible plan, head = most layers actually held
     if first is None:
-        return None
+        return _solve_any_tail(meta, ctx, ct, devs)
     order, counts, _ = first
     per = {}
     for d, c in zip(order, counts):
         per[d.node.node_id] = per.get(d.node.node_id, 0) + c
     return order, counts, max(per, key=lambda k: (per[k], k))
+
+
+def _solve_any_tail(meta, ctx, ct, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str] | None:
+    """Fallbacks when the default order has no feasible split, usually because its last device
+    (which also holds the output tensors) is a small GPU. First each node as the head with its
+    largest GPU last (the logits stay local); then each node as the tail with its largest device
+    last, whatever the head (the logits cross the network, which est_decode_tps counts). The model
+    runs instead of failing with a NoFit while the pool has room."""
+    by_node: dict[str, list[_Dev]] = {}
+    for d in devs:
+        by_node.setdefault(d.node.node_id, []).append(d)
+    big_first = sorted(by_node, key=lambda k: (-max(d.dev.usable_mb for d in by_node[k]), k))
+    orders = [_order(devs, h, big_last=True) for h in big_first]
+    for tail in big_first:
+        rest = [d for d in devs if d.node.node_id != tail]
+        # the tail node's devices adjacent (one RPC server), CPU first, its largest GPU last
+        orders.append((_order(rest, "") if rest else [])
+                      + sorted(by_node[tail], key=lambda d: (d.dev.kind == "cuda", d.dev.usable_mb)))
+    for order in orders:
+        counts = _split(meta, ctx, ct, order)
+        if counts is None:
+            continue
+        per: dict[str, int] = {}
+        for d, c in zip(order, counts):
+            per[d.node.node_id] = per.get(d.node.node_id, 0) + c
+        return order, counts, max(per, key=lambda k: (per[k], k))
+    return None
 
 
 # Score weights (design section 4.3); higher score wins.
@@ -575,10 +608,13 @@ def _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, d
             need += draft_mb
             draft = (f" (incl. {draft_mb} MB for the draft model, which must fit on one local "
                      "CUDA device of the head node)")
+        devices = ", ".join(f"{n.node_id}/{d.device_id} {d.usable_mb}" for n, d in sorted(
+            ((n, d) for n in nodes if n.node_id not in exclude_nodes for d in n.devices if d.usable_mb > 0),
+            key=lambda nd: -nd[1].usable_mb))
         raise NoFit(
             f"model {spec.name!r} needs about {need} MB at ctx {ctx}{draft}, "
             f"pool has {sum(d.usable_mb for d in pool)} MB usable "
-            f"across {len(pool)} devices (no feasible layer split)"
+            f"across {len(pool)} devices (no feasible layer split; usable MB: {devices or 'none'})"
         )
     return _finish(meta, spec, ranked[0], replica_id, port_alloc, draft_mb)
 

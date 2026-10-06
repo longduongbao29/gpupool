@@ -221,6 +221,15 @@ class Store:
     def mark_read(self, up_to_id: int) -> None:
         self._write("UPDATE events SET read=1 WHERE id<=?", (up_to_id,), bump=False)
 
+    def clear_events(self, up_to_id: int | None = None) -> int:
+        """Delete events (all, or those up to `up_to_id`); returns how many were deleted."""
+        with self._lock, self._conn:
+            if up_to_id is None:
+                cur = self._conn.execute("DELETE FROM events")
+            else:
+                cur = self._conn.execute("DELETE FROM events WHERE id <= ?", (up_to_id,))
+        return cur.rowcount
+
     # models
     def put_model(self, spec: ModelSpec) -> None:
         self._write(

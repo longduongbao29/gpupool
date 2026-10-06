@@ -515,12 +515,17 @@ missing, and then the factor stays as it was.
 | --- | --- | --- |
 | GET | `/api/events?limit=200&after_id=` | list events, newest first |
 | POST | `/api/events/read` | mark events read |
+| DELETE | `/api/events?up_to_id=` | delete events |
 
 **`GET /api/events`**: `limit` is clamped to 1..1000 (default 200); `after_id` returns only events with a
 larger id. Returns `{"events": [...], "unread": n}`. An event is
 `{"id", "ts", "level": "info"|"warning"|"error", "kind", "message", "node_id", "model", "read"}`.
 
 **`POST /api/events/read`** body `{"up_to_id": 123}` marks events up to that id read. Returns `{"unread": n}`.
+
+**`DELETE /api/events`** deletes every event, or with `?up_to_id=123` those up to that id (the UI passes the newest one it
+listed, so an event that arrives meanwhile is kept). Returns `{"deleted": n, "unread": n}`. The store also keeps only
+the newest 1000 events.
 
 Event kinds in the code: `server_added`, `server_removed`, `node_online`, `node_offline`, `model_started`,
 `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
@@ -675,6 +680,7 @@ All 51 routes, for a completeness check:
 | 49 | POST | `/api/convert/{job_id}/retry` | 12 |
 | 50 | POST | `/api/convert/{job_id}/accept` | 12 |
 | 51 | DELETE | `/api/convert/{job_id}` | 12 |
+| 52 | DELETE | `/api/events` | 8 |
 
 The count matches the route decorators found in the code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
 

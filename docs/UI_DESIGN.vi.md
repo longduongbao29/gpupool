@@ -349,3 +349,33 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   hiện giữ opacity cuối, hiệu ứng này đè lên style inline đặt trên dòng.
 - **Ô chọn có option sinh động** (model, file trong thư viện, draft) đánh dấu option đang gắn là `:selected`, nên ô
   luôn hiện đúng giá trị nó giữ kể cả khi option render sau khi giá trị được gán.
+
+## 14. Hộp thoại, sự kiện và bộ chọn GPU (0.6.1)
+
+- **Hộp xác nhận**: mọi xác nhận (xóa deployment hoặc file thư viện, xóa hoặc hủy conversion, chấp nhận conversion
+  không qua kiểm tra, rebalance, xóa sự kiện) là hộp thoại của UI, không phải `confirm()` của trình duyệt: tiêu đề,
+  chi tiết và nút mang tên hành động (*Stop and delete*, *Remove*...), màu đỏ khi là thao tác xóa. Esc hoặc bấm ra
+  ngoài để hủy, Enter để xác nhận (nút hành động được focus sẵn).
+- **Xóa sự kiện**: *Clear all* ở trang Events và *Clear* trong menu thông báo xóa các sự kiện tới sự kiện mới nhất
+  đang hiển thị (`DELETE /api/events?up_to_id=`), sau khi xác nhận.
+- **Bộ chọn GPU** (form model, *Only selected ones*): GPU đã tắt trong pool không tick được (ghi "off in the pool
+  (Servers tab)"); GPU đã tick từ trước vẫn bỏ tick được. Tên server dính ở đầu luôn nằm trên các dòng bị làm mờ
+  khi cuộn.
+- **Chân form model**: *Save* và *Save & Start* luôn ở bên phải, kể cả khi hàng nút xuống dòng.
+- **Playground**: model không còn tồn tại (đã xóa, hoặc được nhớ từ lần trước) không bao giờ được hiện: lựa chọn
+  chuyển sang model đầu tiên chat được, hoặc để trống kèm gợi ý hãy start một model.
+
+## 15. Ngôn ngữ hình ảnh: icon và chuyển động
+
+- **Icon** được vẽ riêng cho gpupool, kiểu duotone: phần thân (`.b`, tô nhẹ bằng màu chữ), mặt tối (`.b2`), chi tiết
+  đặc (`.f`), nét nằm ngoài thân (`.o`) và nét chi tiết. Trong vùng `.vivid` (thanh điều hướng, ô thống kê,
+  Playground), phần thân là gradient (`<defs>` ở đầu `index.html`: blue, green, purple, amber, red, cyan) với chi tiết
+  trắng và quầng sáng nhẹ; mỗi mục điều hướng có tông màu riêng. Logo là khối lập phương isometric có mặt trên sáng.
+- **Chuyển trang** dùng View Transitions API: trang cũ nhòe, thu nhỏ nhẹ và mờ dần, trong khi các khối của trang mới
+  lần lượt nổi lên (cách nhau 70 ms); trình duyệt không có API này chỉ có hiệu ứng nổi lên. Thanh bên và phần đầu trang
+  đứng yên; vệt sáng điều hướng trượt tới mục mới với độ nảy nhẹ.
+- **Hộp thoại và menu** bật ra có độ nảy và nhòe ngắn; toast trượt vào; công tắc nảy; ô thống kê và thẻ model nhấc lên
+  khi rê chuột; nút chính là gradient xanh–tím.
+- **Đăng nhập**: ánh sáng aurora trôi chậm phía sau một thẻ kính mờ.
+- Hiệu ứng xuất hiện dùng `backwards`, nên hiệu ứng rê chuột vẫn hoạt động sau đó. Khi hệ điều hành bật "giảm chuyển
+  động", mọi hiệu ứng này tắt (không view transition, logo không trôi, không aurora).

@@ -172,16 +172,19 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
                         log.warning("heartbeat to %s failed: %r", url, e)
                 await asyncio.sleep(cfg.heartbeat_s)
 
-    async def rpc_cache_loop() -> None:
+    async def housekeeping_loop() -> None:
+        """Trim the RPC weight cache to rpc_cache_gb and old engine logs, every RPC_CACHE_PRUNE_S."""
         cache = rpc_cache_dir(Path(cfg.cache_dir) / "llama.cpp")
         cap = int(cfg.rpc_cache_gb * 1e9)
         while True:
             try:
-                await asyncio.to_thread(prune_rpc_cache, cache, cap)
+                if cfg.rpc_cache_gb > 0:
+                    await asyncio.to_thread(prune_rpc_cache, cache, cap)
+                await asyncio.to_thread(pm.prune_logs)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("rpc cache pruning failed")
+                log.exception("housekeeping (rpc cache, engine logs) failed")
             await asyncio.sleep(RPC_CACHE_PRUNE_S)
 
     @contextlib.asynccontextmanager
@@ -191,7 +194,7 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         # One source for the build: the features reported and the flags engines get must agree.
         pm.llama_build = build_number(version())
         pm._build_probed = True
-        prune_task = asyncio.create_task(rpc_cache_loop()) if cfg.rpc_cache_gb > 0 else None
+        prune_task = asyncio.create_task(housekeeping_loop())
         task = asyncio.create_task(heartbeat_loop()) if start_heartbeat else None
         join_task = asyncio.create_task(join_coordinator(cfg)) if start_join else None
         try:

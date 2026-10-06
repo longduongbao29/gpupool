@@ -188,7 +188,7 @@ def test_html_never_renders_server_data_as_html():
     # x-html is only for the static icon() helper; data fields must use x-text.
     html = (UI / "index.html").read_text(encoding="utf-8")
     for expr in re.findall(r'x-html="([^"]*)"', html):
-        assert expr.startswith("icon("), expr
+        assert expr.startswith("icon(") or expr == "logo()", expr  # both return fixed SVG markup
 
 
 def test_mock_events_contract(client, mock):
@@ -916,7 +916,7 @@ def test_ui_has_allowed_servers_selection():
     html = (UI / "index.html").read_text(encoding="utf-8")
     js = (UI / "app.js").read_text(encoding="utf-8")
     for needle in ("All servers and GPUs", "Only selected ones", "pinToggleServer(s", "pinToggleGpu(s, d", "pinNodeState(s)", "pinSummary()",
-                   "Nothing selected", "disabled in the pool", "server offline", "GPUs added later", "stay enabled for other models"):
+                   "Nothing selected", "off in the pool (Servers tab)", "server offline", "GPUs added later", "stay enabled for other models"):
         assert needle in html, needle
     for needle in ('"/*"', "pinWhole", "pinSummary", '"Limited to "', "Select at least one server or GPU"):
         assert needle in js, needle
@@ -1032,7 +1032,7 @@ def test_ui_has_playground():
         assert needle in js, needle
     # model output is untrusted: rendered as text only
     pg = html[html.index("<!-- ============ playground"):html.index("<!-- ============", html.index("<!-- ============ playground") + 10)]
-    assert re.findall(r'x-html="(?!icon\()', pg) == []
+    assert re.findall(r'x-html="(?!icon\()(?!logo\(\))', pg) == []
 
 
 def test_ui_large_panels_collapse_and_start_open():
@@ -1046,3 +1046,51 @@ def test_ui_large_panels_collapse_and_start_open():
     # open unless the viewer folded it: the saved map only lists folded panels
     assert "function foldSaved()" in js and "if (f[id]) delete f[id]; else f[id] = true;" in js
     assert re.search(r"\.panel\.folded > :not\(\.panel-head\) \{ display: none", css)
+
+
+def test_ui_fixes_after_060():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    # a GPU switched off in the pool cannot be picked for a model (unless already picked: it can be removed)
+    assert ':disabled="!enabled(s, d) && !pinHas(s, d)"' in html
+    # the picker's sticky server header stays above dimmed rows (their opacity makes a stacking context)
+    assert re.search(r"\.gpu-pick \.grp \{[^}]*position: sticky[^}]*z-index: 1", css)
+    # Save / Save & Start stay on the right, also on a wrapped second line
+    assert ".modal-foot.split .foot-group:last-child { margin-left: auto; }" in css
+    # events can be cleared, up to the newest one listed
+    assert '"/api/events?up_to_id="' in js and "clearEvents()" in html
+    # the Playground never keeps a deleted model selected
+    assert "pgPick: function" in js and 'x-effect="if (view === \'playground\') pgPick()"' in html
+
+
+def test_mock_events_can_be_cleared(client):
+    r = client.delete("/api/events", headers=HEAD)
+    left = client.get("/api/events", headers=HEAD).json()
+    assert r.status_code == 200 and (left if isinstance(left, list) else left["events"]) == []
+
+
+def test_ui_never_uses_browser_dialogs():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    # the browser's confirm()/alert() look foreign and block the page: the in-app dialog is used
+    assert not re.search(r"(?<![\w.])(confirm|alert|prompt)\(", js.replace("confirmBox(", ""))
+    assert 'role="alertdialog"' in html and "askDone(true)" in html and "askDone(false)" in html
+
+
+def test_ui_visual_language():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    # shared gradients exist for every vivid tone and the logo
+    for gid in ("ig-blue", "ig-green", "ig-purple", "ig-amber", "ig-red", "ig-cyan", "lg-top", "lg-left", "lg-right"):
+        assert f'id="{gid}"' in html, gid
+    # every icon the markup uses is drawn
+    names = set(re.findall(r"icon\('([a-z]+)'\)", html)) | set(re.findall(r'icon\("([a-z]+)"\)', js))
+    for n in names:
+        assert re.search(rf"^  {n}: '", js, re.M), n
+    # page changes go through the View Transitions API when there is one, never with reduced motion
+    assert "document.startViewTransition" in js and "prefers-reduced-motion: reduce" in js
+    assert "::view-transition-old(root)" in css and ".nav-pill" in css
+    # entrances fill "backwards" so hover transforms work once they end
+    assert re.search(r"\.view > \*, \.pg > \.panel \{ animation: rise [^}]*backwards", css)

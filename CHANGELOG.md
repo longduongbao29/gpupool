@@ -8,6 +8,39 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- UI: a new look. Icons drawn for gpupool (duotone; gradient and glow in the navigation, stat cards and
+  Playground) and an isometric logo; page changes crossfade with blur while the new view's blocks rise one after
+  another (View Transitions API), a navigation highlight that glides between items, spring pops for dialogs and
+  menus, cards that lift under the pointer, a gradient primary button and an aurora sign-in page. All of it is off
+  with "reduce motion".
+- UI: events can be deleted (*Clear all* on the Events page, *Clear* in the notifications menu); API
+  `DELETE /api/events?up_to_id=`.
+- UI: an in-app confirm dialog replaces the browser's `confirm()` everywhere (named action button, red when it deletes,
+  Esc / Enter).
+
+### Changed
+
+- A `NoFit` message lists each device's usable MB.
+- Model form: *Save* and *Save & Start* sit on the right.
+
+### Fixed
+
+- Placement: a big model could fail with "no feasible layer split" although the pool had room (for example a 27B BF16
+  model, 52 GB, on 66 GB over 5 GPUs). With a small GPU on the head, that GPU came last and also had to hold the output
+  tensors (2.5 GB for a 248k vocabulary). When the default order has no feasible split, the planner now tries the head's
+  largest GPU last, then any node as the tail; placements that already fit are unchanged.
+- A model that does not fit was planned again on every 2 s tick, and its "cannot place" event repeated each time (the
+  message carries the free memory, which always changes), flooding the events. It is now planned again when the capacity
+  changes or after 60 s, and the event repeats at most every 10 minutes. Other planning errors (an unreadable GGUF
+  header) back off instead of fetching the header every tick. Start or Save retries at once.
+- Agents never deleted engine logs: each launch writes new ones, so a model that kept failing filled the log directory.
+  They now keep the 200 newest logs of stopped engines and delete those older than 7 days.
+- UI: a GPU switched off in the pool could still be picked for a model; the picker's server header was drawn under
+  dimmed rows while scrolling.
+- Playground: a deleted model's name stayed selected.
+
 ## [0.6.0] - 2026-10-05
 
 ### Added

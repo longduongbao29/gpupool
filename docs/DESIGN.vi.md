@@ -214,7 +214,11 @@ mô phỏng và rebalancing.
    head, rồi các device CUDA của head **ở cuối**. Device cuối giữ layer đầu ra, và llama-server đọc `n_vocab x 4`
    byte logits từ nó ở mỗi token (0,5 MB với từ vựng 128k); khi GPU của chính head đứng cuối, chỉ hidden state
    (`n_embd x 4` byte) đi qua mạng. Embedding đầu vào luôn được tính trên CPU của head. Device không local được
-   đặt tên `RPC0`, `RPC1`... theo thứ tự này.
+   đặt tên `RPC0`, `RPC1`... theo thứ tự này. **Khi thứ tự đó không có cách chia khả thi** (thường là GPU nhỏ nhất
+   của head, đứng cuối, không giữ thêm được tensor đầu ra: 2,5 GB với từ vựng 248k), planner thử từng node làm head
+   với GPU lớn nhất của nó ở cuối, rồi từng node làm đuôi với device lớn nhất ở cuối (khi đó logits đi qua mạng, ước
+   tính tốc độ có tính phần này). Placement vốn đã vừa giữ thứ tự mặc định. Thông báo `NoFit` liệt kê MB usable
+   của từng device.
 
 Pin (`pin_devices`), GPU bị tắt trong pool và VRAM đang được các replica đang launch giữ chỗ đều do
 reconciler áp dụng trước khi plan, bằng cách đặt `usable_mb` về 0 hoặc giảm nó, nên bản thân planner không
@@ -452,6 +456,13 @@ theo thứ tự:
 - **Backoff**: launch thất bại thì lùi 5 s, 10 s, 20 s... tối đa 300 s cho mỗi model. Replica sập trong vòng
   300 s sau khi ready (`model_fault`) cũng đưa vào backoff này và, từ lần thứ hai, phát `crash_loop`. Replica
   giữ ready được 300 s thì xóa backoff. Node chết hoặc mất GPU không phải lỗi của model nên không được tính.
+- **Không đặt được chỗ**: model không vừa (`NoFit`) được lập kế hoạch lại khi dung lượng thay đổi (bộ nhớ usable của
+  từng device theo bước 512 MB, hoặc tập replica đang sống: bật một GPU, dừng một replica, server quay lại) hoặc
+  sau 60 s, không phải mỗi tick; sự kiện `realloc_failed` của nó lặp lại tối đa 10 phút một lần (thông báo chứa
+  bộ nhớ trống, vốn đổi liên tục). Lỗi lập kế hoạch khác (ví dụ không đọc được header GGUF) dùng backoff của
+  launch. Start hoặc lưu model xóa cả hai, nên thử lại từ UI chạy ngay.
+- **Log engine**: mỗi lần launch ghi file `<engine_id>.log` mới trên agent; cứ 10 phút agent giữ 200 log mới nhất
+  của các engine không còn chạy, xóa các log cũ hơn và mọi log quá 7 ngày.
 
 ### 10.2 Số lượng mong muốn, launch và drain
 
