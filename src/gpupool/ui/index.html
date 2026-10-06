@@ -467,11 +467,12 @@
               <div class="row wrap" style="gap:6px;margin-top:8px" x-show="specChips(m).length">
                 <template x-for="c in specChips(m)" :key="c"><span class="chip" x-text="c"></span></template></div>
               <div class="endpoint ep">
+                <div class="ep-head"><span class="muted small">OpenAI-compatible API</span>
+                  <button class="btn sm ghost" @click="copy(curlSnippet(m.spec.name))" title="Copy a ready curl command for this model" aria-label="Copy curl command for this model"><span x-html="icon('copy')"></span> Copy curl</button></div>
                 <div class="ep-line"><span class="muted small">endpoint</span><code class="grow ellipsis" x-text="endpoint()"></code>
                   <button class="btn sm ghost icon" @click="copy(endpoint())" title="Copy endpoint" aria-label="Copy endpoint" x-html="icon('copy')"></button></div>
                 <div class="ep-line"><span class="muted small">model</span><code class="grow ellipsis" x-text="m.spec.name"></code>
-                  <button class="btn sm ghost icon" @click="copy(m.spec.name)" title="Copy model name" aria-label="Copy model name" x-html="icon('copy')"></button>
-                  <button class="btn sm ghost" @click="copy(curlSnippet(m.spec.name))" title="Copy a ready curl command for this model" aria-label="Copy curl command for this model">Copy curl</button></div></div>
+                  <button class="btn sm ghost icon" @click="copy(m.spec.name)" title="Copy model name" aria-label="Copy model name" x-html="icon('copy')"></button></div></div>
 
               <div class="metrics">
                 <div class="metric" :title="scalingOf(m) ? 'Replicas desired ' + scalingOf(m).desired : ''"><div class="l">Replicas</div>
@@ -993,9 +994,10 @@
 </div>
 
 <div class="overlay" x-show="authed && form.open" x-cloak @click.self="form.open = false" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
-  <div class="modal wide" x-show="form.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+  <div class="modal wide form-split" x-show="form.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
     <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn ghost icon sm right" aria-label="Close" @click="form.open = false" x-html="icon('x')"></button></div>
-    <div class="modal-body">
+    <div class="form-cols">
+    <div class="modal-body form-main">
       <label class="field"><span>File (from the library)</span>
         <select x-model="form.file" @change="form.plan = null; form.rec = null; form.sim = null; if (form.draftFile === form.file) form.draftFile = ''">
           <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" selected x-text="form.file"></option></template>
@@ -1110,101 +1112,125 @@
         <div class="muted small" style="margin-top:6px" x-show="form.pins.length" x-text="pinSummary()"></div>
         <div class="notice warn" x-show="!form.pins.length" role="status"><b>Nothing selected.</b> Pick at least one server or GPU, or switch back to all servers and GPUs.</div>
       </div>
-      <template x-if="form.plan && form.plan.ok"><div class="result ok">
-        <b>Fits.</b> Tier <span x-text="form.plan.data.tier.replace('_',' ')"></span>, head <span x-text="form.plan.data.head_node"></span>, about
-        <span x-text="gb(form.plan.data.est_total_mb)"></span> GB.
-        <template x-for="a in form.plan.data.assignments" :key="a.node_id + a.device_id">
-          <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
-        </template>
-      </div></template>
-      <div class="result bad" x-show="form.plan && !form.plan.ok"><b>Does not fit.</b> <span x-text="form.plan && form.plan.msg"></span></div>
-
-      <!-- impact preview -->
-      <template x-if="form.sim">
-        <div class="rec">
-          <div class="result ok" x-show="simEmpty(form.sim)"><b>No change.</b> <span class="muted small">Applying these settings would not start, stop or preempt anything.</span></div>
-          <div class="result ok" x-show="(form.sim.start || []).length"><b>Will start</b>
-            <template x-for="(s, i) in (form.sim.start || [])" :key="'st' + i">
-              <div class="small"><span x-text="s.model"></span> on <span x-text="simDevices(s)"></span> &middot; <span x-text="String(s.tier).replace('_', ' ')"></span> &middot; <span x-text="tps(s.est_decode_tps)"></span></div>
-            </template></div>
-          <div class="result neutral" x-show="(form.sim.stop || []).length"><b>Will stop</b>
-            <template x-for="s in (form.sim.stop || [])" :key="'sp' + s.replica_id">
-              <div class="small"><span x-text="s.replica_id"></span> (model <span x-text="s.model"></span>)<span x-show="s.reason"> &mdash; <span x-text="s.reason"></span></span></div>
-            </template></div>
-          <div class="result warn" x-show="(form.sim.preempt || []).length"><b>Will be preempted</b>
-            <template x-for="p in (form.sim.preempt || [])" :key="'pr' + p.replica_id">
-              <div class="small"><span x-text="p.replica_id"></span> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>) to make room for <b x-text="p.for_model"></b></div>
-            </template></div>
-          <div class="result bad" x-show="(form.sim.unplaced || []).length"><b>Cannot be placed</b>
-            <template x-for="(u, i) in (form.sim.unplaced || [])" :key="'un' + i">
-              <div class="small"><span x-text="u.model"></span><span x-show="u.missing != null"> (<span x-text="u.missing"></span> missing)</span> &mdash; <span x-text="u.why"></span></div>
-            </template></div>
-        </div>
-      </template>
-
-      <!-- recommendation -->
-      <template x-if="form.rec">
-        <div class="rec">
-          <div class="muted small" x-show="form.rec.max_ctx_single_gpu != null">Largest context that fits on a single GPU: <b x-text="form.rec.max_ctx_single_gpu"></b></div>
-          <template x-if="form.rec.not_possible">
-            <div class="result bad"><b>No placement possible.</b> Needs <span x-text="gb(form.rec.not_possible.need_mb)"></span> GB;
-              largest single GPU <span x-text="gb(form.rec.not_possible.largest_single_gpu_mb)"></span> GB,
-              largest single server <span x-text="gb(form.rec.not_possible.largest_single_node_mb)"></span> GB.
-              <template x-if="form.rec.not_possible.max_ctx_that_fits">
-                <div style="margin-top:6px">It fits with context &le; <b x-text="form.rec.not_possible.max_ctx_that_fits"></b>.
-                  <button class="btn sm" @click="useCtx(form.rec.not_possible.max_ctx_that_fits)" :disabled="form.recBusy">Use ctx <span x-text="form.rec.not_possible.max_ctx_that_fits"></span></button></div>
-              </template></div>
-          </template>
-          <template x-if="(form.rec.tips || []).length">
-            <div class="tips">
-              <div class="row"><b>Suggested settings</b><span class="muted small">checked against your GPUs; Apply copies them into the form</span></div>
-              <template x-for="t in form.rec.tips" :key="t.id">
-                <div class="tip">
-                  <span class="pill lead" :class="tipClass(t)" x-text="tipKind(t)"></span>
-                  <div class="grow">
-                    <div><b x-text="t.title"></b></div>
-                    <div class="muted small" x-text="t.detail"></div>
-                    <div class="muted small" x-show="t.tier" x-text="'With it: ' + String(t.tier || '').replace('_', ' ') + (t.est_total_mb ? ' · ' + gb(t.est_total_mb) + ' GB' : '') + (t.est_decode_tps ? ' · ~' + tps(t.est_decode_tps) : '')"></div>
+    </div>
+    <aside class="form-side" aria-label="Checks" x-effect="form.open && checkKey() && autoCheck()">
+      <div class="side-head"><b>Checks</b><span class="muted small">Open a section to see it; it follows your edits. Nothing here starts a model.</span></div>
+      <section class="side-sec" :class="{open: form.sec.rec}">
+        <button type="button" class="side-sec-head" @click="secToggle('rec')" :aria-expanded="String(form.sec.rec)">
+          <span class="fold" :class="{open: form.sec.rec}" aria-hidden="true" x-html="icon('chev')"></span>
+          <span class="grow"><b>Recommend placement &amp; settings</b><span class="muted small">Ranks GPUs, suggests faster settings</span></span><span class="spin" x-show="form.recBusy"></span>
+        </button>
+        <div class="side-sec-body" x-show="form.sec.rec">
+          <div class="result bad" x-show="form.recErr" x-text="form.recErr"></div>
+          <div class="muted small" x-show="form.recBusy && !form.rec">Checking&hellip;</div>
+          <template x-if="form.rec">
+            <div class="rec">
+              <div class="muted small" x-show="form.rec.max_ctx_single_gpu != null">Largest context that fits on a single GPU: <b x-text="form.rec.max_ctx_single_gpu"></b></div>
+              <template x-if="form.rec.not_possible">
+                <div class="result bad"><b>No placement possible.</b> Needs <span x-text="gb(form.rec.not_possible.need_mb)"></span> GB;
+                  largest single GPU <span x-text="gb(form.rec.not_possible.largest_single_gpu_mb)"></span> GB,
+                  largest single server <span x-text="gb(form.rec.not_possible.largest_single_node_mb)"></span> GB.
+                  <template x-if="form.rec.not_possible.max_ctx_that_fits">
+                    <div style="margin-top:6px">It fits with context &le; <b x-text="form.rec.not_possible.max_ctx_that_fits"></b>.
+                      <button class="btn sm" @click="useCtx(form.rec.not_possible.max_ctx_that_fits)" :disabled="form.recBusy">Use ctx <span x-text="form.rec.not_possible.max_ctx_that_fits"></span></button></div>
+                  </template></div>
+              </template>
+              <template x-if="(form.rec.tips || []).length">
+                <div class="tips">
+                  <div class="row"><b>Suggested settings</b><span class="muted small">checked against your GPUs; Apply copies them into the form</span></div>
+                  <template x-for="t in form.rec.tips" :key="t.id">
+                    <div class="tip">
+                      <span class="pill lead" :class="tipClass(t)" x-text="tipKind(t)"></span>
+                      <div class="grow">
+                        <div><b x-text="t.title"></b></div>
+                        <div class="muted small" x-text="t.detail"></div>
+                        <div class="muted small" x-show="t.tier" x-text="'With it: ' + String(t.tier || '').replace('_', ' ') + (t.est_total_mb ? ' · ' + gb(t.est_total_mb) + ' GB' : '') + (t.est_decode_tps ? ' · ~' + tps(t.est_decode_tps) : '')"></div>
+                      </div>
+                      <button class="btn sm" x-show="Object.keys(t.apply || {}).length" @click="applyTip(t)" :disabled="form.recBusy">Apply</button>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <div class="muted small" x-show="!form.rec.not_possible && !(form.rec.options || []).length">No options returned.</div>
+              <template x-for="o in (form.rec.options || [])" :key="o.rank">
+                <div class="opt">
+                  <div class="row wrap">
+                    <b>#<span x-text="o.rank"></span></b>
+                    <span class="pill lead" :class="o.fits_now ? 'green' : 'amber'" x-text="o.fits_now ? 'fits now' : 'needs room'"></span>
+                    <span class="pill" x-text="String(o.tier).replace('_', ' ')"></span>
+                    <span class="muted small">score <b x-text="o.score"></b> &middot; <span x-text="gb(o.est_total_mb) + ' GB'"></span> &middot; <span x-text="tps(o.est_decode_tps)"></span></span>
+                    <button class="btn sm right" @click="pinOption(o)" title="Pin the form to exactly these GPUs">Pin to these GPUs</button>
                   </div>
-                  <button class="btn sm" x-show="Object.keys(t.apply || {}).length" @click="applyTip(t)" :disabled="form.recBusy">Apply</button>
+                  <template x-for="a in (o.assignments || [])" :key="a.node_id + '/' + a.device_id">
+                    <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
+                  </template>
+                  <template x-for="p in (o.requires_preemption || [])" :key="p.replica_id">
+                    <div class="warn small"><span x-html="icon('alert')"></span> Needs room: would stop <b x-text="p.replica_id"></b> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>)</div>
+                  </template>
+                  <ul class="reasons" x-show="(o.reasons || []).length">
+                    <template x-for="(r, i) in (o.reasons || [])" :key="i"><li x-text="r"></li></template>
+                  </ul>
                 </div>
               </template>
             </div>
           </template>
-          <div class="muted small" x-show="!form.rec.not_possible && !(form.rec.options || []).length">No options returned.</div>
-          <template x-for="o in (form.rec.options || [])" :key="o.rank">
-            <div class="opt">
-              <div class="row wrap">
-                <b>#<span x-text="o.rank"></span></b>
-                <span class="pill lead" :class="o.fits_now ? 'green' : 'amber'" x-text="o.fits_now ? 'fits now' : 'needs room'"></span>
-                <span class="pill" x-text="String(o.tier).replace('_', ' ')"></span>
-                <span class="muted small">score <b x-text="o.score"></b> &middot; <span x-text="gb(o.est_total_mb) + ' GB'"></span> &middot; <span x-text="tps(o.est_decode_tps)"></span></span>
-                <button class="btn sm right" @click="pinOption(o)" title="Pin the form to exactly these GPUs">Pin to these GPUs</button>
-              </div>
-              <template x-for="a in (o.assignments || [])" :key="a.node_id + '/' + a.device_id">
-                <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
-              </template>
-              <template x-for="p in (o.requires_preemption || [])" :key="p.replica_id">
-                <div class="warn small"><span x-html="icon('alert')"></span> Needs room: would stop <b x-text="p.replica_id"></b> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>)</div>
-              </template>
-              <ul class="reasons" x-show="(o.reasons || []).length">
-                <template x-for="(r, i) in (o.reasons || [])" :key="i"><li x-text="r"></li></template>
-              </ul>
+        </div>
+      </section>
+      <section class="side-sec" :class="{open: form.sec.sim}">
+        <button type="button" class="side-sec-head" @click="secToggle('sim')" :aria-expanded="String(form.sec.sim)">
+          <span class="fold" :class="{open: form.sec.sim}" aria-hidden="true" x-html="icon('chev')"></span>
+          <span class="grow"><b>Preview impact</b><span class="muted small">What would start, stop or be preempted</span></span><span class="spin" x-show="form.simBusy"></span>
+        </button>
+        <div class="side-sec-body" x-show="form.sec.sim">
+          <div class="result bad" x-show="form.simErr" x-text="form.simErr"></div>
+          <div class="muted small" x-show="form.simBusy && !form.sim">Checking&hellip;</div>
+          <template x-if="form.sim">
+            <div class="rec">
+              <div class="result ok" x-show="simEmpty(form.sim)"><b>No change.</b> <span class="muted small">Applying these settings would not start, stop or preempt anything.</span></div>
+              <div class="result ok" x-show="(form.sim.start || []).length"><b>Will start</b>
+                <template x-for="(s, i) in (form.sim.start || [])" :key="'st' + i">
+                  <div class="small"><span x-text="s.model"></span> on <span x-text="simDevices(s)"></span> &middot; <span x-text="String(s.tier).replace('_', ' ')"></span> &middot; <span x-text="tps(s.est_decode_tps)"></span></div>
+                </template></div>
+              <div class="result neutral" x-show="(form.sim.stop || []).length"><b>Will stop</b>
+                <template x-for="s in (form.sim.stop || [])" :key="'sp' + s.replica_id">
+                  <div class="small"><span x-text="s.replica_id"></span> (model <span x-text="s.model"></span>)<span x-show="s.reason"> &mdash; <span x-text="s.reason"></span></span></div>
+                </template></div>
+              <div class="result warn" x-show="(form.sim.preempt || []).length"><b>Will be preempted</b>
+                <template x-for="p in (form.sim.preempt || [])" :key="'pr' + p.replica_id">
+                  <div class="small"><span x-text="p.replica_id"></span> (model <span x-text="p.model"></span>, priority <span x-text="p.priority"></span>) to make room for <b x-text="p.for_model"></b></div>
+                </template></div>
+              <div class="result bad" x-show="(form.sim.unplaced || []).length"><b>Cannot be placed</b>
+                <template x-for="(u, i) in (form.sim.unplaced || [])" :key="'un' + i">
+                  <div class="small"><span x-text="u.model"></span><span x-show="u.missing != null"> (<span x-text="u.missing"></span> missing)</span> &mdash; <span x-text="u.why"></span></div>
+                </template></div>
             </div>
           </template>
+
         </div>
-      </template>
+      </section>
+      <section class="side-sec" :class="{open: form.sec.plan}">
+        <button type="button" class="side-sec-head" @click="secToggle('plan')" :aria-expanded="String(form.sec.plan)">
+          <span class="fold" :class="{open: form.sec.plan}" aria-hidden="true" x-html="icon('chev')"></span>
+          <span class="grow"><b>Check placement</b><span class="muted small">Saves the settings, then asks the scheduler</span></span>
+        </button>
+        <div class="side-sec-body" x-show="form.sec.plan">
+          <div class="muted small">Unlike the two above, this saves the model first (it does not start it), so it runs only on request.</div>
+          <button class="btn sm block" @click="checkPlan()" :disabled="form.busy"><span class="spin" x-show="form.busy"></span> Save &amp; check placement</button>
+          <template x-if="form.plan && form.plan.ok"><div class="result ok">
+            <b>Fits.</b> Tier <span x-text="form.plan.data.tier.replace('_',' ')"></span>, head <span x-text="form.plan.data.head_node"></span>, about
+            <span x-text="gb(form.plan.data.est_total_mb)"></span> GB.
+            <template x-for="a in form.plan.data.assignments" :key="a.node_id + a.device_id">
+              <div class="small"><span x-text="a.node_id + '/' + a.device_id"></span>: <span x-text="a.layers"></span> layers, <span x-text="gb(a.est_mb)"></span> GB</div>
+            </template>
+          </div></template>
+          <div class="result bad" x-show="form.plan && !form.plan.ok"><b>Does not fit.</b> <span x-text="form.plan && form.plan.msg"></span></div>
+        </div>
+      </section>
+    </aside>
     </div>
-    <div class="modal-foot split">
-      <div class="foot-group" role="group" aria-label="Check before saving">
-        <button class="btn sm" @click="recommend()" :disabled="form.busy || form.recBusy || !form.file" title="Rank GPUs for this model and suggest faster settings, without saving anything"><span class="spin" x-show="form.recBusy"></span> Recommend placement &amp; settings</button>
-        <button class="btn sm" @click="checkPlan()" :disabled="form.busy" title="Saves the settings, then asks the scheduler for a dry run">Check placement</button>
-        <button class="btn sm" @click="simulate()" :disabled="form.busy || form.simBusy || !form.file" title="Dry run over the whole cluster: what would start, stop or be preempted. Saves nothing"><span class="spin" x-show="form.simBusy"></span> Preview impact</button>
-      </div>
-      <div class="foot-group">
-        <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
-        <button class="btn primary" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
-      </div>
+    <div class="modal-foot">
+      <button class="btn" @click="saveOnly()" :disabled="form.busy">Save</button>
+      <button class="btn primary" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
     </div>
   </div>
 </div>

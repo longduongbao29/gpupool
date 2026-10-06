@@ -23,6 +23,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 - Thông báo `NoFit` liệt kê MB usable của từng device.
 - Form model: *Save* và *Save & Start* nằm bên phải.
+- Form model: các bước kiểm tra chuyển sang một cột bên phải gồm các mục thu gọn được, mặc định đóng. Mở *Recommend
+  placement & settings* hoặc *Preview impact* là chạy luôn, và mục đang mở tự chạy lại khi form thay đổi (có debounce).
+  *Check placement* vẫn chỉ chạy khi bấm, vì nó lưu model trước.
+- Thẻ model: *Copy curl* nằm ở góc trên bên phải khung endpoint, để hai dòng kết thúc ở cùng một cột icon copy.
 
 ### Sửa lỗi
 
@@ -38,6 +42,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   giữ 200 log mới nhất của engine đã dừng và xóa log quá 7 ngày.
 - UI: GPU đã tắt trong pool vẫn chọn được cho model; tên server trong bộ chọn bị các dòng mờ vẽ đè khi cuộn.
 - Playground: tên model đã xóa vẫn nằm trong lựa chọn.
+- UI: menu thông báo bị trang vẽ đè (header bảng dính, nút) từ khi header thành phần tử View Transitions; giờ header
+  được xếp lớp trên trang.
 
 ## [0.6.0] - 2026-10-05
 

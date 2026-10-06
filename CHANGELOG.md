@@ -24,6 +24,10 @@ All notable changes to gpupool are documented here. The format follows
 
 - A `NoFit` message lists each device's usable MB.
 - Model form: *Save* and *Save & Start* sit on the right.
+- Model form: the checks move to a side column of collapsible sections, folded at first. Opening *Recommend placement &
+  settings* or *Preview impact* runs it, and an open section runs again as the form changes (debounced). *Check
+  placement* still runs only on request, because it saves the model first.
+- Model card: *Copy curl* sits in the endpoint box's top-right corner, so both rows end in the same copy-icon column.
 
 ### Fixed
 
@@ -40,6 +44,8 @@ All notable changes to gpupool are documented here. The format follows
 - UI: a GPU switched off in the pool could still be picked for a model; the picker's server header was drawn under
   dimmed rows while scrolling.
 - Playground: a deleted model's name stayed selected.
+- UI: the notifications menu was drawn under the page (sticky table headers, buttons) since the header became a View
+  Transitions element; the header is now stacked above the page.
 
 ## [0.6.0] - 2026-10-05
 

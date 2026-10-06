@@ -120,6 +120,15 @@ function perfForm(spec) {
   return f;
 }
 
+// Dry-run checks of the deploy form: results, busy flags, and which side-panel sections are open (all folded at first).
+// recKey / simKey hold the form inputs a result was computed for, so an open section re-runs only when they change.
+function checkState() {
+  return { plan: null, rec: null, recBusy: false, recErr: "", recKey: "", sim: null, simBusy: false, simErr: "", simKey: "",
+           sec: { rec: false, sim: false, plan: false } };
+}
+var checkTimer = null; // debounce of the automatic checks while the user types
+var checkSeq = { rec: 0, sim: 0 }; // answers of superseded check requests are dropped
+
 // "Browse server folders" state of the Add model modal (GET /api/library/browse).
 function emptyBrowse() {
   return { loading: false, loaded: false, err: "", roots: [], files: [], truncated: false };
@@ -200,7 +209,7 @@ function app() {
     convPollAt: 0,
     convPolling: false,
     // deploy (new / edit) modal
-    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
+    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
     ask: null, // the open confirm dialog: { title, body, ok, cancel, danger, resolve }
     navY: null, // top of the active navigation item: the sliding highlight follows it
@@ -1377,11 +1386,11 @@ function app() {
       if (m) {
         this.form = Object.assign({ open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
           priority: m.spec.priority == null ? 50 : m.spec.priority, preemptible: m.spec.preemptible !== false, spread: m.spec.spread || "gpu",
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(m.spec), perfForm(m.spec));
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, }, checkState(), scalingForm(m.spec), perfForm(m.spec));
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null));
+        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null));
       }
     },
     // ----- allowed servers / GPUs: "<node>/*" = the whole server (also GPUs added later), "<node>/<device>" = one GPU -----
@@ -1609,13 +1618,17 @@ function app() {
 
     // ================= impact preview =================
     // Dry run of the whole cluster with this form applied: one change (existing model) or one add (new model).
-    simulate: async function () {
-      var f = this.form;
-      if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return; }
+    // quiet (automatic run from the side panel): problems show inside the section instead of as toasts.
+    simulate: async function (quiet) {
+      var f = this.form, self = this;
+      f.simKey = this.checkKey();
+      f.simErr = "";
+      var bad = function (msg) { if (quiet) { f.sim = null; f.simErr = msg; } else self.toast(msg, "error"); };
+      if (!f.name.trim() || !f.file) { bad("Name and file are required"); return; }
       var sb = this.scalingBody(f);
-      if (sb.error) { this.toast(sb.error, "error"); return; }
+      if (sb.error) { bad(sb.error); return; }
       var pb = this.perfBody(f);
-      if (pb.error) { this.toast(pb.error, "error"); return; }
+      if (pb.error) { bad(pb.error); return; }
       var item = Object.assign({}, pb.body, {
         ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
         priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins
@@ -1625,12 +1638,16 @@ function app() {
       var body = {};
       if (f.edit) body.changes = [Object.assign({ model: f.name.trim() }, item)];
       else body.add = [Object.assign({ name: f.name.trim(), file: f.file }, item)];
+      var seq = ++checkSeq.sim;
       f.simBusy = true;
       f.sim = null;
       try {
-        f.sim = await this.api("POST", "/api/simulate", body);
-      } catch (e) { this.fail(e); }
+        var r = await this.api("POST", "/api/simulate", body);
+        if (seq === checkSeq.sim) f.sim = r;
+      } catch (e) { if (seq !== checkSeq.sim) return; if (quiet && e.status !== 401) f.simErr = e.message; else this.fail(e); }
+      if (seq !== checkSeq.sim) return;
       f.simBusy = false;
+      this.autoCheck(); // the form may have changed while this ran
     },
     simEmpty: function (r) {
       return !r || !["start", "stop", "preempt", "unplaced"].some(function (k) { return (r[k] || []).length; });
@@ -1640,20 +1657,49 @@ function app() {
     },
 
     // ================= recommendation =================
-    recommend: async function () {
-      var f = this.form;
-      if (!f.file) { this.toast("Pick a file first", "error"); return; }
+    recommend: async function (quiet) {
+      var f = this.form, self = this;
+      f.recKey = this.checkKey();
+      f.recErr = "";
+      var bad = function (msg) { if (quiet) { f.rec = null; f.recErr = msg; } else self.toast(msg, "error"); };
+      if (!f.file) { bad("Pick a file first"); return; }
       var pb = this.perfBody(f);
-      if (pb.error) { this.toast(pb.error, "error"); return; }
+      if (pb.error) { bad(pb.error); return; }
+      var seq = ++checkSeq.rec;
       f.recBusy = true;
       f.rec = null;
       try {
-        f.rec = await this.api("POST", "/api/recommend", Object.assign({
+        var r = await this.api("POST", "/api/recommend", Object.assign({
           file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins, limit: 3
         }, pb.body));
-      } catch (e) { this.fail(e); }
+        if (seq === checkSeq.rec) f.rec = r;
+      } catch (e) { if (seq !== checkSeq.rec) return; if (quiet && e.status !== 401) f.recErr = e.message; else this.fail(e); }
+      if (seq !== checkSeq.rec) return;
       f.recBusy = false;
+      this.autoCheck();
+    },
+    // Everything the recommendation and the impact preview depend on.
+    checkKey: function () {
+      var f = this.form;
+      return JSON.stringify([f.name, f.file, f.ctx, f.parallel, f.priority, f.preemptible, f.spread, f.auto, f.pins, f.mode, f.replicas,
+        f.minR, f.maxR, f.kv, f.spec, f.draftFile, f.draftN, f.fa, f.ubatch, f.batch, f.kvu]);
+    },
+    secToggle: function (k) {
+      this.form.sec[k] = !this.form.sec[k];
+      if (this.form.sec[k]) this.autoCheck(0);
+    },
+    // Re-run the open sections whose inputs changed (debounced while the user types).
+    autoCheck: function (delay) {
+      var self = this;
+      clearTimeout(checkTimer);
+      checkTimer = setTimeout(function () {
+        var f = self.form, key = self.checkKey();
+        if (!f.open) return;
+        if (f.sec.rec && !f.recBusy && f.recKey !== key) self.recommend(true);
+        if (f.sec.sim && !f.simBusy && f.simKey !== key) self.simulate(true);
+      }, delay == null ? 500 : delay);
+      return true;
     },
     optionPins: function (o) {
       var out = [];
