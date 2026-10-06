@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-06
+
 ### Added
 
 - UI: a new look. Icons drawn for gpupool (duotone; gradient and glow in the navigation, stat cards and
@@ -347,7 +349,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/longduongbao29/gpupool/compare/v0.4.2...v0.5.0
