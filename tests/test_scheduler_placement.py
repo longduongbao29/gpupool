@@ -570,3 +570,34 @@ def test_placement_keeps_the_parts_of_its_speed_estimate():
     pl = plan(meta, SPEC, _two_gpu_remote(["rpc_multi_device"]), "r", Ports())
     assert pl.est_bw_s > 0 and pl.est_hops == 1 and pl.est_logits_s == 0.0  # head's GPU last
     assert current_tps(pl.est_bw_s, pl.est_hops, pl.est_logits_s) == pytest.approx(pl.est_decode_tps, abs=0.05)
+
+
+def _hybrid_27b():
+    """Qwen3.5/3.8-27B-like (BF16): 64 layers + 1 nextn, a quarter with KV, 2.5 GB output tensors."""
+    full = [(i + 1) % 4 == 0 for i in range(64)] + [False]
+    return ModelMeta(arch="qwen35", n_layers=65, n_embd=5120, n_head=24, n_head_kv=4, head_dim=256,
+                     layer_bytes=[int(0.80e9)] * 64 + [0], other_bytes=int(5.1e9), output_bytes=int(2.54e9),
+                     vocab_size=248320, kv_k=[1024 if f else 0 for f in full], kv_v=[1024 if f else 0 for f in full],
+                     state_bytes=[0 if f or i == 64 else 3_300_000 for i, f in enumerate(full)],
+                     n_nextn=1, nextn_bytes=int(0.9e9))
+
+
+def test_small_head_gpu_does_not_cause_nofit():
+    # 0.6.0: the head's smallest GPU (2.7 GB) was last and had to hold the 2.5 GB output tensors
+    # too, so this pool (52 GB needed, 66 GB usable) failed with "no feasible layer split".
+    meta = _hybrid_27b()
+    nodes = [node("a", dev("CUDA0", 11319), dev("CUDA1", 2696), dev("CUDA2", 24626)),
+             node("b", dev("CUDA0", 15792), dev("CUDA1", 11307))]
+    pl = plan(meta, ModelSpec(name="q", source="x", ctx_size=4096), nodes, "r", Ports())
+    last = pl.assignments[-1]
+    assert sum(a.layers for a in pl.assignments) == 65
+    assert (last.node_id, last.device_id) != ("a", "CUDA1")  # never the 2.7 GB card
+
+
+def test_fallback_order_only_when_the_default_does_not_fit():
+    # a pool where the default order fits keeps it: the head's largest GPU first
+    meta = make_meta(n_layers=32, layer_mb=100, out_mb=100)
+    nodes = [node("a", dev("CUDA0", 3000), dev("CUDA1", 1500)), node("b", dev("CUDA0", 1000))]
+    pl = plan(meta, SPEC, nodes, "r", Ports())
+    head = [a.device_id for a in pl.assignments if a.node_id == pl.head_node]
+    assert head == ["CUDA0", "CUDA1"][:len(head)]

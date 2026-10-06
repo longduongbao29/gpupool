@@ -512,6 +512,7 @@ agent cũ, log không có dòng buffer, hoặc thiếu thiết bị; khi đó h�
 | --- | --- | --- |
 | GET | `/api/events?limit=200&after_id=` | liệt kê event, mới nhất trước |
 | POST | `/api/events/read` | đánh dấu event đã đọc |
+| DELETE | `/api/events?up_to_id=` | xóa event |
 
 **`GET /api/events`**: `limit` bị kẹp trong 1..1000 (mặc định 200); `after_id` chỉ trả event có id lớn hơn.
 Trả `{"events": [...], "unread": n}`. Một event là
@@ -519,6 +520,10 @@ Trả `{"events": [...], "unread": n}`. Một event là
 
 **`POST /api/events/read`** body `{"up_to_id": 123}` đánh dấu các event tới id đó là đã đọc. Trả
 `{"unread": n}`.
+
+**`DELETE /api/events`** xóa mọi event, hoặc với `?up_to_id=123` thì xóa các event tới id đó (UI truyền id mới nhất
+nó đang hiển thị, nên event đến trong lúc đó được giữ lại). Trả `{"deleted": n, "unread": n}`. Store cũng chỉ giữ 1000
+event mới nhất.
 
 Các loại event có trong code: `server_added`, `server_removed`, `node_online`, `node_offline`,
 `model_started`, `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`,
@@ -671,6 +676,7 @@ Cả 51 route, để kiểm tra đầy đủ:
 | 49 | POST | `/api/convert/{job_id}/retry` | 12 |
 | 50 | POST | `/api/convert/{job_id}/accept` | 12 |
 | 51 | DELETE | `/api/convert/{job_id}` | 12 |
+| 52 | DELETE | `/api/events` | 8 |
 
 Số lượng khớp với các decorator route tìm thấy trong code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
 

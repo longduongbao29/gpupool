@@ -333,3 +333,24 @@ async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
 def test_features_follow_the_llama_build(version, features):
     from gpupool.agent.app import features_of
     assert features_of(version) == features
+
+
+def test_old_engine_logs_are_pruned_but_not_those_of_known_engines(tmp_path):
+    import os
+    import time as _time
+    from gpupool.agent.procs import ProcessManager
+    pm = ProcessManager(tmp_path, tmp_path / "logs", "127.0.0.1")
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    now = _time.time()
+    for i in range(6):  # m-0 newest ... m-5 oldest
+        p = logs / f"m-{i}-head.log"
+        p.write_text("x")
+        os.utime(p, (now - i * 60, now - i * 60))
+    old = logs / "ancient-head.log"
+    old.write_text("x")
+    os.utime(old, (now - 30 * 86400, now - 30 * 86400))
+    pm._engines["m-5-head"] = object()  # still known to the agent: kept whatever its age
+    assert pm.prune_logs(keep=3, now=now) == 3  # m-3, m-4 (past the 3 newest) and the 30-day-old one
+    assert sorted(p.name for p in logs.glob("*.log")) == ["m-0-head.log", "m-1-head.log", "m-2-head.log",
+                                                          "m-5-head.log"]

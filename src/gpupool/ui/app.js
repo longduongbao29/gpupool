@@ -190,6 +190,7 @@ function app() {
     // deploy (new / edit) modal
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
+    ask: null, // the open confirm dialog: { title, body, ok, cancel, danger, resolve }
     // Playground: chat with a deployed model through the same /v1 route clients use
     pg: Object.assign({ input: "", msgs: [], busy: false, ctrl: null, raf: 0 }, pgSaved()),
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
@@ -317,6 +318,19 @@ function app() {
     markRead: async function () {
       var max = this.events().reduce(function (m, e) { return Math.max(m, e.id); }, 0);
       try { await this.api("POST", "/api/events/read", { up_to_id: max }); await this.refresh(); } catch (e) { this.fail(e); }
+    },
+    // Delete the events up to the newest one listed (one that arrives meanwhile survives).
+    clearEvents: async function () {
+      var ids = this.events().concat(this.evList || []).map(function (e) { return e.id; });
+      if (!ids.length) return;
+      if (!(await this.confirmBox("Delete all events?\n\nThis cannot be undone. Events that arrive later are kept.", { ok: "Delete all", danger: true }))) return;
+      var max = Math.max.apply(null, ids);
+      try {
+        await this.api("DELETE", "/api/events?up_to_id=" + max);
+        this.evList = [];
+        await this.refresh();
+        if (this.view === "events") this.loadEvents();
+      } catch (e) { this.fail(e); }
     },
     evClass: function (e) { var k = EV_KIND[e.kind]; return k ? k.cls : (e.level === "error" ? "red" : (e.level === "warning" ? "amber" : "blue")); },
     evIcon: function (e) { var k = EV_KIND[e.kind]; return k ? k.icon : (e.level === "info" ? "info" : "alert"); },
@@ -650,7 +664,7 @@ function app() {
       a.busy = false;
     },
     deleteLibrary: async function (it) {
-      if (!confirm("Remove " + it.name + " from the library?")) return;
+      if (!(await this.confirmBox("Remove " + it.name + " from the library?", { ok: "Remove", danger: true }))) return;
       try {
         await this.api("DELETE", "/api/library/" + encodeURIComponent(it.name));
         await this.refresh();
@@ -999,11 +1013,12 @@ function app() {
     quoteText: function (s) { return JSON.stringify(String(s == null ? "" : s)); },
     convAct: async function (j, action) {
       var mism = j.validation ? this.convMismatches(j.validation) : 0;
-      if (action === "accept" && !confirm("Accept " + j.output_name + " anyway?\n\nThe automatic checks found a problem" +
+      if (action === "accept" && !(await this.confirmBox("Accept " + j.output_name + " anyway?\n\nThe automatic checks found a problem" +
         (mism ? " (the tokenizer produced different token ids than the original model on " + mism + " test string(s))" : "") +
-        ". The model will be added to the library, but it may answer with garbled or wrong text. Only accept it if you plan to check it yourself.")) return;
-      if (action === "delete" && !confirm("Delete this conversion job?\n\nIts temporary files are removed. A model already in the library is kept.")) return;
-      if (action === "cancel" && !confirm("Cancel the conversion of " + j.output_name + "?")) return;
+        ". The model will be added to the library, but it may answer with garbled or wrong text. Only accept it if you plan to check it yourself.",
+        { ok: "Accept anyway" }))) return;
+      if (action === "delete" && !(await this.confirmBox("Delete this conversion job?\n\nIts temporary files are removed. A model already in the library is kept.", { ok: "Delete", danger: true }))) return;
+      if (action === "cancel" && !(await this.confirmBox("Cancel the conversion of " + j.output_name + "?", { ok: "Cancel conversion", cancel: "Keep converting", danger: true }))) return;
       this.convBusy[j.id] = true;
       try {
         if (action === "delete") await this.api("DELETE", "/api/convert/" + encodeURIComponent(j.id));
@@ -1095,6 +1110,18 @@ function app() {
       if (lg >= 0.05) bits.push("logits over the network " + lg.toFixed(1) + " ms");
       return "Per token about " + (w + net + lg).toFixed(1) + " ms: " + bits.join(" + ");
     },
+    // ================= confirm dialog =================
+    // In-app replacement for the browser dialog: resolves true / false. `text` is "Title?" or "Title?\n\nDetails".
+    confirmBox: function (text, opts) {
+      var self = this, i = text.indexOf("\n\n");
+      if (this.ask) this.ask.resolve(false); // one at a time: a new question cancels the open one
+      return new Promise(function (resolve) {
+        self.ask = Object.assign({ title: i < 0 ? text : text.slice(0, i), body: i < 0 ? "" : text.slice(i + 2),
+          ok: "OK", cancel: "Cancel", danger: false }, opts || {}, { resolve: resolve });
+        self.$nextTick(function () { var b = document.querySelector(".ask .ask-ok"); if (b) b.focus(); });
+      });
+    },
+    askDone: function (v) { var a = this.ask; this.ask = null; if (a) a.resolve(v); },
     // ================= collapsible panels =================
     folded: function (id) { return !!this.fold[id]; },
     toggleFold: function (id) {
@@ -1111,12 +1138,20 @@ function app() {
         return { name: m.spec.name, ok: ok, label: m.spec.name + (m.state === "running" ? "" : " (" + m.state + ")") };
       });
     },
+    // Keep the selection on a model that exists: a deleted one (remembered in localStorage) is
+    // replaced by the first one that can chat, or cleared when there is none.
+    pgPick: function () {
+      if (!this.st || this.pgCurrent()) return;
+      var f = this.pgModels().find(function (m) { return m.ok; });
+      var next = f ? f.name : "";
+      if (this.pg.model !== next) { this.pg.model = next; this.pgSave(); }
+    },
     pgCurrent: function () { var n = this.pg.model; return this.models().find(function (m) { return m.spec.name === n; }) || null; },
     pgReady: function () { var m = this.pgCurrent(); return !!(m && (m.state === "running" || m.state === "idle")); },
     pgBlock: function () {
       if (!this.models().length) return "Deploy a model first (Models → New model).";
       var m = this.pgCurrent();
-      if (!m) return "Pick a model.";
+      if (!m) return this.pgModels().some(function (x) { return x.ok; }) ? "Pick a model." : "No model is running: start one on the Models page to chat with it.";
       if (m.state === "idle") return "";
       if (m.state !== "running") return m.spec.name + " is " + m.state + ": start it on the Models page to chat with it.";
       return "";
@@ -1286,7 +1321,7 @@ function app() {
     },
     runRebalance: async function (dry) {
       if (this.rb.busy) return;
-      if (!dry && !confirm("Rebalance now?\n\nThis starts a new replica on the better GPUs, then stops the old one once it is ready. Only one replica moves at a time.")) return;
+      if (!dry && !(await this.confirmBox("Rebalance now?\n\nThis starts a new replica on the better GPUs, then stops the old one once it is ready. Only one replica moves at a time.", { ok: "Rebalance now" }))) return;
       this.rb.busy = true;
       try {
         var r = await this.api("POST", "/api/rebalance", { dry_run: !!dry });
@@ -1318,7 +1353,7 @@ function app() {
       } catch (e) { this.fail(e); }
     },
     deleteModel: async function (m) {
-      if (!confirm("Stop and delete the deployment \"" + m.spec.name + "\"?")) return;
+      if (!(await this.confirmBox("Delete the deployment \"" + m.spec.name + "\"?\n\nIts replicas are stopped and its settings removed. The model file stays in the library.", { ok: "Stop and delete", danger: true }))) return;
       try {
         await this.api("DELETE", "/api/models/" + encodeURIComponent(m.spec.name));
         await this.refresh();

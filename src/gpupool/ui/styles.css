@@ -427,10 +427,13 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .place { font-size: 12.5px; color: var(--text-muted); }
 .place b { color: var(--text); font-weight: 600; }
 .gpu-pick { border: 1px solid var(--border-strong); border-radius: var(--r-control); max-height: 240px; overflow: auto; background: var(--field-bg); }
-.gpu-pick .grp { padding: 6px var(--s-3); background: var(--surface-2); color: var(--text-muted); font-size: var(--fs-xs); font-weight: 600; position: sticky; top: 0; }
+/* z-index: dimmed rows (opacity < 1) form their own stacking context and painted over the sticky header */
+.gpu-pick .grp { padding: 6px var(--s-3); background: var(--surface-2); color: var(--text-muted); font-size: var(--fs-xs); font-weight: 600; position: sticky; top: 0; z-index: 1; border-bottom: 1px solid var(--border); }
 .gpu-pick label.grp { color: var(--text); font-weight: 600; }
 .gpu-pick label.child { padding-left: var(--s-6); }
 .gpu-pick label.off { opacity: .6; }
+.gpu-pick label.locked { cursor: not-allowed; }
+.gpu-pick label.locked:hover { background: none; }
 .gpu-pick input[type=checkbox] { flex: none; accent-color: var(--accent-solid); }
 .endpoint.ep { flex-direction: column; align-items: stretch; gap: 2px; padding: 3px var(--s-1) 3px var(--s-3); }
 .ep-line { display: flex; align-items: center; gap: var(--s-2); min-width: 0; flex-wrap: wrap; }
@@ -508,6 +511,8 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .foot-group { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
 .foot-group:first-child { padding: 3px; border-radius: var(--r-control); background: var(--track); }
 .foot-group:first-child .btn { box-shadow: none; }
+/* the save actions stay on the right, also when the row wraps onto a second line (narrow modal) */
+.modal-foot.split .foot-group:last-child { margin-left: auto; }
 
 /* ---------- add model: browse server folders ---------- */
 .browse { border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface-2); padding: var(--s-3); display: flex; flex-direction: column; gap: var(--s-2); }
@@ -723,3 +728,13 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .fold.open .ic, .fold.open svg { transform: rotate(90deg); }
 .fold-title { cursor: pointer; user-select: none; }
 @media (prefers-reduced-motion: reduce) { .fold .ic, .fold svg { transition: none; } }
+
+/* ---------- confirm dialog ---------- */
+.ask-overlay { z-index: 60; } /* above any modal it is asked from */
+.modal.ask { width: min(460px, 100%); }
+.modal.ask .modal-head { display: flex; align-items: center; gap: var(--s-3); }
+.ask-ico { flex: none; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--warning-soft); color: var(--warning-text); }
+.ask-ico.danger { background: var(--danger-soft); color: var(--danger-text); }
+.ask-text { margin: 0; white-space: pre-line; color: var(--text-muted); line-height: 1.55; }
+.btn.danger-solid { background: var(--danger-solid); border-color: var(--danger-solid); color: #fff; }
+.btn.danger-solid:hover:not(:disabled) { filter: brightness(1.08); }

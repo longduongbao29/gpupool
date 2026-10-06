@@ -351,3 +351,18 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   play an enter animation that keeps its final opacity, which would override an inline style on the row.
 - **Selects with generated options** (model, library file, draft) mark the bound option `:selected`, so the
   box shows the value it holds even when the options render after the value is set.
+
+## 14. Dialogs, events and the GPU picker (0.6.1)
+
+- **Confirm dialog**: every confirmation (delete a deployment or a library file, delete or cancel a conversion,
+  accept a conversion that failed a check, rebalance, clear events) is an in-app dialog, not the browser's
+  `confirm()`: a title, the details, and a button named after the action (*Stop and delete*, *Remove*...), red
+  when it deletes. Esc or a click outside cancels, Enter confirms (the action button has the focus).
+- **Clearing events**: *Clear all* on the Events page and *Clear* in the notifications menu delete the events up
+  to the newest one listed (`DELETE /api/events?up_to_id=`), after a confirmation.
+- **GPU picker** (model form, *Only selected ones*): a GPU switched off in the pool cannot be ticked (it says
+  "off in the pool (Servers tab)"); one ticked earlier can still be unticked. The sticky server header stays above
+  dimmed rows while the list scrolls.
+- **Model form footer**: *Save* and *Save & Start* stay on the right, also when the row wraps.
+- **Playground**: a model that no longer exists (deleted, or remembered from an earlier visit) is never shown: the
+  selection moves to the first model that can chat, or is cleared with a hint to start one.

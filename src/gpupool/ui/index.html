@@ -66,7 +66,8 @@
                x-transition:enter="tr-enter" x-transition:enter-start="tr-drop-from" x-transition:enter-end="tr-drop-to"
                x-transition:leave="tr-leave" x-transition:leave-start="tr-drop-to" x-transition:leave-end="tr-drop-from">
             <div class="panel-head"><h2 style="font-size:var(--fs-md)">Notifications</h2>
-              <button class="btn sm right" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div>
+              <button class="btn sm right" @click="markRead()" :disabled="unread() === 0">Mark all read</button>
+              <button class="btn sm ghost danger" @click="clearEvents()" :disabled="!events().length" title="Delete all events">Clear</button></div>
             <div class="notif-list">
               <template x-for="e in events().slice(0, 12)" :key="e.id">
                 <div class="notif-item" :class="{read: e.read}">
@@ -563,7 +564,8 @@
       <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('events')}" @click="toggleFold('events')" :aria-expanded="String(!folded('events'))" :title="folded('events') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Events" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('events')">Events</h2>
         <div class="row right">
           <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
-          <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button></div></div>
+          <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button>
+          <button class="btn danger" @click="clearEvents()" :disabled="!(evList || []).length && !events().length"><span x-html="icon('trash')"></span> Clear all</button></div></div>
       <div class="empty" x-show="filteredEvents().length === 0">No events.</div>
       <div class="tbl-scroll tall" x-show="filteredEvents().length > 0">
       <table>
@@ -586,12 +588,12 @@
     <!-- ============ Settings ============ -->
     <!-- ============ playground ============ -->
     <div class="view" x-show="view==='playground'"
-         x-effect="if (view === 'playground' && !pgCurrent()) { var f = pgModels().find(function (m) { return m.ok; }); if (f) pg.model = f.name; }">
+         x-effect="if (view === 'playground') pgPick()">
       <div class="pg">
         <section class="panel pg-chat" aria-label="Chat">
           <div class="panel-head">
             <h2>Chat</h2>
-            <span class="chip mono" x-show="pg.model" x-text="pg.model"></span>
+            <span class="chip mono" x-show="pgCurrent()" x-text="pg.model"></span>
             <button class="btn sm right" @click="pgClear()" :disabled="!pg.msgs.length || pg.busy"><span x-html="icon('trash')"></span> Clear chat</button>
           </div>
           <div class="pg-stats" aria-live="polite">
@@ -641,7 +643,7 @@
           </div>
           <div class="pg-compose">
             <textarea rows="2" x-model="pg.input" @keydown="pgKey($event)" :disabled="!!pgBlock()"
-                      :placeholder="pgBlock() || 'Message ' + pg.model" title="Enter to send, Shift+Enter for a new line" aria-label="Message"></textarea>
+                      :placeholder="pgBlock() || 'Message ' + (pgCurrent() ? pg.model : '')" title="Enter to send, Shift+Enter for a new line" aria-label="Message"></textarea>
             <button class="btn primary" x-show="!pg.busy" @click="pgSend()" :disabled="!pg.input.trim() || !!pgBlock()"><span x-html="icon('send')"></span> Send</button>
             <button class="btn" x-show="pg.busy" @click="pgStop()"><span x-html="icon('stop')"></span> Stop</button>
           </div>
@@ -1083,9 +1085,10 @@
                 <span class="grow"><span x-text="s.node_id"></span> <span class="muted small" x-text="gpus(s).length + ' GPU' + (gpus(s).length === 1 ? '' : 's') + (pinWhole(s) ? ' · whole server, including GPUs added later' : '')"></span></span>
                 <span class="pill red lead" x-show="!s.alive">Offline</span></label>
               <template x-for="d in gpus(s)" :key="d.device_id">
-                <label class="child" :class="{off: !s.alive || !enabled(s, d)}"><input type="checkbox" :checked="pinHas(s, d)" @change="pinToggleGpu(s, d, $event.target.checked)" :aria-label="'GPU ' + d.device_id + ' of ' + s.node_id">
+                <label class="child" :class="{off: !s.alive || !enabled(s, d), locked: !enabled(s, d) && !pinHas(s, d)}"
+                       :title="enabled(s, d) ? '' : 'Switched off in the pool: no model can use it. Switch it on in the Servers tab first.'"><input type="checkbox" :checked="pinHas(s, d)" :disabled="!enabled(s, d) && !pinHas(s, d)" @change="pinToggleGpu(s, d, $event.target.checked)" :aria-label="'GPU ' + d.device_id + ' of ' + s.node_id">
                   <span class="grow" x-text="d.device_id + ' · ' + d.name"></span>
-                  <span class="muted small" x-text="(!s.alive ? 'server offline · ' : (!enabled(s, d) ? 'disabled in the pool · ' : '')) + 'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
+                  <span class="muted small" x-text="(!s.alive ? 'server offline · ' : (!enabled(s, d) ? 'off in the pool (Servers tab) · ' : '')) + 'free ' + gb(d.free_mb) + ' GB / usable ' + gb(d.usable_mb) + ' GB'"></span></label>
               </template>
             </div>
           </template>
@@ -1189,6 +1192,20 @@
         <button class="btn primary" @click="saveAndStart()" :disabled="form.busy"><span x-html="icon('play')"></span> Save &amp; Start</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ============ confirm (replaces the browser's confirm()) ============ -->
+<div class="overlay ask-overlay" x-show="authed && ask" x-cloak @click.self="askDone(false)"
+     @keydown.escape.window="if (ask) askDone(false)"
+     x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal ask" role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-body" x-show="ask"
+       x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><span class="ask-ico" :class="ask && ask.danger ? 'danger' : ''" x-html="icon(ask && ask.danger ? 'trash' : 'alert')"></span><h2 id="ask-title" x-text="ask && ask.title"></h2></div>
+    <div class="modal-body" id="ask-body" x-show="ask && ask.body"><p class="ask-text" x-text="ask && ask.body"></p></div>
+    <div class="modal-foot">
+      <button class="btn" @click="askDone(false)" x-text="(ask && ask.cancel) || 'Cancel'"></button>
+      <button class="btn ask-ok" :class="ask && ask.danger ? 'danger-solid' : 'primary'" @click="askDone(true)" x-text="(ask && ask.ok) || 'OK'"></button></div>
   </div>
 </div>
 

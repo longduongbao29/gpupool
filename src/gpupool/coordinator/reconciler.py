@@ -125,6 +125,12 @@ class Reconciler:
     READY_REPORT_GRACE_S = 5.0
     DEAD_AFTER_FAILED_POLLS = 2  # stale report AND this many failed polls in a row = node dead
     STABLE_S = 300.0  # a replica ready this long counts as healthy: crashes before it feed the backoff
+    # A model that does not fit is planned again when the cluster's capacity changes (a GPU switched
+    # on, memory freed, a server back), or after NOFIT_RETRY_S: not every tick, which re-ran the
+    # planner and the preemption search every 2 s. Its "cannot place" event repeats at most every
+    # NOFIT_REPEAT_S (the message carries the free memory, which changes all the time).
+    NOFIT_RETRY_S = 60.0
+    NOFIT_REPEAT_S = 600.0
     KEEP_TERMINAL_PER_MODEL = 10  # stopped/failed history rows kept per model
     # A model that evicted others may not do it again for this long, so two models whose needs
     # overlap cannot keep stopping each other's replicas.
@@ -165,6 +171,8 @@ class Reconciler:
         self._suspect: set[str] = set()
         self._tick_lock = asyncio.Lock()
         self._nofit: dict[str, str] = {}
+        # model -> (last "cannot place" event, last plan attempt, capacity at that attempt)
+        self._nofit_seen: dict[str, tuple[float, float, tuple]] = {}
         self._backoff: dict[str, tuple[int, float]] = {}  # model -> (consecutive failures, retry not before)
         self._node_up: dict[str, bool] = {}  # node_id -> last observed liveness (for transition events)
         self._versions_seen: tuple[str, ...] = ()  # llama.cpp builds of live servers at the last check
@@ -1105,16 +1113,39 @@ class Reconciler:
                     log.info("replica %s: device low on free memory, replacement ready; draining", r.replica_id)
                     await self.drain(r.replica_id)
 
+    def _capacity(self) -> tuple:
+        """Coarse signature of what a new replica could use (512 MB steps): a NoFit is retried
+        when it changes, not on the free-memory jitter of every report."""
+        devices = tuple(sorted((n.node_id, d.device_id, d.usable_mb // 512)
+                               for n in self.available_reports() for d in n.devices))
+        # a replica that stops or starts frees or takes memory before the next node report shows it
+        live = tuple(sorted(r.replica_id for r in self.store.list_replicas(states=set(LIVE_STATES))))
+        return devices, live
+
+    def retry_now(self, model: str) -> None:
+        """The user started or changed `model`: forget its launch backoff and NoFit pause, so the
+        next tick tries at once (and reports a failure again)."""
+        if self._backoff.pop(model, None) is not None:
+            self._save_backoff()
+        self._nofit_seen.pop(model, None)
+        self._nofit.pop(model, None)
+
     async def _maybe_launch(self, spec: ModelSpec, now: float, wanted: int | None = None) -> None:
         fails, not_before = self._backoff.get(spec.name, (0, 0.0))
         if now < not_before:
             return
+        seen = self._nofit_seen.get(spec.name)
+        if seen is not None and spec.name in self._nofit and now - seen[1] < self.NOFIT_RETRY_S \
+                and seen[2] == self._capacity():
+            return  # still does not fit: nothing changed since the last plan
         try:
             placement = await self.plan_for(spec)
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
-            if self._nofit.get(spec.name) != msg:
-                self._nofit[spec.name] = msg
+            first = spec.name not in self._nofit
+            self._nofit[spec.name] = msg  # the UI shows the latest reason
+            last_event = self._nofit_seen.get(spec.name, (float("-inf"), 0.0, ()))[0]
+            if first or now - last_event >= self.NOFIT_REPEAT_S:
                 if isinstance(e, NoFit):
                     self._realloc.setdefault(spec.name, _Realloc(since=now, lost=None))
                     self._emit("error", "realloc_failed",
@@ -1123,10 +1154,18 @@ class Reconciler:
                     self._emit("error", "launch_failed", f"Cannot plan {spec.name}: {msg}", model=spec.name)
                 (log.warning if isinstance(e, NoFit) else log.error)(
                     "cannot place %s: %s", spec.name, msg)
+                last_event = now
             if isinstance(e, NoFit):
+                self._nofit_seen[spec.name] = (last_event, now, self._capacity())
                 await self._preempt_for(spec, now, self._wanted(spec) if wanted is None else wanted)
+            else:
+                # not a capacity problem (e.g. the GGUF header could not be read): back off
+                # exponentially instead of fetching it again every tick
+                self._nofit_seen[spec.name] = (last_event, now, ())
+                self._bump_backoff(spec.name, now)
             return
         self._nofit.pop(spec.name, None)
+        self._nofit_seen.pop(spec.name, None)
         rec = self._spawn_launch(spec, placement, now)
         entry = self._realloc.get(spec.name)
         if entry is not None and entry.lost is not None and not entry.started:

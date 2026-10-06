@@ -2139,3 +2139,59 @@ async def test_mtp_on_a_head_without_it_serves_without_speculation(mock_health):
     assert hs.spec_type == "none"
     assert any(e.kind == "mtp_unavailable" and e.level == "warning" for e in store.list_events())
     await rec.shutdown()
+
+
+def _counting(planner):
+    calls = []
+
+    def wrapped(*a, **kw):
+        calls.append(1)
+        return planner(*a, **kw)
+
+    return wrapped, calls
+
+
+async def test_nofit_is_not_replanned_every_tick_nor_reported_on_memory_jitter():
+    # 0.6.0 planned a model that does not fit on every 2 s tick and, as the message carries the
+    # free memory, which moves all the time, logged a new event each time.
+    planner, calls = _counting(make_planner(est_mb=10**6))
+    rec, store, clock = make_reconciler(planner=planner)
+    store.put_model(SPEC)
+    for i in range(10):
+        beat(store, clock, node("a", devices=[dev(usable=6700 + 37 * i)]))  # jitter within one 512 MB step
+        await rec.tick()
+        clock.t += 2
+    assert len(calls) == 1
+    assert len([e for e in store.list_events() if e.kind == "realloc_failed"]) == 1
+    assert rec.nofit_reason("m")
+    # a real change of capacity (a GPU freed or added) is tried at once
+    beat(store, clock, node("a", devices=[dev(usable=7000), dev("CUDA1", usable=7000)]))
+    await rec.tick()
+    assert len(calls) == 2
+    # and with nothing changing, once more after NOFIT_RETRY_S
+    clock.t += rec.NOFIT_RETRY_S + 1
+    beat(store, clock, node("a", devices=[dev(usable=7000), dev("CUDA1", usable=7000)]))
+    await rec.tick()
+    assert len(calls) == 3
+    assert len([e for e in store.list_events() if e.kind == "realloc_failed"]) == 1
+    await rec.shutdown()
+
+
+async def test_plan_error_backs_off_and_start_retries_at_once():
+    calls = []
+
+    def broken(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("cannot read the GGUF header")
+
+    rec, store, clock = make_reconciler(planner=broken)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    for _ in range(5):
+        await rec.tick()
+        clock.t += 2
+    assert len(calls) == 2  # t=0 and t=6 (after the 5 s backoff), not on each of the 5 ticks
+    rec.retry_now("m")  # what Start / Save does: no waiting for the 10 s backoff
+    await rec.tick()
+    assert len(calls) == 3
+    await rec.shutdown()

@@ -349,3 +349,18 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   hiện giữ opacity cuối, hiệu ứng này đè lên style inline đặt trên dòng.
 - **Ô chọn có option sinh động** (model, file trong thư viện, draft) đánh dấu option đang gắn là `:selected`, nên ô
   luôn hiện đúng giá trị nó giữ kể cả khi option render sau khi giá trị được gán.
+
+## 14. Hộp thoại, sự kiện và bộ chọn GPU (0.6.1)
+
+- **Hộp xác nhận**: mọi xác nhận (xóa deployment hoặc file thư viện, xóa hoặc hủy conversion, chấp nhận conversion
+  không qua kiểm tra, rebalance, xóa sự kiện) là hộp thoại của UI, không phải `confirm()` của trình duyệt: tiêu đề,
+  chi tiết và nút mang tên hành động (*Stop and delete*, *Remove*...), màu đỏ khi là thao tác xóa. Esc hoặc bấm ra
+  ngoài để hủy, Enter để xác nhận (nút hành động được focus sẵn).
+- **Xóa sự kiện**: *Clear all* ở trang Events và *Clear* trong menu thông báo xóa các sự kiện tới sự kiện mới nhất
+  đang hiển thị (`DELETE /api/events?up_to_id=`), sau khi xác nhận.
+- **Bộ chọn GPU** (form model, *Only selected ones*): GPU đã tắt trong pool không tick được (ghi "off in the pool
+  (Servers tab)"); GPU đã tick từ trước vẫn bỏ tick được. Tên server dính ở đầu luôn nằm trên các dòng bị làm mờ
+  khi cuộn.
+- **Chân form model**: *Save* và *Save & Start* luôn ở bên phải, kể cả khi hàng nút xuống dòng.
+- **Playground**: model không còn tồn tại (đã xóa, hoặc được nhớ từ lần trước) không bao giờ được hiện: lựa chọn
+  chuyển sang model đầu tiên chat được, hoặc để trống kèm gợi ý hãy start một model.

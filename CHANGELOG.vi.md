@@ -8,6 +8,33 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm
+
+- UI: xóa được sự kiện (*Clear all* ở trang Events, *Clear* trong menu thông báo); API
+  `DELETE /api/events?up_to_id=`.
+- UI: hộp xác nhận của UI thay cho `confirm()` của trình duyệt ở mọi nơi (nút mang tên hành động, màu đỏ khi xóa,
+  Esc / Enter).
+
+### Thay đổi
+
+- Thông báo `NoFit` liệt kê MB usable của từng device.
+- Form model: *Save* và *Save & Start* nằm bên phải.
+
+### Sửa lỗi
+
+- Placement: model lớn có thể báo "no feasible layer split" dù pool còn chỗ (ví dụ model 27B BF16, 52 GB, trên 66 GB
+  của 5 GPU). Khi head có một GPU nhỏ, GPU đó đứng cuối và phải giữ thêm tensor đầu ra (2,5 GB với từ vựng 248k). Khi
+  thứ tự mặc định không có cách chia khả thi, planner giờ thử GPU lớn nhất của head ở cuối, rồi bất kỳ node nào làm
+  đuôi; placement vốn đã vừa không đổi.
+- Model không vừa bị lập kế hoạch lại ở mỗi tick 2 s, và sự kiện "cannot place" của nó lặp lại mỗi lần (thông báo chứa
+  bộ nhớ trống, vốn luôn đổi), làm ngập danh sách sự kiện. Giờ nó được lập kế hoạch lại khi dung lượng thay đổi hoặc
+  sau 60 s, và sự kiện lặp lại tối đa 10 phút một lần. Lỗi lập kế hoạch khác (header GGUF không đọc được) dùng backoff
+  thay vì tải header ở mỗi tick. Start hoặc Save thử lại ngay.
+- Agent không bao giờ xóa log engine: mỗi lần launch ghi log mới, nên model liên tục lỗi làm đầy thư mục log. Giờ agent
+  giữ 200 log mới nhất của engine đã dừng và xóa log quá 7 ngày.
+- UI: GPU đã tắt trong pool vẫn chọn được cho model; tên server trong bộ chọn bị các dòng mờ vẽ đè khi cuộn.
+- Playground: tên model đã xóa vẫn nằm trong lựa chọn.
+
 ## [0.6.0] - 2026-10-05
 
 ### Thêm

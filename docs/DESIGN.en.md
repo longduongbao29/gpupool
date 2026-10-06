@@ -222,6 +222,10 @@ display, simulation and rebalancing.
    vocabulary); with the head's own GPU last only the hidden state (`n_embd x 4` bytes) crosses the network.
    The input embeddings are computed on the head's CPU either way. Non-local devices are named `RPC0`,
    `RPC1`... in this order.
+   **When that order has no feasible split** (typically the head's smallest GPU, last, cannot also hold the output
+   tensors: 2.5 GB for a 248k vocabulary), the planner tries each node as the head with its largest GPU last, then
+   each node as the tail with its largest device last (the logits then cross the network, which the speed estimate
+   counts). Placements that already fit keep the default order. A `NoFit` message lists each device's usable MB.
 
 Pins (`pin_devices`), GPUs switched off in the pool, and VRAM reserved by launching replicas are
 applied by the reconciler before planning by setting `usable_mb` to 0 or lowering it, so the
@@ -472,6 +476,14 @@ agents. One tick, in this order:
   crashes within 300 s of becoming ready (`model_fault`) feeds the same backoff and, from the second
   time, emits `crash_loop`. A replica that stays ready for 300 s clears it. A dead node or missing GPU
   is not the model's fault and does not count.
+- **Cannot place**: a model that does not fit (`NoFit`) is planned again when the capacity changes (usable
+  memory per device in 512 MB steps, or the set of live replicas: a GPU switched on, a replica stopped, a
+  server back) or after 60 s, not on every tick; its `realloc_failed` event repeats at most every 10 minutes
+  (the message carries free memory, which changes all the time). Any other planning error (for example a
+  GGUF header that cannot be read) uses the launch backoff. Starting or saving the model clears both, so a
+  retry from the UI runs at once.
+- **Engine logs**: each launch writes new `<engine_id>.log` files on the agents; every 10 minutes an agent
+  keeps the 200 newest logs of engines it no longer runs and deletes older ones and any older than 7 days.
 
 ### 10.2 Desired count, launch and drain
 
