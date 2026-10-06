@@ -10,6 +10,10 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ### Thêm
 
+- UI: diện mạo mới. Icon vẽ riêng cho gpupool (duotone; gradient và quầng sáng ở thanh điều hướng, ô thống kê
+  và Playground) và logo isometric; chuyển trang mờ dần có nhòe trong khi các khối của trang mới lần lượt nổi lên (View
+  Transitions API), vệt sáng điều hướng trượt giữa các mục, hộp thoại và menu bật ra có độ nảy, thẻ nhấc lên khi rê
+  chuột, nút chính dạng gradient và trang đăng nhập có aurora. Tất cả tắt khi bật "giảm chuyển động".
 - UI: xóa được sự kiện (*Clear all* ở trang Events, *Clear* trong menu thông báo); API
   `DELETE /api/events?up_to_id=`.
 - UI: hộp xác nhận của UI thay cho `confirm()` của trình duyệt ở mọi nơi (nút mang tên hành động, màu đỏ khi xóa,

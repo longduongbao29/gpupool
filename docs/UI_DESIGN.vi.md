@@ -364,3 +364,18 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
 - **Chân form model**: *Save* và *Save & Start* luôn ở bên phải, kể cả khi hàng nút xuống dòng.
 - **Playground**: model không còn tồn tại (đã xóa, hoặc được nhớ từ lần trước) không bao giờ được hiện: lựa chọn
   chuyển sang model đầu tiên chat được, hoặc để trống kèm gợi ý hãy start một model.
+
+## 15. Ngôn ngữ hình ảnh: icon và chuyển động
+
+- **Icon** được vẽ riêng cho gpupool, kiểu duotone: phần thân (`.b`, tô nhẹ bằng màu chữ), mặt tối (`.b2`), chi tiết
+  đặc (`.f`), nét nằm ngoài thân (`.o`) và nét chi tiết. Trong vùng `.vivid` (thanh điều hướng, ô thống kê,
+  Playground), phần thân là gradient (`<defs>` ở đầu `index.html`: blue, green, purple, amber, red, cyan) với chi tiết
+  trắng và quầng sáng nhẹ; mỗi mục điều hướng có tông màu riêng. Logo là khối lập phương isometric có mặt trên sáng.
+- **Chuyển trang** dùng View Transitions API: trang cũ nhòe, thu nhỏ nhẹ và mờ dần, trong khi các khối của trang mới
+  lần lượt nổi lên (cách nhau 70 ms); trình duyệt không có API này chỉ có hiệu ứng nổi lên. Thanh bên và phần đầu trang
+  đứng yên; vệt sáng điều hướng trượt tới mục mới với độ nảy nhẹ.
+- **Hộp thoại và menu** bật ra có độ nảy và nhòe ngắn; toast trượt vào; công tắc nảy; ô thống kê và thẻ model nhấc lên
+  khi rê chuột; nút chính là gradient xanh–tím.
+- **Đăng nhập**: ánh sáng aurora trôi chậm phía sau một thẻ kính mờ.
+- Hiệu ứng xuất hiện dùng `backwards`, nên hiệu ứng rê chuột vẫn hoạt động sau đó. Khi hệ điều hành bật "giảm chuyển
+  động", mọi hiệu ứng này tắt (không view transition, logo không trôi, không aurora).

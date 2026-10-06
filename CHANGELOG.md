@@ -10,6 +10,11 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Added
 
+- UI: a new look. Icons drawn for gpupool (duotone; gradient and glow in the navigation, stat cards and
+  Playground) and an isometric logo; page changes crossfade with blur while the new view's blocks rise one after
+  another (View Transitions API), a navigation highlight that glides between items, spring pops for dialogs and
+  menus, cards that lift under the pointer, a gradient primary button and an aurora sign-in page. All of it is off
+  with "reduce motion".
 - UI: events can be deleted (*Clear all* on the Events page, *Clear* in the notifications menu); API
   `DELETE /api/events?up_to_id=`.
 - UI: an in-app confirm dialog replaces the browser's `confirm()` everywhere (named action button, red when it deletes,

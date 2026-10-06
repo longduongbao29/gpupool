@@ -12,11 +12,24 @@
 <script defer src="vendor/alpine.min.js"></script>
 </head>
 <body x-data="app()" x-cloak>
+<!-- Shared gradients for the icons (".vivid") and the logo; stops are CSS variables, so they follow the theme.
+     A 0-size SVG, not display:none: hidden <defs> do not paint in every browser. -->
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false"><defs>
+  <linearGradient id="ig-blue" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-blue-a)"/><stop offset="1" style="stop-color:var(--g-blue-b)"/></linearGradient>
+  <linearGradient id="ig-green" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-green-a)"/><stop offset="1" style="stop-color:var(--g-green-b)"/></linearGradient>
+  <linearGradient id="ig-purple" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-purple-a)"/><stop offset="1" style="stop-color:var(--g-purple-b)"/></linearGradient>
+  <linearGradient id="ig-amber" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-amber-a)"/><stop offset="1" style="stop-color:var(--g-amber-b)"/></linearGradient>
+  <linearGradient id="ig-red" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-red-a)"/><stop offset="1" style="stop-color:var(--g-red-b)"/></linearGradient>
+  <linearGradient id="ig-cyan" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--g-cyan-a)"/><stop offset="1" style="stop-color:var(--g-cyan-b)"/></linearGradient>
+  <linearGradient id="lg-top" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7fe0ff"/><stop offset="1" stop-color="#4d7cff"/></linearGradient>
+  <linearGradient id="lg-left" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3f6bff"/><stop offset="1" stop-color="#2b2fc2"/></linearGradient>
+  <linearGradient id="lg-right" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7a5cff"/><stop offset="1" stop-color="#4a25d6"/></linearGradient>
+</defs></svg>
 
 <!-- ============ login ============ -->
 <div class="login" x-show="!authed" x-cloak>
   <form class="panel" @submit.prevent="login()">
-    <div class="logo" style="padding:0"><div class="mark" x-html="icon('chip')"></div> gpupool</div>
+    <div class="logo" style="padding:0"><div class="mark" x-html="logo()"></div> <span class="brand">gpupool</span></div>
     <h1>Sign in</h1>
     <div class="muted small">Enter the admin key of this coordinator.</div>
     <label class="field mt"><span>Admin key</span><input type="password" x-model="loginKey" autocomplete="current-password" autofocus placeholder="admin key"></label>
@@ -28,16 +41,17 @@
 <!-- ============ app ============ -->
 <div class="app" x-show="authed" x-cloak>
   <aside class="sidebar" :class="{open: navOpen}">
-    <div class="logo"><div class="mark" x-html="icon('chip')"></div> gpupool</div>
-    <nav class="nav">
-      <button :class="{active: view==='overview'}" @click="go('overview')"><span x-html="icon('grid')"></span> Overview</button>
-      <button :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
-      <button :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
-      <button :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
-      <button :class="{active: view==='playground'}" @click="go('playground')"><span x-html="icon('chat')"></span> Playground</button>
-      <button :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
+    <div class="logo"><div class="mark" x-html="logo()"></div> <span class="brand">gpupool</span></div>
+    <nav class="nav vivid" x-effect="view; $nextTick(() => { const b = $el.querySelector('button.active'); navY = b ? b.offsetTop : null; })">
+      <span class="nav-pill" aria-hidden="true" x-show="navY !== null" :style="'transform: translateY(' + navY + 'px)'"></span>
+      <button class="vivid blue" :class="{active: view==='overview'}" @click="go('overview')"><span x-html="icon('grid')"></span> Overview</button>
+      <button class="vivid cyan" :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
+      <button class="vivid green" :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
+      <button class="vivid purple" :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
+      <button class="vivid blue" :class="{active: view==='playground'}" @click="go('playground')"><span x-html="icon('chat')"></span> Playground</button>
+      <button class="vivid amber" :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
         <span class="pill red right" x-show="unread() > 0" x-text="unread()"></span></button>
-      <button :class="{active: view==='settings'}" @click="go('settings')"><span x-html="icon('gear')"></span> Settings</button>
+      <button class="vivid blue" :class="{active: view==='settings'}" @click="go('settings')"><span x-html="icon('gear')"></span> Settings</button>
     </nav>
     <div class="side-foot">
       <div class="sys"><span class="dot" :class="{off: !online}"></span>
@@ -107,16 +121,16 @@
     <div class="stats view" x-show="view==='overview'">
       <div class="panel stat"><div><div class="l">Total Servers</div>
         <div class="v"><span x-text="summary().servers_online"></span><small> / <span x-text="summary().servers_total"></span></small></div></div>
-        <div class="ico blue" x-html="icon('server')"></div></div>
+        <div class="ico vivid blue" x-html="icon('server')"></div></div>
       <div class="panel stat"><div><div class="l">Total GPUs (in pool)</div>
         <div class="v"><span x-text="summary().gpus_enabled"></span><small> / <span x-text="summary().gpus_total"></span></small></div></div>
-        <div class="ico green" x-html="icon('chip')"></div></div>
+        <div class="ico vivid green" x-html="icon('chip')"></div></div>
       <div class="panel stat"><div><div class="l">Running Models</div>
         <div class="v" x-text="summary().models_running"></div></div>
-        <div class="ico purple" x-html="icon('cube')"></div></div>
+        <div class="ico vivid purple" x-html="icon('cube')"></div></div>
       <div class="panel stat"><div><div class="l">Free pool VRAM</div>
         <div class="v"><span x-text="freePoolGb()"></span> <small>GB</small></div></div>
-        <div class="ico amber" x-html="icon('db')"></div></div>
+        <div class="ico vivid amber" x-html="icon('db')"></div></div>
     </div>
 
     <!-- ============ servers (overview + servers) ============ -->
@@ -133,7 +147,7 @@
                 <div class="name"><span x-text="s.node_id"></span>
                   <span class="pill green lead live" x-show="s.alive">Online</span>
                   <span class="pill red lead" x-show="!s.alive">Offline</span>
-                  <span class="pill amber lead" x-show="llamaOdd(s)" :title="'Most servers run llama.cpp ' + llamaMajority() + ', this one ' + llamaVer(s) + '. A model split over servers needs the same RPC protocol on all of them: upgrade every agent to the same image.'">Different llama.cpp</span></div>
+                  <span class="pill amber lead keep-case" x-show="llamaOdd(s)" :title="'Most servers run llama.cpp ' + llamaMajority() + ', this one ' + llamaVer(s) + '. A model split over servers needs the same RPC protocol on all of them: upgrade every agent to the same image.'">Different llama.cpp</span></div>
                 <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span><span x-show="llamaVer(s)"> &middot; llama.cpp <span x-text="llamaVer(s)"></span></span></div>
               </div>
               <div class="meters" x-show="s.report">
@@ -608,7 +622,7 @@
           </div>
           <div class="pg-log" id="pg-log">
             <div class="pg-empty" x-show="!pg.msgs.length">
-              <div class="pg-empty-ico" x-html="icon('chat')"></div>
+              <div class="pg-empty-ico vivid" x-html="icon('chat')"></div>
               <div x-show="!pgBlock()"><b>Send a message to start.</b><br><span class="muted">Replies stream as they are generated, with their latency and speed.</span></div>
               <div x-show="pgBlock()" class="muted" x-text="pgBlock()"></div>
             </div>
@@ -617,7 +631,7 @@
                 <div class="pg-bubble" x-show="a.role === 'user'" x-text="a.content"></div>
                 <template x-if="a.role === 'assistant'">
                   <div class="pg-reply">
-                    <div class="pg-who"><span class="pg-ava" x-html="icon('cube')"></span><span x-text="a.model"></span></div>
+                    <div class="pg-who"><span class="pg-ava vivid purple" x-html="icon('cube')"></span><span x-text="a.model"></span></div>
                     <details class="pg-think" x-show="a.reasoning" :open="a.streaming && !a.full">
                       <summary x-text="a.streaming && !a.full ? 'Thinking…' : 'Thought process'"></summary>
                       <div class="pg-text muted" x-text="a.rshown"></div>

@@ -18,38 +18,50 @@ function savedTheme() {
 }
 applyTheme(savedTheme());
 
-// Inline SVG icons (stroke style). Keyed by name; rendered through icon().
+// Inline SVG icons, duotone: ".b" is the body (a soft fill of the text colour, or a gradient inside a
+// ".vivid" container), ".b2" a shaded face, ".f" solid details, ".o" lines outside the body (they
+// take the tone's colour when vivid, white would vanish on a light page), plain paths are detail lines. One
+// drawing serves both looks; styles.css decides which. Rendered through icon().
 var ICONS = {
-  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-  server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
-  chip: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
-  cube: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 12l9-5M12 12v10M12 12L3 7"/>',
-  gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
-  play: '<path d="M6 4l14 8-14 8z"/>',
-  bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
-  db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  grid: '<rect class="b" x="3" y="3" width="18" height="18" rx="5"/><path d="M7.5 15.5a4.5 4.5 0 0 1 9 0"/><path d="M12 15.5l2.6-3.2"/><circle class="f" cx="12" cy="15.5" r="1.3"/>',
+  server: '<rect class="b" x="3.5" y="3.5" width="17" height="7.5" rx="2.5"/><rect class="b" x="3.5" y="13" width="17" height="7.5" rx="2.5"/><circle class="f" cx="7.5" cy="7.25" r="1.15"/><circle class="f" cx="7.5" cy="16.75" r="1.15"/><path d="M11.5 7.25h5M11.5 16.75h5"/>',
+  chip: '<rect class="b" x="5" y="5" width="14" height="14" rx="3.5"/><path class="o" d="M9 2.5v2.5M15 2.5v2.5M9 19v2.5M15 19v2.5M2.5 9h2.5M2.5 15h2.5M19 9h2.5M19 15h2.5"/><rect class="f" x="9" y="9" width="6" height="6" rx="1.5"/>',
+  cube: '<path class="b" d="M12 2.8l8 4.4v9.6l-8 4.4-8-4.4V7.2z"/><path class="b2" d="M12 12l8-4.8v9.6L12 21.2z"/><path d="M4 7.2l8 4.8 8-4.8M12 12v9.2"/>',
+  chat: '<path class="b" d="M4 6.5A3.5 3.5 0 0 1 7.5 3h9A3.5 3.5 0 0 1 20 6.5v6a3.5 3.5 0 0 1-3.5 3.5H11l-4.5 4v-4A2.5 2.5 0 0 1 4 13.5z"/><circle class="f" cx="8.5" cy="9.5" r="1.15"/><circle class="f" cx="12" cy="9.5" r="1.15"/><circle class="f" cx="15.5" cy="9.5" r="1.15"/>',
+  gear: '<path class="b" d="M12 2.5l1.6 2.2 2.7-.6.6 2.7 2.4 1.3-1 2.6 1 2.6-2.4 1.3-.6 2.7-2.7-.6L12 21.5l-1.6-2.2-2.7.6-.6-2.7-2.4-1.3 1-2.6-1-2.6 2.4-1.3.6-2.7 2.7.6z"/><circle cx="12" cy="12" r="3"/>',
+  play: '<path class="b" d="M7.5 4.8v14.4a1 1 0 0 0 1.5.86l11.3-7.2a1 1 0 0 0 0-1.7L9 3.94a1 1 0 0 0-1.5.86z"/>',
+  bolt: '<path class="b" d="M13.5 2.5L5 13.5h6l-1 8 8.5-11h-6z"/>',
+  db: '<path class="b" d="M4.5 6v12c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3V6"/><ellipse class="b2" cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 12c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3"/>',
+  search: '<circle class="b" cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5l5 5"/><path d="M7.8 9.2a3 3 0 0 1 2.4-2"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
-  chev: '<path d="M9 6l6 6-6 6"/>',
-  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
-  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
-  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
-  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
-  edit: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
-  menu: '<path d="M3 6h18M3 12h18M3 18h18"/>',
-  x: '<path d="M18 6L6 18M6 6l12 12"/>',
-  key: '<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L21 2M16 7l3 3"/>',
-  bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',
-  alert: '<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
-  info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/>',
-  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
-  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
-  down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  chev: '<path d="M9.5 6l6 6-6 6"/>',
+  trash: '<path class="b" d="M6 7.5h12l-1 11.5a2 2 0 0 1-2 1.8H9a2 2 0 0 1-2-1.8z"/><path d="M4 7.5h16M9.5 7.5V5a1.5 1.5 0 0 1 1.5-1.5h2A1.5 1.5 0 0 1 14.5 5v2.5M10 11.5v5M14 11.5v5"/>',
+  copy: '<rect class="b" x="8.5" y="8.5" width="12" height="12" rx="3"/><path d="M5.5 15.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5h9A1.5 1.5 0 0 1 15.5 5v.5"/>',
+  logout: '<path class="b" d="M4 5.5a2 2 0 0 1 2-2h5v17H6a2 2 0 0 1-2-2z"/><path d="M15 8l4 4-4 4M19 12h-9"/>',
+  stop: '<rect class="b" x="5.5" y="5.5" width="13" height="13" rx="3"/>',
+  edit: '<path class="b" d="M15.5 4.5l4 4L9 19H5v-4z"/><path d="M13.5 6.5l4 4M13 20h7"/>',
+  menu: '<path d="M4 7h16M4 12h10M4 17h16"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  key: '<circle class="b" cx="8" cy="15" r="4.5"/><path d="M11.3 11.7L20 3M16 7l3 3M17.5 5.5l1.5 1.5"/><circle class="f" cx="8" cy="15" r="1.3"/>',
+  bell: '<path class="b" d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+  alert: '<path class="b" d="M10.3 3.9L2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4.5"/><circle class="f" cx="12" cy="17" r="1.15"/>',
+  info: '<circle class="b" cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle class="f" cx="12" cy="7.8" r="1.15"/>',
+  list: '<rect class="b" x="3" y="4" width="18" height="16" rx="4"/><path d="M6.5 12.5H9l1.8-4 2.6 8 1.8-4h2.3"/>',
+  up: '<path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/>',
+  down: '<path d="M12 5v14M18.5 12.5L12 19l-6.5-6.5"/>',
   swap: '<path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
-  moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
-  chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/>',
-  send: '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/>'
+  moon: '<path class="b" d="M20.5 13.5A8.5 8.5 0 1 1 10.5 3.5a6.8 6.8 0 0 0 10 10z"/>',
+  send: '<path class="b" d="M21 3L3 10.5l7 2.5 2.5 7z"/><path d="M21 3L10 13"/>'
 };
+
+// The logo: an isometric cube (a pool of GPUs) with a lit top face; gradients come from the
+// <defs> at the top of index.html, so they follow the theme there.
+var LOGO = '<svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true">' +
+  '<path d="M16 2.5l12 6.8v13.4l-12 6.8-12-6.8V9.3z" fill="url(#lg-left)"/>' +
+  '<path d="M16 16.2l12-6.9v13.4l-12 6.8z" fill="url(#lg-right)"/>' +
+  '<path d="M16 2.5l12 6.8-12 6.9L4 9.3z" fill="url(#lg-top)"/>' +
+  '<path d="M16 7.4l6.6 3.8-6.6 3.8-6.6-3.8z" fill="#fff" fill-opacity=".92"/>' +
+  '<path d="M16 15v9.3M9.4 11.2v7.6M22.6 11.2v7.6" stroke="#fff" stroke-opacity=".28" stroke-width="1.2" fill="none"/></svg>';
 
 // Event kinds with their own look; other kinds fall back to the level (info/warning/error).
 var EV_KIND = {
@@ -191,6 +203,7 @@ function app() {
     form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, plan: null, rec: null, recBusy: false, sim: null, simBusy: false }, scalingForm(null), perfForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
     ask: null, // the open confirm dialog: { title, body, ok, cancel, danger, resolve }
+    navY: null, // top of the active navigation item: the sliding highlight follows it
     // Playground: chat with a deployed model through the same /v1 route clients use
     pg: Object.assign({ input: "", msgs: [], busy: false, ctrl: null, raf: 0 }, pgSaved()),
     sc: {}, // model name -> { open, busy, data, err } for the "Scaling details" panel
@@ -219,6 +232,7 @@ function app() {
     icon: function (name) {
       return '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">' + (ICONS[name] || "") + "</svg>";
     },
+    logo: function () { return LOGO; },
 
     // ================= HTTP =================
     api: async function (method, path, body) {
@@ -1685,7 +1699,19 @@ function app() {
         "resp = client.chat.completions.create(\n    model=\"" + name + "\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(resp.choices[0].message.content)";
     },
 
-    go: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
+    // Switching views crossfades the old page out (blur, slight zoom) while the new one rises in;
+    // the View Transitions API snapshots the old page, browsers without it just get the rise.
+    go: function (v) {
+      var self = this;
+      var reduce = false;
+      try { reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { /* old browser */ }
+      if (v !== this.view && !reduce && document.startViewTransition) {
+        document.startViewTransition(function () { return new Promise(function (done) { self.goNow(v); self.$nextTick(done); }); });
+      } else {
+        this.goNow(v);
+      }
+    },
+    goNow: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
     title: function () {
       return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers", "Manage servers and the GPUs in the pool"],
         gpus: ["GPUs", "Every GPU across all servers"], events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"],
