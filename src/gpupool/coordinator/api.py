@@ -249,7 +249,8 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             # the memory factor planning uses (measured / estimated VRAM), null until measured
             "calibration": ({"factor": round(planning_factor(cal["factor"]), 3), "samples": cal["samples"]}
                             if cal else None),
-            "replicas": [{**r.model_dump(mode="json"), "outstanding": balancer.outstanding(r.replica_id)}
+            "replicas": [{**r.model_dump(mode="json"), "outstanding": balancer.outstanding(r.replica_id),
+                          "stage": reconciler.stage(r.replica_id)}
                          for r in listed],
         }
 

@@ -498,7 +498,7 @@ Everything the web UI shows, in one call (admin key).
 | `error` | reason for `failed`, or the newest replica error while `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | the **VRAM self-calibration** block, `{"factor": 1.04, "samples": 3}`, or `null` until a replica of the model was measured. See below |
-| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) plus `outstanding` (requests in flight). Lists live replicas and the newest failed one |
+| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) plus `outstanding` (requests in flight) and `stage` (`{text, since}` while a launch is under way: checking or downloading the model file with progress, starting RPC servers, loading with llama-server's latest log line; null otherwise). Lists live replicas and the newest failed one |
 
 **`calibration`.** After a replica becomes ready, the coordinator asks the head's agent for what
 llama.cpp really allocated (`GET /engines/{engine_id}/memory`, section 10), compares it with the estimate
@@ -588,6 +588,7 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | GET | `/engines/{engine_id}/memory` | per-device buffers llama.cpp reported at load |
 | DELETE | `/engines/{engine_id}` | stop an engine, returns its `EngineStatus` |
 | POST | `/models/ensure` | make sure a model file is in the local cache |
+| GET | `/models/progress` | downloads in flight: `{name: {file, part, parts, got, total}}` (bytes of the current file; `total` null when the source does not say) |
 
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` or `"<replica_id>-rpc-<first device_id>"`),
 `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: one or more distinct local devices, served by one process; server: ordered list such as

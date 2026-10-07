@@ -1110,7 +1110,8 @@ function app() {
           note: self.replicaNote(r), mark: self.replicaMark(m, r),
           devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }),
           tps: self.tps(r.placement.est_decode_tps), draft: r.placement.draft_est_mb ? "+draft " + Math.round(r.placement.draft_est_mb) + " MB" : "", reasons: (r.placement.reasons || []).join("; "),
-          time: self.tokenTime(r.placement) });
+          time: self.tokenTime(r.placement),
+          stage: r.stage ? r.stage.text + " (" + self.ago(r.stage.since).replace(/ ago$/, "") + ")" : "" });
       });
       return out;
     },

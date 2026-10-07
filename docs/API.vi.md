@@ -496,7 +496,7 @@ Mục trong `models[]`:
 | `error` | lý do của `failed`, hoặc lỗi của replica mới nhất khi đang `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | khối **tự hiệu chỉnh VRAM**, `{"factor": 1.04, "samples": 3}`, hoặc `null` cho tới khi một replica của model được đo. Xem bên dưới |
-| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) cộng `outstanding` (số request đang chạy). Liệt kê replica còn sống và replica lỗi mới nhất |
+| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) cộng `outstanding` (số request đang chạy) và `stage` (`{text, since}` khi đang launch: kiểm tra hoặc tải file model kèm tiến độ, khởi động RPC server, nạp model kèm dòng log mới nhất của llama-server; null khi không launch). Liệt kê replica còn sống và replica lỗi mới nhất |
 
 **`calibration`.** Khi một replica chuyển sang ready, coordinator hỏi agent của head xem llama.cpp thực sự
 đã cấp phát bao nhiêu (`GET /engines/{engine_id}/memory`, mục 10), so với ước lượng (trừ phần context
@@ -585,6 +585,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | GET | `/engines/{engine_id}/memory` | các buffer theo thiết bị mà llama.cpp báo lúc load |
 | DELETE | `/engines/{engine_id}` | dừng một engine, trả `EngineStatus` của nó |
 | POST | `/models/ensure` | đảm bảo file model có trong cache cục bộ |
+| GET | `/models/progress` | các lượt tải đang chạy: `{name: {file, part, parts, got, total}}` (byte của file hiện tại; `total` là null khi nguồn không cho biết) |
 
 **`POST /engines`** body `EngineSpec`: `engine_id` (`"<replica_id>-head"` hoặc
 `"<replica_id>-rpc-<device_id đầu tiên>"`), `kind` (`"rpc"`/`"server"`), `port`, `devices` (rpc: một hoặc nhiều

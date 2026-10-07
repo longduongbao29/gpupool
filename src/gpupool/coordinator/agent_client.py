@@ -76,6 +76,16 @@ class AgentClient:
         self._check(r)
         return r.json()["path"]
 
+    async def download_progress(self, agent_url: str) -> dict:
+        """{model name: {"file", "part", "parts", "got", "total"}} for the agent's downloads in
+        flight; {} from an agent too old to have the endpoint."""
+        r = await self._call("GET", f"{agent_url.rstrip('/')}/models/progress", timeout=httpx.Timeout(5.0))
+        if r.status_code == 404:
+            return {}
+        self._check(r)
+        data = r.json()
+        return data if isinstance(data, dict) else {}
+
     async def report(self, agent_url: str) -> NodeReport:
         r = await self._call("GET", f"{agent_url.rstrip('/')}/report", timeout=httpx.Timeout(5.0))
         self._check(r)
