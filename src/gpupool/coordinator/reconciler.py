@@ -76,6 +76,12 @@ def _progress_text(d: dict) -> str:
     return out + _gb(got)
 
 
+def _failure_sig(text: str, replica_id: str) -> str:
+    """`text` without the replica id and numbers (ports, exit codes, log timestamps): the same
+    failure on the next attempt compares equal."""
+    return re.sub(r"\d+", "#", text.replace(replica_id, "<replica>"))
+
+
 # llama.cpp's log prefix with timestamps on ("0.02.938.583 I "): not worth showing
 _LOG_PREFIX = re.compile(r"^\d+\.\d+\.\d+\.\d+ [A-Z] ")
 
@@ -182,6 +188,7 @@ class Reconciler:
     # A move reloads a whole model, so it must be clearly better, not just better (score points).
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
+    REPEAT_EVENT_S = 600.0  # a failure that keeps repeating the same way notifies at most this often
     BUSY_PORT_S = 3600.0  # how long a port another process held is skipped on that node
     CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
     SPEED_SAMPLE_S = 60.0  # how often ready replicas feed the speed model
@@ -219,6 +226,8 @@ class Reconciler:
         # The coordinator only knows the ports it handed out, so without this it would pick the
         # same busy port on every retry and the model would never start.
         self._busy_ports: dict[str, dict[int, float]] = {}
+        # (event kind, model) -> (what failed, when last notified, retries not notified since)
+        self._repeats: dict[tuple[str, str], tuple[str, float, int]] = {}
         self._suspect: set[str] = set()
         self._tick_lock = asyncio.Lock()
         self._nofit: dict[str, str] = {}
@@ -953,6 +962,21 @@ class Reconciler:
         except Exception:  # an event problem must never break reconciliation
             log.exception("emitting event failed")
 
+    def _emit_repeat(self, level: str, kind: str, model: str, sig: str, message: str, now: float,
+                     **kw) -> None:
+        """Emit, except that a failure repeating with the same `sig` notifies at most once per
+        REPEAT_EVENT_S. Retries of a model that cannot start (backing off up to 5 min) otherwise
+        raised a notification every minute or few; they still go to the log every time."""
+        key = (kind, model)
+        last = self._repeats.get(key)
+        if last is not None and last[0] == sig and now - last[1] < self.REPEAT_EVENT_S:
+            self._repeats[key] = (sig, last[1], last[2] + 1)
+            return
+        if last is not None and last[0] == sig and last[2]:
+            message += f" (the same failure {last[2]} more time{'s' if last[2] > 1 else ''} since the last notice)"
+        self._repeats[key] = (sig, now, 0)
+        self._emit(level, kind, message, model=model, **kw)
+
     def _track_nodes(self, nodes: dict[str, NodeRecord], now: float) -> None:
         """node_offline / node_online, once per liveness transition."""
         for gone in set(self._node_up) - set(nodes):
@@ -1028,9 +1052,9 @@ class Reconciler:
         if model_fault and rec.state == "ready" and now - rec.updated_at < self.STABLE_S:
             n, delay = self._bump_backoff(rec.model, now)
             if n >= 2:
-                self._emit("warning", "crash_loop",
-                           f"{rec.model} crashed {n} times shortly after start; next attempt in {delay:.0f} s",
-                           model=rec.model)
+                self._emit_repeat("warning", "crash_loop", rec.model, "crash_loop",
+                                  f"{rec.model} crashed {n} times shortly after start; next attempt in "
+                                  f"{delay:.0f} s", now)
         entry = self._realloc.get(rec.model)
         if entry is None:
             self._realloc[rec.model] = _Realloc(since=now, lost=(rec.replica_id, reason))
@@ -1090,16 +1114,17 @@ class Reconciler:
                 st = next((e for e in nr.report.engines if e.engine_id == eid), None)
                 if st is not None and st.state in ("exited", "failed"):
                     tail = " | ".join(st.log_tail[-5:])
-                    self._emit("error", "engine_crashed",
-                               f"Engine {eid} on {node_id} {st.state} (exit code {st.exit_code}); "
-                               f"last log: {tail or 'n/a'}", node_id=node_id, model=rec.model)
+                    msg = (f"Engine {eid} on {node_id} {st.state} (exit code {st.exit_code}); "
+                           f"last log: {tail or 'n/a'}")
+                    self._emit_repeat("error", "engine_crashed", rec.model, _failure_sig(msg, rec.replica_id),
+                                      msg, now, node_id=node_id)
                     await self._fail(rec, f"engine {eid} {st.state} (exit={st.exit_code}) {tail}".strip(), nodes, now,
                                      model_fault=True)
                     break
                 if st is None and nr.last_seen > rec.updated_at:
-                    self._emit("error", "engine_crashed",
-                               f"Engine {eid} vanished from the report of {node_id}", node_id=node_id,
-                               model=rec.model)
+                    msg = f"Engine {eid} vanished from the report of {node_id}"
+                    self._emit_repeat("error", "engine_crashed", rec.model, _failure_sig(msg, rec.replica_id),
+                                      msg, now, node_id=node_id)
                     await self._fail(rec, f"engine {eid} missing from {node_id} report", nodes, now,
                                      model_fault=True)
                     break
@@ -1366,6 +1391,8 @@ class Reconciler:
             self.store.set_replica_state(rid, "ready", None, now=self.clock())
             became_ready = True
             log.info("replica %s ready", rid)
+            for key in [k for k in self._repeats if k[1] == spec.name]:
+                del self._repeats[key]  # serving again: the next failure is news
             entry = self._realloc.pop(spec.name, None)
             if entry is not None:
                 self._emit("info", "realloc_done",
@@ -1389,14 +1416,21 @@ class Reconciler:
                 except Exception:
                     pass
             log.warning("launch of %s failed: %s", rid, err)
-            self._emit("error", "launch_failed", f"Launch of {spec.name} (replica {rid}) failed: {err[:500]}",
-                       node_id=p.head_node, model=spec.name)
+            now = self.clock()
+            retry = ""
+            if not isinstance(e, _PortTaken):  # a busy port is now skipped: retry at once on another
+                n, delay = self._bump_backoff(spec.name, now)
+                retry = f"; retrying in {delay:.0f} s (attempt {n + 1})"
+            # what failed, without the replica id or the head log's timestamps: the same failure on
+            # the next attempt must compare equal
+            sig = _failure_sig(f"{type(e).__name__}: {e}", rid)
+            self._emit_repeat("error", "launch_failed", spec.name, sig,
+                              f"Launch of {spec.name} (replica {rid}) failed: {err[:500]}{retry}", now,
+                              node_id=p.head_node)
             await asyncio.shield(self._rollback(created))
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
-            if not isinstance(e, _PortTaken):  # a busy port is now skipped: retry at once on another
-                self._bump_backoff(spec.name, self.clock())
         finally:
             try:
                 if became_ready:

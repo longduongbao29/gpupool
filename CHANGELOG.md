@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A model that keeps failing to start no longer raises a notification on every retry (every minute or few while
+  the retry backs off up to 5 minutes). `launch_failed`, `engine_crashed` and `crash_loop` for the same failure
+  notify at most every 10 minutes, saying how many retries failed the same way since; a different failure, or the
+  first one after the model served again, notifies at once. `launch_failed` also says when the next attempt is.
+
 ## [0.7.3] - 2026-10-07
 
 ### Fixed

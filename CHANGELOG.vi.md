@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Model không khởi động được không còn tạo thông báo ở mỗi lần thử lại (mỗi một vài phút khi thời gian chờ tăng
+  dần tới 5 phút). `launch_failed`, `engine_crashed` và `crash_loop` cho cùng một lỗi chỉ thông báo tối đa mỗi 10
+  phút, kèm số lần thử lại đã lỗi y như vậy; lỗi khác, hoặc lỗi đầu tiên sau khi model đã chạy lại được, thông báo
+  ngay. `launch_failed` còn cho biết khi nào thử lại.
+
 ## [0.7.3] - 2026-10-07
 
 ### Sửa lỗi
