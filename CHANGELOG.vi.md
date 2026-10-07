@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- Launch đang nạp weights không còn bị dừng ở `launch_timeout_s`: khi llama-server còn báo tiến độ nạp, thời gian chờ
+  tính từ lần tiến độ gần nhất. Trước đây lần nạp đầu gửi nhiều GB sang GPU máy khác qua mạng chậm bị lỗi ở phút
+  thứ 10 và phải bắt đầu lại.
+- Bước launch hiện phần trăm đã nạp (các dấu chấm tiến độ của llama.cpp) và bỏ tiền tố thời gian trong log llama.cpp.
+
 ## [0.7.2] - 2026-10-07
 
 ### Thêm

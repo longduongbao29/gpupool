@@ -643,7 +643,7 @@ dicts (`GPUPOOL_PATH_MAP`, `GPUPOOL_BUDGET_MB`) are JSON, booleans accept `1/0/t
 | `GPUPOOL_MAX_REQUEST_MB` | `32` | largest `/v1` request body in MB (bigger gets HTTP 413) |
 | `GPUPOOL_COLD_START_TIMEOUT_S` | `120` | how long a request waits for an unloaded (on-demand) model before HTTP 503 |
 | `GPUPOOL_REBALANCE_S` | `600` | how often replicas with a clearly better placement are moved (one at a time, new one first); `0` = only on demand (`POST /api/rebalance`) |
-| `GPUPOOL_LAUNCH_TIMEOUT_S` | `600` | a replica not ready after this long is marked failed |
+| `GPUPOOL_LAUNCH_TIMEOUT_S` | `600` | a replica not ready after this long is marked failed; while llama-server reports loading progress the time counts from the latest progress |
 | `GPUPOOL_LOW_FREE_MB` | `256` | a device with less free memory than this while hosting an engine makes the replica move |
 | `GPUPOOL_DRAIN_TIMEOUT_S` | `60` | how long a stopping replica gets to finish its requests |
 | `GPUPOOL_PORT_RANGE` | `9000-9999` | ports handed to engines on the servers (open them between servers) |

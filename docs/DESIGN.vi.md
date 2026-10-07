@@ -475,7 +475,7 @@ theo thứ tự:
 - Replica ready trên device có `free_mb < low_free_mb` (256) được thay thế trước: launch một replica mới, và
   drain cái cũ khi cái mới đã ready.
 - **Launch**: `ensure` model (và draft) trên head trong lúc các engine rpc khởi động (mỗi cái với
-  `allowed_peers` = host của head) và chuyển sang running; khi cả hai xong thì khởi động head; chờ `/health` 200 (`launch_timeout_s`, 600 s); đánh dấu
+  `allowed_peers` = host của head) và chuyển sang running; khi cả hai xong thì khởi động head; chờ `/health` 200 (`launch_timeout_s`, 600 s, tính từ lần tiến độ nạp gần nhất khi llama-server còn in tiến độ); đánh dấu
   `ready`; hiệu chỉnh (mục 12). Bất kỳ lỗi nào đều dừng mọi engine đã tạo, nên replica launch dở không bao
   giờ ghim VRAM trên GPU dùng chung.
 - Replica bị drain hoặc fail trong lúc launch được rollback lặng lẽ (không tính là launch thất bại).

@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A launch that is still loading weights is no longer killed at `launch_timeout_s`: while llama-server reports load
+  progress the timeout counts from the latest progress. A first load that sends many GB to remote GPUs over a slow
+  link used to fail at 10 minutes and start over.
+- The launch stage shows the load percent (llama.cpp's progress dots) and drops llama.cpp's log timestamp prefix.
+
 ## [0.7.2] - 2026-10-07
 
 ### Added

@@ -72,6 +72,32 @@ def _progress_text(d: dict) -> str:
     return out + _gb(got)
 
 
+# llama.cpp's log prefix with timestamps on ("0.02.938.583 I "): not worth showing
+_LOG_PREFIX = re.compile(r"^\d+\.\d+\.\d+\.\d+ [A-Z] ")
+
+
+def _load_status(log_tail: list[str]) -> tuple[str, int | None]:
+    """(latest meaningful log line, model load percent or None) from llama-server's log tail.
+
+    While loading weights llama.cpp prints one dot per percent on a line of its own and ends it
+    at 100% (llama_model_load's default progress callback); the agent's tail includes that
+    unfinished line. Weights for RPC devices are sent during this same load, so the dots cover
+    the network transfer too."""
+    pct = None
+    last = ""
+    for ln in reversed(log_tail):
+        t = _LOG_PREFIX.sub("", ln.strip())
+        if not t:
+            continue
+        if set(t) == {"."}:
+            if pct is None and not last:
+                pct = min(100, len(t))
+            continue
+        last = t
+        break
+    return last, pct
+
+
 def _port_of(endpoint: str) -> int:
     return int(endpoint.rsplit(":", 1)[1])
 
@@ -1528,6 +1554,7 @@ class Reconciler:
     async def _wait_health(self, agent_url: str, head_id: str, health_url: str, rid: str | None = None) -> None:
         deadline = time.monotonic() + self.cfg.launch_timeout_s
         stage = self._stages.get(rid, ("", 0.0))[0] if rid else ""
+        best_pct = -1
         while True:
             try:
                 r = await self._http_client().get(health_url)
@@ -1538,10 +1565,18 @@ class Reconciler:
             st = await self.client.get_engine(agent_url, head_id)
             if st is not None and st.state in ("exited", "failed"):
                 raise LaunchError(f"head engine {st.state} (exit={st.exit_code})")
-            if rid and stage and st is not None and st.log_tail:
-                # llama-server's latest line says where loading is (tensors, KV cache, warmup)
-                last = next((ln.strip() for ln in reversed(st.log_tail) if ln.strip(".\n ")), "")
-                self._set_stage(rid, f"{stage}: {last[:160]}" if last else stage)
+            if st is not None and st.log_tail:
+                last, pct = _load_status(st.log_tail)
+                if pct is not None and pct > best_pct:
+                    # Still loading: a first load that sends many GB to remote GPUs over a slow
+                    # link can take longer than launch_timeout_s, and killing it would restart
+                    # it from scratch. The timeout counts from the last progress instead.
+                    best_pct = pct
+                    deadline = max(deadline, time.monotonic() + self.cfg.launch_timeout_s)
+                if rid and stage:
+                    detail = ", ".join(x for x in (f"{pct}%" if pct is not None else "", last[:160]) if x)
+                    self._set_stage(rid, f"{stage}: {detail}" if detail else stage)
             if time.monotonic() > deadline:
-                raise LaunchError(f"{health_url} not healthy after {self.cfg.launch_timeout_s}s")
+                raise LaunchError(f"{health_url} not healthy after {self.cfg.launch_timeout_s}s"
+                                  + (" without loading progress" if best_pct >= 0 else ""))
             await asyncio.sleep(self.poll_s)

@@ -497,7 +497,7 @@ agents. One tick, in this order:
   launched, and the old one drained once the new one is ready.
 - **Launch**: `ensure` the model (and the draft) on the head while the rpc engines start (each with
   `allowed_peers` = the head's host) and become running; once both are done, start the head; wait for `/health` 200
-  (`launch_timeout_s`, 600 s); mark `ready`; calibrate (section 12). Any failure stops every engine
+  (`launch_timeout_s`, 600 s, counted from the latest load progress while llama-server prints it); mark `ready`; calibrate (section 12). Any failure stops every engine
   created so far, so a half-launched replica never pins VRAM on a shared GPU.
 - A replica drained or failed while launching is rolled back quietly (it is not a launch failure).
 - **Drain**: wait for outstanding = 0 (at most `drain_timeout_s`, 60 s), stop engines, mark `stopped`.

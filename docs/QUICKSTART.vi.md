@@ -633,7 +633,7 @@ viết `9000-9999`. Mọi mục dưới đây đều tuỳ chọn, trừ `GPUPOO
 | `GPUPOOL_MAX_REQUEST_MB` | `32` | kích thước tối đa của một request `/v1`, tính bằng MB (lớn hơn nhận HTTP 413) |
 | `GPUPOOL_COLD_START_TIMEOUT_S` | `120` | thời gian một request chờ model đã dỡ (theo yêu cầu) load lại, quá thì trả HTTP 503 |
 | `GPUPOOL_REBALANCE_S` | `600` | chu kỳ di chuyển replica sang vị trí tốt hơn rõ rệt (mỗi lần một replica, chạy bản mới trước); `0` = chỉ khi gọi tay (`POST /api/rebalance`) |
-| `GPUPOOL_LAUNCH_TIMEOUT_S` | `600` | replica chưa sẵn sàng sau thời gian này bị đánh dấu failed |
+| `GPUPOOL_LAUNCH_TIMEOUT_S` | `600` | replica chưa sẵn sàng sau thời gian này bị đánh dấu failed; khi llama-server còn báo tiến độ nạp thì thời gian tính từ lần tiến độ gần nhất |
 | `GPUPOOL_LOW_FREE_MB` | `256` | thiết bị đang chạy engine mà bộ nhớ trống thấp hơn mức này thì replica bị di chuyển |
 | `GPUPOOL_DRAIN_TIMEOUT_S` | `60` | thời gian replica đang dừng được cho để xử lý nốt request |
 | `GPUPOOL_PORT_RANGE` | `9000-9999` | các cổng cấp cho engine trên server (cần mở giữa các server) |
