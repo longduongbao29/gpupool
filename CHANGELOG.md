@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-07
+
 ### Added
 
 - A launching replica shows what it is doing and for how long, on the Models page and in `replicas[].stage`:
@@ -364,7 +366,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
