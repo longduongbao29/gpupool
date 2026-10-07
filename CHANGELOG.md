@@ -8,6 +8,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Placement: a GPU too full to hold even one layer (e.g. 250 MB left) no longer makes every split of its node
+  infeasible. Multi-node placements take whole nodes and each device of a split needs a layer, so such a GPU next to a
+  roomy one caused a NoFit while the pool had plenty of room; it is now left out of the split.
+
 ## [0.7.0] - 2026-10-06
 
 ### Added
