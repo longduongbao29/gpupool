@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.7.1] - 2026-10-07
+
 ### Sửa lỗi
 
 - Placement: một GPU đầy tới mức không chứa nổi một layer (vd. còn 250 MB) không còn làm mọi cách chia trên node của
@@ -351,7 +353,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/longduongbao29/gpupool/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/longduongbao29/gpupool/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/longduongbao29/gpupool/compare/v0.5.0...v0.5.1
