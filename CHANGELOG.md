@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-07
+
 ### Added
 
 - Reasoning settings for thinking models (Qwen3, DeepSeek-R1, gpt-oss...): **Thinking** auto / on / off, **Effort**
@@ -402,7 +404,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...v0.7.1
