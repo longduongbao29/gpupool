@@ -29,6 +29,8 @@ all others) are separate works with their own licenses and acceptable-use polici
 | Component | Version | License | Where | Link |
 | --- | --- | --- | --- | --- |
 | Alpine.js | 3.14.9 | MIT (verified: header of the file) | `src/gpupool/ui/vendor/alpine.min.js` | <https://github.com/alpinejs/alpine> |
+| marked | 15.0.12 | MIT (verified: header of the file) | `src/gpupool/ui/vendor/marked.min.js` (Playground Markdown) | <https://github.com/markedjs/marked> |
+| DOMPurify | 3.2.6 | Apache-2.0 or MPL-2.0, at the user's choice (verified: header of the file); used under Apache-2.0 | `src/gpupool/ui/vendor/purify.min.js` (sanitizes the rendered Markdown) | <https://github.com/cure53/DOMPurify> |
 
 ## llama.cpp (engine and converter)
 

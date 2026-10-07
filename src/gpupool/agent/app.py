@@ -87,7 +87,9 @@ async def join_coordinator(cfg: AgentConfig, sleep=asyncio.sleep) -> bool:
 # NodeReport.features, by the first llama.cpp build each was verified against (b11342: one
 # ggml-rpc-server -d A,B process, --spec-type draft-mtp, -kvu). An unknown build reports none, so
 # the coordinator keeps it on the 0.5 behaviour (one RPC server per GPU, no mtp / kv_unified head).
-FEATURES = {"rpc_multi_device": 11342, "spec_mtp": 11342, "kv_unified": 11342}
+FEATURES = {"rpc_multi_device": 11342, "spec_mtp": 11342, "kv_unified": 11342,
+            # -rea / --reasoning-effort / --reasoning-budget (verified on b11413)
+            "reasoning": 11413}
 
 
 def features_of(version: str) -> list[str]:

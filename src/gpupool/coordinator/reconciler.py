@@ -1331,6 +1331,18 @@ class Reconciler:
             extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
                            "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch,
                            "kv_unified": spec.kv_unified}
+            thinking = {"reasoning": spec.reasoning, "reasoning_effort": spec.reasoning_effort,
+                        "reasoning_budget": spec.reasoning_budget}
+            if (spec.reasoning, spec.reasoning_effort, spec.reasoning_budget) != ("auto", "default", -1):
+                if "reasoning" in nodes[p.head_node].report.features:
+                    extra.update(thinking)
+                else:
+                    # an older llama.cpp would refuse the flags and the model would not start at all
+                    self._emit("warning", "reasoning_unavailable",
+                               f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
+                               "-rea / --reasoning-effort; serving with the chat template's defaults. "
+                               "Upgrade the agent to apply the reasoning settings.",
+                               node_id=p.head_node, model=spec.name)
             if spec.speculative == "draft":
                 if not spec.draft:
                     raise LaunchError("speculative 'draft' without a draft model")

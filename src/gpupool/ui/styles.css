@@ -747,12 +747,35 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .pg-ava { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-text); }
 .pg-ava svg { width: 13px; height: 13px; }
 .pg-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
-.pg-text.typing > span:first-child::after { content: ""; display: inline-block; width: .5em; height: 1.1em; margin-left: 1px; vertical-align: text-bottom; background: var(--accent); animation: pg-blink 1s steps(2) infinite; }
+.pg-text.typing > :last-child::after { content: ""; display: inline-block; width: .5em; height: 1.1em; margin-left: 1px; vertical-align: text-bottom; background: var(--accent); animation: pg-blink 1s steps(2) infinite; }
 @keyframes pg-blink { to { visibility: hidden; } }
 .pg-wait { font-style: italic; }
 .pg-think { border-left: 3px solid var(--border-strong); padding-left: var(--s-3); }
 .pg-think summary { cursor: pointer; color: var(--text-muted); font-size: var(--fs-sm); }
 .pg-think .pg-text { font-size: var(--fs-sm); margin-top: var(--s-1); }
+/* Markdown replies (marked + DOMPurify): blocks with their own spacing instead of pre-wrap text */
+.pg-md { white-space: normal; }
+.pg-md > :first-child { margin-top: 0; }
+.pg-md > :last-child { margin-bottom: 0; }
+.pg-md p, .pg-md ul, .pg-md ol, .pg-md pre, .pg-md blockquote, .pg-md table { margin: 0 0 .7em; }
+.pg-md h1, .pg-md h2, .pg-md h3, .pg-md h4, .pg-md h5, .pg-md h6 { margin: 1em 0 .4em; line-height: 1.3; }
+.pg-md h1 { font-size: 1.35em; }
+.pg-md h2 { font-size: 1.2em; }
+.pg-md h3 { font-size: 1.08em; }
+.pg-md h4, .pg-md h5, .pg-md h6 { font-size: 1em; }
+.pg-md ul, .pg-md ol { padding-left: 1.5em; }
+.pg-md li + li { margin-top: .2em; }
+.pg-md li > p { margin: 0; }
+.pg-md code { font-family: var(--mono); font-size: .9em; padding: .1em .35em; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); }
+.pg-md pre { padding: var(--s-2) var(--s-3); border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); overflow-x: auto; white-space: pre; }
+.pg-md pre code { padding: 0; background: none; border: 0; font-size: .88em; }
+.pg-md blockquote { padding-left: .9em; border-left: 3px solid var(--border-strong); color: var(--text-muted); }
+.pg-md table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+.pg-md th, .pg-md td { border: 1px solid var(--border-strong); padding: .3em .6em; text-align: left; }
+.pg-md th { background: var(--surface-2); }
+.pg-md hr { border: 0; border-top: 1px solid var(--border-strong); margin: 1em 0; }
+.pg-md a { color: var(--accent); }
+.pg-md img { max-width: 100%; }
 .pg-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .pg-src { font-size: var(--fs-xs); }
 .chip.amber { background: var(--warning-soft); color: var(--warning-text); }
@@ -768,7 +791,7 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
   .pg-stat .v { font-size: var(--fs-lg); }
   .pg-log { padding: var(--s-4); }
 }
-@media (prefers-reduced-motion: reduce) { .pg-text.typing > span:first-child::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .pg-text.typing > :last-child::after { animation: none; } }
 
 /* ---------- collapsible panels ---------- */
 /* a folded panel keeps only its header; open by default, the state is remembered per browser */

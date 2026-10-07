@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, ValidationError
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
     ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_UBATCH, LIVE_STATES, AutoscalePolicy, FlashAttn, KvCacheType,
-    ModelSpec, SpecMode, Spread,
+    ModelSpec, Reasoning, ReasoningEffort, SpecMode, Spread,
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
@@ -63,6 +63,10 @@ class ModelBody(BaseModel):
     batch: int | None = Field(default=None, ge=32, le=16384)
     ubatch: int | None = Field(default=None, ge=32, le=8192)
     kv_unified: bool | None = None  # None: keep the stored value, else False
+    # Thinking models: None keeps the stored value (else auto / default / -1 unlimited).
+    reasoning: Reasoning | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    reasoning_budget: int | None = Field(default=None, ge=-1)
 
 
 class RecommendBody(BaseModel):
@@ -425,6 +429,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             ubatch=keep(body.ubatch, "ubatch") or DEFAULT_UBATCH,
             batch=keep(body.batch, "batch") or DEFAULT_BATCH,
             kv_unified=bool(keep(body.kv_unified, "kv_unified")),
+            reasoning=keep(body.reasoning, "reasoning") or "auto",
+            reasoning_effort=keep(body.reasoning_effort, "reasoning_effort") or "default",
+            reasoning_budget=b if (b := keep(body.reasoning_budget, "reasoning_budget")) is not None else -1,
             replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",

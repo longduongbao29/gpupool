@@ -8,6 +8,20 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Reasoning settings for thinking models (Qwen3, DeepSeek-R1, gpt-oss...): **Thinking** auto / on / off, **Effort**
+  (minimal ... max, handed to the chat template) and a **thinking budget** in tokens, in the model form and the
+  model API (`reasoning`, `reasoning_effort`, `reasoning_budget`; llama-server `-rea`, `--reasoning-effort`,
+  `--reasoning-budget`). They are the defaults; a request still sets its own. Applied only on heads whose
+  llama.cpp has the flags (b11413+, agent feature `reasoning`); others serve with the template's defaults and a
+  `reasoning_unavailable` warning, instead of failing to start.
+- Playground: **Thinking** (model default / on / off) and **Effort** per chat, sent as `reasoning_effort` and
+  `chat_template_kwargs.enable_thinking`.
+- Playground: replies and thought processes render as Markdown (headings, lists, code blocks, tables, quotes,
+  links opening in a new tab), sanitized with DOMPurify so a reply cannot run scripts. marked 15.0.12 and DOMPurify
+  3.2.6 are vendored (see THIRD_PARTY_NOTICES.md).
+
 ### Fixed
 
 - A model that keeps failing to start no longer raises a notification on every retry (every minute or few while

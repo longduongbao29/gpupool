@@ -2351,3 +2351,21 @@ async def test_a_different_launch_failure_notifies_at_once(mock_health):
     msgs = [e.message for e in store.list_events(limit=100) if e.kind == "launch_failed"]
     assert len(msgs) == 2 and "out of memory" in msgs[0]
     await rec.shutdown()
+
+
+@pytest.mark.parametrize("features, sent", [(["reasoning"], True), ([], False)])
+async def test_reasoning_settings_reach_only_a_head_that_supports_them(mock_health, features, sent):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    head = node("a")
+    head.features = features
+    beat(store, clock, head)
+    store.put_model(SPEC.model_copy(update={"reasoning": "off", "reasoning_effort": "low", "reasoning_budget": 256}))
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"  # an older head still serves, with template defaults
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    got = (hs.reasoning, hs.reasoning_effort, hs.reasoning_budget)
+    assert got == (("off", "low", 256) if sent else ("auto", "default", -1))
+    assert any(e.kind == "reasoning_unavailable" for e in store.list_events()) is not sent
+    await rec.shutdown()

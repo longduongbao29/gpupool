@@ -31,7 +31,8 @@ def client(mock):
 
 
 def test_files_exist():
-    for rel in ("index.html", "app.js", "styles.css", "vendor/alpine.min.js"):
+    for rel in ("index.html", "app.js", "styles.css", "vendor/alpine.min.js", "vendor/marked.min.js",
+                "vendor/purify.min.js"):
         assert (UI / rel).is_file(), rel
     assert (UI / "vendor" / "alpine.min.js").stat().st_size > 10_000
 
@@ -44,7 +45,7 @@ def test_index_only_local_assets():
         if ref == "#":
             continue
         assert not re.match(r"^(https?:)?//", ref), f"remote asset: {ref}"
-    assert "vendor/alpine.min.js" in refs
+    assert {"vendor/alpine.min.js", "vendor/marked.min.js", "vendor/purify.min.js"} <= set(refs)
 
 
 def test_no_cdn_urls_in_js_and_css():
@@ -55,6 +56,11 @@ def test_no_cdn_urls_in_js_and_css():
 
 def test_alpine_has_license_header():
     assert "MIT" in (UI / "vendor" / "alpine.min.js").read_text(encoding="utf-8")[:300]
+
+
+def test_markdown_libraries_have_license_headers():
+    assert "MIT Licensed" in (UI / "vendor" / "marked.min.js").read_text(encoding="utf-8")[:300]
+    assert "Apache license 2.0" in (UI / "vendor" / "purify.min.js").read_text(encoding="utf-8")[:300]
 
 
 def test_mock_requires_auth(client):
@@ -185,10 +191,19 @@ def test_ui_has_scaling_controls():
 
 
 def test_html_never_renders_server_data_as_html():
-    # x-html is only for the static icon() helper; data fields must use x-text.
+    # x-html is only for the static icon() helper and pgMd(); other data fields must use x-text.
     html = (UI / "index.html").read_text(encoding="utf-8")
     for expr in re.findall(r'x-html="([^"]*)"', html):
-        assert expr.startswith("icon(") or expr == "logo()", expr  # both return fixed SVG markup
+        # icon() and logo() return fixed SVG markup; pgMd() returns DOMPurify-sanitized Markdown
+        assert expr.startswith(("icon(", "pgMd(")) or expr == "logo()", expr
+
+
+def test_markdown_is_sanitized_before_it_reaches_the_page():
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("pgMd: function (text)"):js.index("pgMs: function")]
+    assert "DOMPurify.sanitize(window.marked.parse(" in body
+    # without the libraries the text is escaped, never inserted raw
+    assert '"<": "&lt;"' in body and "return text;" not in body
 
 
 def test_mock_events_contract(client, mock):
@@ -1030,9 +1045,9 @@ def test_ui_has_playground():
     for needle in ('"/v1/chat/completions"', "x-gpupool-replica", "timings", "reasoning_content",
                    "stream_options", "AbortController", "predicted_per_second"):
         assert needle in js, needle
-    # model output is untrusted: rendered as text only
+    # model output is untrusted: rendered as text, or as Markdown through pgMd() (DOMPurify-sanitized)
     pg = html[html.index("<!-- ============ playground"):html.index("<!-- ============", html.index("<!-- ============ playground") + 10)]
-    assert re.findall(r'x-html="(?!icon\()(?!logo\(\))', pg) == []
+    assert re.findall(r'x-html="(?!icon\()(?!logo\(\))(?!pgMd\()', pg) == []
 
 
 def test_ui_large_panels_collapse_and_start_open():

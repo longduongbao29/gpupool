@@ -84,7 +84,7 @@ function foldSaved() {
 // Playground settings remembered per browser (model, system prompt, sampling); never the chat itself.
 var PG_STORE = "gpupool.playground";
 function pgSaved() {
-  var d = { model: "", system: "", temperature: 0.7, maxTokens: 512 };
+  var d = { model: "", system: "", temperature: 0.7, maxTokens: 512, think: "", effort: "" };
   try { var v = JSON.parse(localStorage.getItem(PG_STORE) || "{}"); if (v && typeof v === "object") Object.keys(d).forEach(function (k) { if (v[k] != null) d[k] = v[k]; }); } catch (e) { /* storage blocked or bad JSON */ }
   return d;
 }
@@ -107,8 +107,12 @@ function scalingForm(spec) {
 
 // Performance part of the deploy form (KV cache, attention, batching, speculative decoding), derived from a model spec.
 function perfForm(spec) {
-  var f = { kv: "f16", spec: "none", draftFile: "", draftN: 4, fa: "auto", ubatch: 512, batch: 2048, kvu: false };
+  var f = { kv: "f16", spec: "none", draftFile: "", draftN: 4, fa: "auto", ubatch: 512, batch: 2048, kvu: false,
+            rea: "auto", effort: "default", budget: "" };
   if (!spec) return f;
+  if (spec.reasoning) f.rea = spec.reasoning;
+  if (spec.reasoning_effort) f.effort = spec.reasoning_effort;
+  if (spec.reasoning_budget != null && spec.reasoning_budget >= 0) f.budget = String(spec.reasoning_budget);
   if (spec.flash_attn) f.fa = spec.flash_attn;
   if (spec.kv_unified) f.kvu = true;
   if (spec.ubatch) f.ubatch = spec.ubatch;
@@ -1182,7 +1186,8 @@ function app() {
     },
     pgSave: function () {
       var p = this.pg;
-      try { localStorage.setItem(PG_STORE, JSON.stringify({ model: p.model, system: p.system, temperature: p.temperature, maxTokens: p.maxTokens })); } catch (e) { /* storage blocked */ }
+      try { localStorage.setItem(PG_STORE, JSON.stringify({ model: p.model, system: p.system, temperature: p.temperature, maxTokens: p.maxTokens,
+        think: p.think, effort: p.effort })); } catch (e) { /* storage blocked */ }
     },
     pgOpen: function (name) { this.pg.model = name; this.pgSave(); this.go("playground"); },
     pgClear: function () { this.pgStop(); this.pg.msgs = []; },
@@ -1200,6 +1205,22 @@ function app() {
       this.models().forEach(function (m) { (m.replicas || []).forEach(function (r) { if (r.replica_id === id) hit = r; }); });
       var t = hit && hit.placement && hit.placement.est_decode_tps;
       return t ? t : null;
+    },
+    // Markdown of a reply, sanitized (the model's text is untrusted: no scripts, handlers or
+    // raw HTML survive DOMPurify). Plain escaped text when the libraries failed to load.
+    pgMd: function (text) {
+      if (!text) return "";
+      if (window.marked && window.DOMPurify) {
+        if (!window.DOMPurify.__gpupoolLinks) {
+          window.DOMPurify.__gpupoolLinks = true;
+          // links in a reply open in a new tab, never in place of the Playground
+          window.DOMPurify.addHook("afterSanitizeAttributes", function (node) {
+            if (node.tagName === "A" && node.getAttribute("href")) { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+          });
+        }
+        try { return window.DOMPurify.sanitize(window.marked.parse(text, { gfm: true, breaks: true })); } catch (e) { /* fall through */ }
+      }
+      return text.replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; });
     },
     pgMs: function (ms) { return ms == null ? this.dash : (ms < 1000 ? Math.round(ms) + " ms" : (ms / 1000).toFixed(2) + " s"); },
     pgRate: function (r) { return r == null || !isFinite(r) ? this.dash : (r >= 100 ? Math.round(r) : r.toFixed(1)) + " tok/s"; },
@@ -1248,6 +1269,13 @@ function app() {
       var body = { model: p.model, messages: history, stream: true, stream_options: { include_usage: true } };
       var t = parseFloat(p.temperature); if (isFinite(t)) body.temperature = t;
       var mt = parseInt(p.maxTokens, 10); if (mt > 0) body.max_tokens = mt;
+      // Thinking: llama-server turns it off for reasoning_effort "none"; enable_thinking is what
+      // Qwen3-style templates read. Unset keeps the model's own defaults.
+      if (p.think === "off") { body.reasoning_effort = "none"; body.chat_template_kwargs = { enable_thinking: false }; }
+      else {
+        if (p.think === "on") body.chat_template_kwargs = { enable_thinking: true };
+        if (p.effort) body.reasoning_effort = p.effort;
+      }
       var first = null, last = null, pieces = 0, timings = null, usage = null;
       try {
         var res = await fetch("/v1/chat/completions", { method: "POST", signal: ctrl.signal,
@@ -1473,8 +1501,14 @@ function app() {
       var ub = parseInt(f.ubatch, 10) || 512, b = Math.max(parseInt(f.batch, 10) || 2048, ub);
       if (kv !== "f16" && fa === "off") return { error: "A quantized KV cache needs flash attention (Auto or On)" };
       // the switch is hidden at one slot, where it means nothing: never send a value the user cannot see
+      var bud = String(f.budget == null ? "" : f.budget).trim(), budget = -1;
+      if (bud !== "") {
+        budget = Number(bud);
+        if (!isFinite(budget) || Math.floor(budget) !== budget || budget < 0) return { error: "Thinking budget must be a whole number of tokens (empty = unlimited)" };
+      }
       var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b,
-                     kv_unified: !!f.kvu && (parseInt(f.parallel, 10) || 1) > 1 };
+                     kv_unified: !!f.kvu && (parseInt(f.parallel, 10) || 1) > 1,
+                     reasoning: f.rea || "auto", reasoning_effort: f.effort || "default", reasoning_budget: budget };
       var n = parseFloat(f.draftN);
       if (sp === "mtp") {
         if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
@@ -1556,6 +1590,9 @@ function app() {
       if (sp.speculative === "ngram") out.push("Spec: n-gram");
       else if (sp.speculative === "mtp") out.push("Spec: MTP");
       else if (sp.speculative === "draft") out.push("Spec: draft " + (sp.draft ? String(sp.draft).replace(/^coordinator:\/\//, "") : "?"));
+      if (sp.reasoning && sp.reasoning !== "auto") out.push("Thinking " + sp.reasoning);
+      if (sp.reasoning_effort && sp.reasoning_effort !== "default") out.push("Effort " + sp.reasoning_effort);
+      if (sp.reasoning_budget != null && sp.reasoning_budget >= 0) out.push("Think budget " + sp.reasoning_budget);
       return out;
     },
     startReplicas: function (f) {

@@ -116,6 +116,12 @@ def build_command(spec: EngineSpec, bins: dict[str, Path], bind_host: str,
         cmd += ["-fa", spec.flash_attn]
     if spec.kv_unified:
         cmd += ["-kvu"]
+    if spec.reasoning != "auto":
+        cmd += ["-rea", spec.reasoning]
+    if spec.reasoning_effort != "default":
+        cmd += ["--reasoning-effort", spec.reasoning_effort]
+    if spec.reasoning_budget != -1:
+        cmd += ["--reasoning-budget", str(spec.reasoning_budget)]
     batch = max(spec.batch, spec.ubatch)  # llama.cpp caps ubatch at batch; keep what was asked
     if batch != DEFAULT_BATCH:
         cmd += ["-b", str(batch)]
