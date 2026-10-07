@@ -9,6 +9,8 @@
 <meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
 <link rel="stylesheet" href="styles.css">
 <script src="app.js"></script>
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
 <script defer src="vendor/alpine.min.js"></script>
 </head>
 <body x-data="app()" x-cloak>
@@ -636,9 +638,10 @@
                     <div class="pg-who"><span class="pg-ava vivid purple" x-html="icon('cube')"></span><span x-text="a.model"></span></div>
                     <details class="pg-think" x-show="a.reasoning" :open="a.streaming && !a.full">
                       <summary x-text="a.streaming && !a.full ? 'Thinking…' : 'Thought process'"></summary>
-                      <div class="pg-text muted" x-text="a.rshown"></div>
+                      <div class="pg-text pg-md muted" x-html="pgMd(a.rshown)"></div>
                     </details>
-                    <div class="pg-text" :class="{typing: a.streaming || a.content.length < a.full.length}"><span x-text="a.content"></span><span class="pg-wait muted" x-show="a.streaming && !a.full && !a.reasoning">Waiting for the first token…</span></div>
+                    <div class="pg-text pg-md" :class="{typing: a.streaming || a.content.length < a.full.length}" x-html="pgMd(a.content)"></div>
+                    <div class="pg-wait muted" x-show="a.streaming && !a.full && !a.reasoning">Waiting for the first token…</div>
                     <div class="notice bad small" x-show="a.error" x-text="a.error"></div>
                     <div class="pg-meta" x-show="!a.streaming || a.m.ttft != null">
                       <span class="chip" title="Time to first token" x-show="a.m.ttft != null" x-text="'TTFT ' + pgMs(a.m.ttft)"></span>
@@ -680,6 +683,17 @@
                 <input type="number" min="0" max="2" step="0.1" x-model="pg.temperature" @change="pgSave()"></label>
               <label class="field"><span>Max tokens</span>
                 <input type="number" min="1" max="32768" step="1" x-model="pg.maxTokens" @change="pgSave()"></label>
+            </div>
+            <div class="pg-row">
+              <label class="field"><span>Thinking</span>
+                <select x-model="pg.think" @change="pgSave()" title="Thinking models only. Model default: what the model's settings (or its chat template) say">
+                  <option value="">Model default</option>
+                  <option value="on">On</option>
+                  <option value="off">Off</option></select></label>
+              <label class="field"><span>Effort</span>
+                <select x-model="pg.effort" @change="pgSave()" :disabled="pg.think === 'off'" title="reasoning_effort, handed to the chat template (gpt-oss: low, medium, high)">
+                  <option value="">Model default</option>
+                  <template x-for="e in ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']" :key="e"><option :value="e" :selected="e === pg.effort" x-text="e"></option></template></select></label>
             </div>
             <div class="pg-note">Requests go through <code>/v1/chat/completions</code> (router, balancer, replica), so the numbers are what a client sees. Enter sends, Shift+Enter adds a line.</div>
           </div>
@@ -1065,6 +1079,21 @@
       </div>
       <div class="muted small" x-show="form.spec==='draft' && draftChoices().length === 0" style="margin:-4px 0 var(--s-3)">No other ready file in the library. Add a small model of the same family first.</div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)">Fewer passes of the big model per token. Helps most when the model is split across servers (fewer network round trips). Measured on one small GPU: n-gram +11 %, a 0.5B draft with 4 tokens +5 %, 8 tokens slower.</div>
+      <h3 class="sec" style="margin-top:4px">Reasoning</h3>
+      <div class="row">
+        <label class="field grow"><span>Thinking</span>
+          <select x-model="form.rea" style="width:100%">
+            <option value="auto">Auto (as the chat template does)</option>
+            <option value="on">On</option>
+            <option value="off">Off</option></select></label>
+        <label class="field grow"><span>Effort</span>
+          <select x-model="form.effort" style="width:100%">
+            <option value="default">Template default</option>
+            <template x-for="e in ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']" :key="e"><option :value="e" :selected="e === form.effort" x-text="e"></option></template></select></label>
+        <label class="field grow"><span>Thinking budget (tokens)</span>
+          <input type="number" min="0" step="1" x-model="form.budget" placeholder="Unlimited" style="width:100%"></label>
+      </div>
+      <div class="muted small" style="margin:-4px 0 var(--s-3)">For thinking models (Qwen3, DeepSeek-R1, gpt-oss, GLM...): the defaults for requests that do not set their own; a request still can (<code>reasoning_effort</code>, <code>"none"</code> turns thinking off). Effort is handed to the chat template: only templates that read it change anything (gpt-oss: low, medium, high). Budget 0 ends thinking at once. Needs the agent's llama.cpp b11413 or newer; applies from the next launch.</div>
       <h3 class="sec" style="margin-top:4px">Scaling</h3>
       <label class="field"><span>Mode</span>
         <select x-model="form.mode" style="width:100%">

@@ -2301,3 +2301,71 @@ async def test_port_held_by_another_process_is_skipped_on_the_next_launch(mock_h
     assert second.placement.head_port != client.busy
     assert any(e.kind == "port_busy" for e in store.list_events())
     await rec.shutdown()
+
+
+async def test_a_launch_failing_the_same_way_notifies_once_per_repeat_window(mock_health):
+    client = FakeClient()
+    client.fail_start_on = "-head"
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+
+    def failed_events():
+        return [e for e in store.list_events(limit=100) if e.kind == "launch_failed"]
+
+    for _ in range(4):  # four attempts, each after its backoff (5, 10, 20 s)
+        await rec.tick()
+        await settle(rec)
+        clock.t += 60
+        beat(store, clock, node("a"))
+    assert len(store.list_replicas()) == 4
+    assert len(failed_events()) == 1 and "retrying in 5 s (attempt 2)" in failed_events()[0].message
+    clock.t += rec.REPEAT_EVENT_S
+    beat(store, clock, node("a"))
+    await rec.tick()
+    await settle(rec)
+    events = failed_events()
+    assert len(events) == 2 and "the same failure 3 more times since the last notice" in events[0].message
+    await rec.shutdown()
+
+
+async def test_a_different_launch_failure_notifies_at_once(mock_health):
+    class Failing(FakeClient):
+        why = "boom"
+
+        async def start_engine(self, url, spec):
+            self.calls.append(("start", url, spec.engine_id, spec))
+            raise RuntimeError(self.why)
+
+    client = Failing()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    client.why = "out of memory"
+    clock.t += 60
+    beat(store, clock, node("a"))
+    await rec.tick()
+    await settle(rec)
+    msgs = [e.message for e in store.list_events(limit=100) if e.kind == "launch_failed"]
+    assert len(msgs) == 2 and "out of memory" in msgs[0]
+    await rec.shutdown()
+
+
+@pytest.mark.parametrize("features, sent", [(["reasoning"], True), ([], False)])
+async def test_reasoning_settings_reach_only_a_head_that_supports_them(mock_health, features, sent):
+    client = FakeClient()
+    rec, store, clock = make_reconciler(client=client)
+    head = node("a")
+    head.features = features
+    beat(store, clock, head)
+    store.put_model(SPEC.model_copy(update={"reasoning": "off", "reasoning_effort": "low", "reasoning_budget": 256}))
+    await rec.tick()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"  # an older head still serves, with template defaults
+    hs = next(c[3] for c in client.calls if c[0] == "start")
+    got = (hs.reasoning, hs.reasoning_effort, hs.reasoning_budget)
+    assert got == (("off", "low", 256) if sent else ("auto", "default", -1))
+    assert any(e.kind == "reasoning_unavailable" for e in store.list_events()) is not sent
+    await rec.shutdown()

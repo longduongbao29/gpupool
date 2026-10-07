@@ -57,6 +57,17 @@ def test_build_server_single():
                    "--foo"]
 
 
+def test_build_server_reasoning_flags_only_when_set():
+    base = dict(engine_id="r-head", kind="server", port=9000, devices=["CUDA0"], model="m")
+    plain = build_command(EngineSpec(**base), BINS, "127.0.0.1", "/m.gguf")
+    assert not {"-rea", "--reasoning-effort", "--reasoning-budget"} & set(plain)
+    cmd = build_command(EngineSpec(**base, reasoning="off", reasoning_effort="high", reasoning_budget=0),
+                        BINS, "127.0.0.1", "/m.gguf")
+    assert cmd[cmd.index("-rea") + 1] == "off"
+    assert cmd[cmd.index("--reasoning-effort") + 1] == "high"
+    assert cmd[cmd.index("--reasoning-budget") + 1] == "0"
+
+
 def test_build_server_split():
     spec = EngineSpec(engine_id="r-head", kind="server", port=9000,
                       devices=["CUDA0", "RPC0", "RPC1"], model="m",

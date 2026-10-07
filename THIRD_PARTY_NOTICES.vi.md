@@ -30,6 +30,8 @@ phát hành đặt ra.
 | Thành phần | Phiên bản | Giấy phép | Vị trí | Liên kết |
 | --- | --- | --- | --- | --- |
 | Alpine.js | 3.14.9 | MIT (đã xác minh: dòng đầu của tệp) | `src/gpupool/ui/vendor/alpine.min.js` | <https://github.com/alpinejs/alpine> |
+| marked | 15.0.12 | MIT (đã xác minh: dòng đầu của tệp) | `src/gpupool/ui/vendor/marked.min.js` (Markdown trong Playground) | <https://github.com/markedjs/marked> |
+| DOMPurify | 3.2.6 | Apache-2.0 hoặc MPL-2.0, tùy chọn (đã xác minh: dòng đầu của tệp); dùng theo Apache-2.0 | `src/gpupool/ui/vendor/purify.min.js` (làm sạch Markdown đã render) | <https://github.com/cure53/DOMPurify> |
 
 ## llama.cpp (engine và bộ chuyển đổi)
 

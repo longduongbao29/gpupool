@@ -131,6 +131,11 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): số token prompt mỗi lượt. Lớn hơn thì đọc prompt dài nhanh hơn trên GPU có tensor core (cc 7.0+); compute buffer, tính trên mọi thiết bị, tăng theo |
 | `batch` | int 32..16384, 2048 | batch logic (`-b`); được nâng lên bằng `ubatch` khi nhỏ hơn |
 | `kv_unified` | bool, false | `-kvu`: các slot `parallel` dùng chung một vùng KV, nên một request có thể dùng tới `ctx_size` token khi các request khác ngắn (false: mỗi slot giữ `ctx_size / parallel`); cùng lượng bộ nhớ |
+| `reasoning` | `auto` / `on` / `off`, auto | model có suy nghĩ (thinking): `-rea`, có suy nghĩ hay không (auto: theo chat template). Chỉ gửi cho head báo tính năng `reasoning` (llama.cpp b11413 trở lên); head khác chạy với mặc định của template và có cảnh báo `reasoning_unavailable` |
+| `reasoning_effort` | `default` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`, default | `--reasoning-effort`, chuyển cho chat template (gpt-oss đọc low/medium/high) |
+| `reasoning_budget` | int, -1 | `--reasoning-budget`: số token suy nghĩ tối đa; -1 không giới hạn, 0 dừng suy nghĩ ngay |
+
+Đây là giá trị mặc định: mỗi request vẫn tự đặt được (`reasoning_effort`, trong đó `"none"` tắt suy nghĩ, và `chat_template_kwargs`); router chuyển cả hai cho llama-server.
 
 Kiểm tra do `PUT /api/models/{name}` và `/api/simulate` áp dụng (giống nhau):
 
@@ -178,6 +183,7 @@ mới lấy giá trị mặc định.
 | `draft_n_max` | int 1..16 hoặc null | giữ, nếu không có thì 4 |
 | `flash_attn`, `ubatch`, `batch` | như trên, hoặc null | giữ, nếu không có thì `auto` / 512 / 2048 |
 | `kv_unified` | bool hoặc null | giữ, nếu không có thì false |
+| `reasoning`, `reasoning_effort`, `reasoning_budget` | như trong `ModelSpec`, hoặc null | giữ, nếu không có thì `auto` / `default` / -1 |
 
 `replicas` không nằm trong body: model mới bắt đầu với `replicas = 0`, model đã có giữ giá trị cũ. Trả về
 `ModelSpec` đã lưu (JSON). Lỗi: 422 (tên sai, file chưa ready, pin sai, min > max, idle mà min khác 0, các
@@ -526,7 +532,7 @@ nó đang hiển thị, nên event đến trong lúc đó được giữ lại).
 event mới nhất.
 
 Các loại event có trong code: `server_added`, `server_removed`, `node_online`, `node_offline`,
-`model_started`, `model_stopped`, `launch_failed`, `port_busy`, `engine_crashed`, `crash_loop`, `gpu_missing`,
+`model_started`, `model_stopped`, `launch_failed`, `port_busy`, `reasoning_unavailable`, `engine_crashed`, `crash_loop`, `gpu_missing`,
 `realloc_started`, `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`,
 `unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (head của model `mtp` không nháp được bằng MTP: phục
 vụ không speculative), `llama_version_mismatch` (các server đã đăng ký chạy bản llama.cpp khác nhau; model bị chia
@@ -579,7 +585,7 @@ Agent (cổng mặc định 7070) do coordinator điều khiển. Xác thực: c
 | Method | Đường dẫn | Mục đích |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, không xác thực |
-| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (theo bản build llama.cpp: `rpc_multi_device` một engine rpc có thể phục vụ nhiều thiết bị, `spec_mtp`, `kv_unified`), CPU/RAM |
+| GET | `/report` | `NodeReport`: thiết bị, engine, phiên bản llama.cpp và CUDA arch, file model đã cache, `features` (theo bản build llama.cpp: `rpc_multi_device` một engine rpc có thể phục vụ nhiều thiết bị, `spec_mtp`, `kv_unified`, `reasoning`), CPU/RAM |
 | POST | `/engines` | khởi động một tiến trình llama.cpp từ `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | các buffer theo thiết bị mà llama.cpp báo lúc load |
@@ -593,7 +599,7 @@ thiết bị cục bộ khác nhau, do một process phục vụ; server: danh s
 `rpc_endpoints` (`"host:port"`, theo thứ tự `RPC0..`; mỗi RPC server một lần), `tensor_split`, `ctx_size` (4096),
 `parallel` (1), `extra_args`, `cache_type` (`f16`), `spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` →
 `draft-simple`, `mtp` → `draft-mtp`), `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`,
-`-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
+`-fa`), `batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `reasoning` (`auto`, `-rea`), `reasoning_effort` (`default`, `--reasoning-effort`), `reasoning_budget` (-1, `--reasoning-budget`), `allowed_peers` (các host được phép nối tới engine rpc; chỉ có hiệu lực khi agent chạy với
 `rpc_firewall`). Trả `EngineStatus` (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`,
 `port`, `exit_code`, `log_tail` tối đa 50 dòng). Lỗi: `422` với `extra_args` (agent này không chấp nhận, để
 token không biến thành cờ llama-server tùy ý), engine server thiếu `model_path`, `model_path` hoặc

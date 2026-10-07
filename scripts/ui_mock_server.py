@@ -1419,6 +1419,27 @@ _REPLY = ("Sure. gpupool pools the GPUs of several servers and serves a model sp
           "RPC. The head server runs llama-server, the others run rpc-server, and the router picks the replica "
           "whose prompt cache already holds your conversation. Each token streams back as soon as it is decoded, "
           "so the first one arrives after the prompt is processed and the rest follow at the decode speed.")
+_MD = """## Markdown reply
+
+A **bold** word, an *italic* one, `inline code` and a [link](https://example.com).
+
+1. First item
+2. Second item
+   - nested bullet
+
+```python
+def add(a, b):
+    return a + b
+```
+
+| GPU | VRAM |
+|-----|-----:|
+| RTX 4090 | 24 GB |
+| RTX 3080 | 10 GB |
+
+> A quote.
+
+<script>alert("not run")</script><img src=x onerror="alert(1)">"""
 _THOUGHT = "The user asks a question. I should answer briefly and mention how the request was served."
 
 
@@ -1436,7 +1457,8 @@ async def v1_chat(body: dict):
     """Like the real router: 404 unknown model, 503 stopped, a cold start for an idle on-demand model, then
     llama-server's SSE format (role chunk, content / reasoning_content deltas, a last chunk with finish_reason and
     `timings`, `usage` when stream_options.include_usage) at the replica's estimated speed. "/think" in the last
-    user message adds a reasoning_content preamble; "/long" makes the reply three times longer."""
+    user message adds a reasoning_content preamble (unless reasoning_effort is "none", thinking off); "/long" makes
+    the reply three times longer; "/md" answers with Markdown (and HTML a renderer must not run)."""
     import asyncio
     import json as _json
 
@@ -1458,8 +1480,9 @@ async def v1_chat(body: dict):
     msgs = body.get("messages") or []
     last = next((x.get("content") for x in reversed(msgs) if isinstance(x, dict) and x.get("role") == "user"), "") or ""
     prompt_n = max(1, sum(len(_toks(str(x.get("content") or ""))) for x in msgs if isinstance(x, dict))) + 12
-    reply = _toks(" ".join([_REPLY] * (3 if "/long" in last else 1)))[: int(body.get("max_tokens") or 10**9)]
-    thought = _toks(_THOUGHT) if "/think" in last else []
+    text = _MD if "/md" in last else " ".join([_REPLY] * (3 if "/long" in last else 1))
+    reply = _toks(text)[: int(body.get("max_tokens") or 10**9)]
+    thought = _toks(_THOUGHT) if "/think" in last and body.get("reasoning_effort") != "none" else []
     prompt_s = 0.08 + prompt_n / 2500.0  # prompt processing at ~2500 tok/s
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:12], int(time.time())
     headers = {"x-gpupool-replica": rep["replica_id"]}
@@ -1492,7 +1515,7 @@ async def v1_chat(body: dict):
         gen_ms = (time.time() - t0) * 1000
         timings = {"prompt_n": prompt_n, "prompt_ms": prompt_s * 1000, "prompt_per_second": prompt_n / prompt_s,
                    "predicted_n": n, "predicted_ms": gen_ms, "predicted_per_second": n / max(gen_ms / 1000, 1e-6)}
-        yield chunk({}, "length" if len(reply) < len(_toks(_REPLY)) and body.get("max_tokens") else "stop",
+        yield chunk({}, "length" if len(reply) < len(_toks(text)) and body.get("max_tokens") else "stop",
                     timings=timings)
         if (body.get("stream_options") or {}).get("include_usage"):
             u = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": name, "choices": [],

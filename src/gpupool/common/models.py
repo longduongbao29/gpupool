@@ -24,6 +24,10 @@ KvCacheType = Literal["f16", "q8_0", "q4_0"]
 SpecMode = Literal["none", "ngram", "draft", "mtp"]
 # llama.cpp -fa. "auto" turns flash attention on wherever the backend supports it (b11342 default).
 FlashAttn = Literal["auto", "on", "off"]
+# llama-server -rea: think or not ("auto": as the chat template says). Thinking models only.
+Reasoning = Literal["auto", "on", "off"]
+# llama-server --reasoning-effort, handed to the chat template ("default": the template's own).
+ReasoningEffort = Literal["default", "minimal", "low", "medium", "high", "xhigh", "max"]
 # Logical (-b) and physical (-ub) batch sizes, llama.cpp defaults. A bigger micro-batch processes long
 # prompts faster on big GPUs at the cost of a bigger compute buffer on every device.
 DEFAULT_BATCH = 2048
@@ -101,6 +105,11 @@ class EngineSpec(BaseModel):
     # Optional since 0.5; an older agent ignores them (llama.cpp defaults: auto, 2048, 512).
     flash_attn: FlashAttn = "auto"
     kv_unified: bool = False  # -kvu (optional since 0.6)
+    # Defaults for requests that do not set their own (optional since 0.8; sent only to heads
+    # that report the "reasoning" feature).
+    reasoning: Reasoning = "auto"
+    reasoning_effort: ReasoningEffort = "default"
+    reasoning_budget: int = Field(default=-1, ge=-1)  # thinking tokens; -1 unlimited, 0 none
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)
     # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
@@ -179,6 +188,11 @@ class ModelSpec(BaseModel):
     kv_unified: bool = False
     batch: int = Field(default=DEFAULT_BATCH, ge=32, le=16384)  # -b, never below ubatch at launch
     ubatch: int = Field(default=DEFAULT_UBATCH, ge=32, le=8192)  # -ub; sizes the compute buffer
+    # Thinking models: the server-side defaults. A request still sets its own per call
+    # (`reasoning_effort`, "none" turns thinking off; `chat_template_kwargs`).
+    reasoning: Reasoning = "auto"  # think or not; auto = what the chat template does
+    reasoning_effort: ReasoningEffort = "default"  # handed to the chat template
+    reasoning_budget: int = Field(default=-1, ge=-1)  # max thinking tokens; -1 unlimited
 
 
 class AutoscalePolicy(BaseModel):

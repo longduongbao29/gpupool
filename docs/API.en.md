@@ -132,6 +132,11 @@ shapes: the full `ModelSpec` on `POST /admin/models`, and the friendlier `ModelB
 | `ubatch` | int 32..8192, 512 | micro-batch (`-ub`): prompt tokens per pass. Bigger reads long prompts faster on GPUs with tensor cores (cc 7.0+); the compute buffer, charged on every device, grows with it |
 | `batch` | int 32..16384, 2048 | logical batch (`-b`); raised to `ubatch` when smaller |
 | `kv_unified` | bool, false | `-kvu`: the `parallel` slots share one KV pool, so one request may use up to `ctx_size` tokens while the others are short (false: each slot owns `ctx_size / parallel`); same memory |
+| `reasoning` | `auto` / `on` / `off`, auto | thinking models: `-rea`, think or not (auto: as the chat template does). Sent only to heads reporting the `reasoning` feature (llama.cpp b11413+); others serve with the template's defaults and a `reasoning_unavailable` warning |
+| `reasoning_effort` | `default` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`, default | `--reasoning-effort`, handed to the chat template (gpt-oss reads low/medium/high) |
+| `reasoning_budget` | int, -1 | `--reasoning-budget`: max thinking tokens; -1 unlimited, 0 ends thinking at once |
+
+These are defaults: a request still sets its own (`reasoning_effort`, where `"none"` turns thinking off, and `chat_template_kwargs`); the router passes both to llama-server.
 
 Validation applied by `PUT /api/models/{name}` and by `/api/simulate` (the same checks):
 
@@ -179,6 +184,7 @@ model; a new model gets the default.
 | `draft_n_max` | int 1..16 or null | keep, else 4 |
 | `flash_attn`, `ubatch`, `batch` | as above, or null | keep, else `auto` / 512 / 2048 |
 | `kv_unified` | bool or null | keep, else false |
+| `reasoning`, `reasoning_effort`, `reasoning_budget` | as in `ModelSpec`, or null | keep, else `auto` / `default` / -1 |
 
 `replicas` is not in the body: a new model starts with `replicas = 0` and an existing model keeps its value.
 Returns the stored `ModelSpec` (JSON). Errors: 422 (bad name, file not ready, bad pin, min > max, idle
@@ -528,7 +534,7 @@ listed, so an event that arrives meanwhile is kept). Returns `{"deleted": n, "un
 the newest 1000 events.
 
 Event kinds in the code: `server_added`, `server_removed`, `node_online`, `node_offline`, `model_started`,
-`model_stopped`, `launch_failed`, `port_busy`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
+`model_stopped`, `launch_failed`, `port_busy`, `reasoning_unavailable`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
 `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`, `unloaded_idle`, `cold_start`,
 `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (an `mtp` model's head cannot draft with MTP:
 served without speculation), `llama_version_mismatch` (registered servers
@@ -582,7 +588,7 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | `{"ok": true}`, no auth |
-| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (by the llama.cpp build: `rpc_multi_device` one rpc engine may serve several devices, `spec_mtp`, `kv_unified`), CPU/RAM |
+| GET | `/report` | `NodeReport`: devices, engines, llama.cpp version and CUDA archs, cached model files, `features` (by the llama.cpp build: `rpc_multi_device` one rpc engine may serve several devices, `spec_mtp`, `kv_unified`, `reasoning`), CPU/RAM |
 | POST | `/engines` | start one llama.cpp process from an `EngineSpec` |
 | GET | `/engines/{engine_id}` | `EngineStatus` |
 | GET | `/engines/{engine_id}/memory` | per-device buffers llama.cpp reported at load |
@@ -596,7 +602,8 @@ The agent (default port 7070) is driven by the coordinator. Auth: cluster token,
 `RPC0..`; each RPC server once), `tensor_split`, `ctx_size` (4096), `parallel` (1), `extra_args`, `cache_type` (`f16`),
 `spec_type` (`none`; `ngram` → `--spec-type ngram-mod`, `draft` → `draft-simple`, `mtp` → `draft-mtp`),
 `draft_model_path`, `draft_device`, `draft_n_max` (4), `flash_attn` (`auto`, `-fa`),
-`batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `allowed_peers` (hosts allowed
+`batch` (2048, `-b`), `ubatch` (512, `-ub`), `kv_unified` (false, `-kvu`), `reasoning` (`auto`, `-rea`), `reasoning_effort` (`default`, `--reasoning-effort`),
+`reasoning_budget` (-1, `--reasoning-budget`), `allowed_peers` (hosts allowed
 to reach an rpc engine; enforced only when the agent runs with `rpc_firewall`). Returns `EngineStatus`
 (`engine_id`, `kind`, `state` `starting|running|exited|failed`, `pid`, `port`, `exit_code`, `log_tail` of at
 most 50 lines). Errors: `422` for `extra_args` (not accepted by this agent, so the token cannot become

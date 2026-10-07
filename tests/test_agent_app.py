@@ -323,12 +323,12 @@ async def test_rpc_engine_device_list_and_features(cfg, monkeypatch, tmp_path):
             r = await c.post("/engines", json={**two, "engine_id": "e2", "devices": bad}, headers=H)
             assert r.status_code == 422, bad
         assert (await c.get("/report", headers=H)).json()["features"] == [
-            "kv_unified", "rpc_multi_device", "spec_mtp"]
+            "kv_unified", "reasoning", "rpc_multi_device", "spec_mtp"]
     assert seen[0].devices == ["CUDA0", "CUDA1"]
 
 
 @pytest.mark.parametrize("version, features", [
-    ("b11413", ["kv_unified", "rpc_multi_device", "spec_mtp"]), ("b11342", ["kv_unified", "rpc_multi_device", "spec_mtp"]),
+    ("b11413", ["kv_unified", "reasoning", "rpc_multi_device", "spec_mtp"]), ("b11342", ["kv_unified", "rpc_multi_device", "spec_mtp"]),
     ("b9000", []), ("unknown", []), ("x1", [])])
 def test_features_follow_the_llama_build(version, features):
     from gpupool.agent.app import features_of

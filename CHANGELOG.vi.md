@@ -8,6 +8,27 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm
+
+- Cài đặt suy nghĩ cho model có thinking (Qwen3, DeepSeek-R1, gpt-oss...): **Thinking** auto / on / off, **Effort**
+  (minimal ... max, chuyển cho chat template) và **giới hạn token suy nghĩ**, trong form model và API model
+  (`reasoning`, `reasoning_effort`, `reasoning_budget`; llama-server `-rea`, `--reasoning-effort`,
+  `--reasoning-budget`). Đây là giá trị mặc định; mỗi request vẫn tự đặt được. Chỉ áp dụng trên head có llama.cpp hỗ
+  trợ các cờ này (b11413 trở lên, tính năng agent `reasoning`); head khác chạy với mặc định của template kèm cảnh
+  báo `reasoning_unavailable`, thay vì không khởi động được.
+- Playground: **Thinking** (mặc định của model / on / off) và **Effort** cho từng cuộc chat, gửi dưới dạng
+  `reasoning_effort` và `chat_template_kwargs.enable_thinking`.
+- Playground: câu trả lời và phần suy nghĩ hiển thị dạng Markdown (tiêu đề, danh sách, khối code, bảng, trích dẫn,
+  link mở ở tab mới), được làm sạch bằng DOMPurify nên câu trả lời không thể chạy script. Đóng gói sẵn marked 15.0.12
+  và DOMPurify 3.2.6 (xem THIRD_PARTY_NOTICES.vi.md).
+
+### Sửa lỗi
+
+- Model không khởi động được không còn tạo thông báo ở mỗi lần thử lại (mỗi một vài phút khi thời gian chờ tăng
+  dần tới 5 phút). `launch_failed`, `engine_crashed` và `crash_loop` cho cùng một lỗi chỉ thông báo tối đa mỗi 10
+  phút, kèm số lần thử lại đã lỗi y như vậy; lỗi khác, hoặc lỗi đầu tiên sau khi model đã chạy lại được, thông báo
+  ngay. `launch_failed` còn cho biết khi nào thử lại.
+
 ## [0.7.3] - 2026-10-07
 
 ### Sửa lỗi
