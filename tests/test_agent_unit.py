@@ -420,6 +420,27 @@ def _split_names(stem, total):
     return [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
 
 
+def test_ensure_reports_download_progress(tmp_path, http_server, monkeypatch):
+    from gpupool.agent import models_cache
+
+    class Recording(dict):
+        seen: list = []
+
+        def __setitem__(self, k, v):
+            Recording.seen.append((k, v))
+            super().__setitem__(k, v)
+
+    monkeypatch.setattr(models_cache, "_progress", Recording())
+    names = _split_names("model", 2)
+    ensure_model("m", f"coordinator://{names[0]}", tmp_path / "cache", http_server, "tok")
+    seen = Recording.seen
+    assert {k for k, _ in seen} == {"m"}
+    # part 2 first (part 1 goes last), each from 0 to its full size
+    assert seen[0][1] == {"file": names[1], "part": 1, "parts": 2, "got": 0, "total": 4100}
+    assert seen[-1][1] == {"file": names[0], "part": 2, "parts": 2, "got": 4100, "total": 4100}
+    assert models_cache.download_progress() == {}  # cleared once done
+
+
 def test_ensure_split_downloads_all_parts(tmp_path, http_server):
     cache = tmp_path / "cache"
     names = _split_names("model", 3)

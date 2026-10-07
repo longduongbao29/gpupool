@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm
+
+- Replica đang launch hiển thị nó đang làm gì và đã bao lâu, ở trang Models và trong `replicas[].stage`: tải file
+  model về head (phần, số GB đã tải trên tổng, phần trăm), khởi động RPC server, rồi nạp model kèm dòng log mới nhất
+  của llama-server. Lần launch đầu của model lớn (tải 50 GB, rồi gửi weights sang GPU ở máy khác) không còn trông như
+  bị treo. API agent: `GET /models/progress`.
+
 ## [0.7.1] - 2026-10-07
 
 ### Sửa lỗi

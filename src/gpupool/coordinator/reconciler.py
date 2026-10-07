@@ -59,6 +59,19 @@ class _Realloc:
     started: bool = False
 
 
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB"
+
+
+def _progress_text(d: dict) -> str:
+    """'part 1 of 2, 12.3 of 27.0 GB (45%)' from an agent download progress entry."""
+    got, total = d.get("got") or 0, d.get("total")
+    out = f"part {d.get('part')} of {d.get('parts')}, " if (d.get("parts") or 1) > 1 else ""
+    if total:
+        return out + f"{got / 1e9:.1f} of {_gb(total)} ({100 * got / total:.0f}%)"
+    return out + _gb(got)
+
+
 def _port_of(endpoint: str) -> int:
     return int(endpoint.rsplit(":", 1)[1])
 
@@ -168,6 +181,9 @@ class Reconciler:
         self.ranker: Callable | None = None  # tests inject; default is scheduler.placement.rank
         self._http: httpx.AsyncClient | None = None
         self._launches: dict[str, asyncio.Task] = {}
+        # replica id -> (what its launch is doing now, since when): shown while it is not ready yet,
+        # so a long download or weight upload is not mistaken for a hung launch
+        self._stages: dict[str, tuple[str, float]] = {}
         self._suspect: set[str] = set()
         self._tick_lock = asyncio.Lock()
         self._nofit: dict[str, str] = {}
@@ -267,6 +283,33 @@ class Reconciler:
 
     def _ranker(self) -> Callable:
         return self.ranker if self.ranker is not None else rank
+
+    def stage(self, replica_id: str) -> dict | None:
+        """{"text", "since"} of a launch in progress, None otherwise."""
+        st = self._stages.get(replica_id)
+        return {"text": st[0], "since": st[1]} if st else None
+
+    def _set_stage(self, replica_id: str, text: str) -> None:
+        old = self._stages.get(replica_id)
+        if old is None or old[0] != text:
+            # `since` marks the step, not each progress update: a download keeps its start time
+            same_step = old is not None and old[0].split(":", 1)[0] == text.split(":", 1)[0]
+            self._stages[replica_id] = (text, old[1] if same_step else self.clock())
+
+    async def _watch_download(self, rid: str, head_url: str, head_node: str, names: list[str]) -> None:
+        """Mirror the head agent's download progress for `names` into the replica's stage."""
+        while True:
+            try:
+                prog = await self.client.download_progress(head_url)
+            except Exception:
+                prog = {}  # progress is a nicety: never fail or stall a launch over it
+            for n in names:
+                d = prog.get(n)
+                if isinstance(d, dict):
+                    self._set_stage(rid, f"downloading {d.get('file') or n} to {head_node}: "
+                                         f"{_progress_text(d)}")
+                    break
+            await asyncio.sleep(max(self.poll_s, 2.0))
 
     def note_error(self, replica_id: str) -> None:
         self._suspect.add(replica_id)
@@ -1235,14 +1278,23 @@ class Reconciler:
 
             # The head's model files are fetched while the RPC engines start: on a cold start the
             # download, not the engines, is the long pole, and the two do not depend on each other.
+            rpcs = rpc_servers(p)
+            self._set_stage(rid, f"checking the model file on {p.head_node}" + (
+                f", starting RPC servers on {', '.join(dict.fromkeys(d[0].node_id for _, d in rpcs))}"
+                if rpcs else ""))
+            names = [self._model_source(spec)[0]]
+            if spec.speculative == "draft" and spec.draft:
+                names.append(self._model_source(spec, spec.draft)[0])
             models = asyncio.create_task(self._ensure_head_models(spec, head_url))
+            watch = asyncio.create_task(self._watch_download(rid, head_url, p.head_node, names))
             try:
                 await self._start_rpc_engines(rid, p, agent, head_host, created)
                 path, draft_path = await models
             finally:  # always reap: a download that failed meanwhile must not go unretrieved
-                if not models.done():
-                    models.cancel()
-                await asyncio.gather(models, return_exceptions=True)
+                for t in (models, watch):
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(models, watch, return_exceptions=True)
             if draft_path is not None:
                 extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
                              draft_n_max=spec.draft_n_max)
@@ -1266,7 +1318,9 @@ class Reconciler:
                 rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
                 tensor_split=p.tensor_split, model=spec.name, model_path=path,
                 ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
-            await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health")
+            self._set_stage(rid, f"loading the model on {p.head_node}" + (
+                " (weights for remote GPUs go over the network)" if rpcs else ""))
+            await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health", rid)
 
             cur = self.store.get_replica(rid)
             if cur is None or cur.state != "launching":
@@ -1312,6 +1366,7 @@ class Reconciler:
                     await self._calibrate(rec, spec, head_url)
             finally:
                 self._launches.pop(rid, None)
+                self._stages.pop(rid, None)
 
     async def _start_rpc_engines(self, rid: str, p: Placement, agent: Callable[[str], str],
                                  head_host: str, created: list[tuple[str, str]]) -> None:
@@ -1470,8 +1525,9 @@ class Reconciler:
                 raise LaunchError(f"engine {eid} not running after {self.cfg.launch_timeout_s}s")
             await asyncio.sleep(self.poll_s)
 
-    async def _wait_health(self, agent_url: str, head_id: str, health_url: str) -> None:
+    async def _wait_health(self, agent_url: str, head_id: str, health_url: str, rid: str | None = None) -> None:
         deadline = time.monotonic() + self.cfg.launch_timeout_s
+        stage = self._stages.get(rid, ("", 0.0))[0] if rid else ""
         while True:
             try:
                 r = await self._http_client().get(health_url)
@@ -1482,6 +1538,10 @@ class Reconciler:
             st = await self.client.get_engine(agent_url, head_id)
             if st is not None and st.state in ("exited", "failed"):
                 raise LaunchError(f"head engine {st.state} (exit={st.exit_code})")
+            if rid and stage and st is not None and st.log_tail:
+                # llama-server's latest line says where loading is (tensors, KV cache, warmup)
+                last = next((ln.strip() for ln in reversed(st.log_tail) if ln.strip(".\n ")), "")
+                self._set_stage(rid, f"{stage}: {last[:160]}" if last else stage)
             if time.monotonic() > deadline:
                 raise LaunchError(f"{health_url} not healthy after {self.cfg.launch_timeout_s}s")
             await asyncio.sleep(self.poll_s)

@@ -5,6 +5,7 @@ import os
 import logging
 import re
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -16,6 +17,17 @@ log = logging.getLogger(__name__)
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
+
+# Downloads in flight, by model name: what the coordinator shows while a replica waits for its
+# file (a 50 GB download otherwise looks like a hung launch). Written by the download thread,
+# read by the API; each value is replaced whole, never mutated, so readers see a consistent dict.
+_progress: dict[str, dict] = {}
+
+
+def download_progress() -> dict[str, dict]:
+    """{model name: {"file", "part", "parts", "got", "total"}} for downloads in flight; `got` and
+    `total` count the current file's bytes (`total` None when the source does not say)."""
+    return dict(_progress)
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -54,8 +66,10 @@ def _remote_size(url: str, headers: dict[str, str], client_kw: dict) -> int | No
         return None
 
 
-def _download(url: str, headers: dict[str, str], client_kw: dict, final: Path) -> int:
-    """Fetch one file into `final` (reused when the source agrees); returns its size."""
+def _download(url: str, headers: dict[str, str], client_kw: dict, final: Path,
+              progress: Callable[[int, int | None], None] = lambda got, total: None) -> int:
+    """Fetch one file into `final` (reused when the source agrees); returns its size.
+    `progress(got, total)` is called as bytes arrive (total None when unknown)."""
     fname = final.name
     with _lock_for(final):
         if final.is_file() and final.stat().st_size > 0:
@@ -89,10 +103,13 @@ def _download(url: str, headers: dict[str, str], client_kw: dict, final: Path) -
                 expected = None if encoded else r.headers.get("content-length")
                 chunks = r.iter_bytes(1024 * 1024) if encoded else r.iter_raw(1024 * 1024)
                 got = 0
+                total = int(expected) if expected is not None else None
+                progress(0, total)
                 with open(part, "wb") as f:
                     for chunk in chunks:
                         f.write(chunk)
                         got += len(chunk)
+                        progress(got, total)
                     f.flush()
                     os.fsync(f.fileno())
             if expected is not None and got != int(expected):
@@ -138,15 +155,19 @@ def ensure_model(name: str, source: str, cache_dir: Path, coordinator_url: str,
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     m = _SPLIT_RE.match(fname)
-    if not (m and int(m["idx"]) == 1):
-        return (cache_dir / fname), _download(url_of(fname), headers, client_kw, cache_dir / fname)
-
     # Split GGUF: llama-server loads part 1 and needs every other part beside it. Part 1 goes
     # LAST so its presence never implies a complete set (a cache check sees part 1 first, and
     # a half-fetched set must resume instead of looking done).
-    total = int(m["total"])
-    names = [f"{m['stem']}-{i:05d}-of-{m['total']}.gguf" for i in range(2, total + 1)] + [fname]
-    size = sum(_download(url_of(n), headers, client_kw, cache_dir / n) for n in names)
+    names = ([f"{m['stem']}-{i:05d}-of-{m['total']}.gguf" for i in range(2, int(m["total"]) + 1)] + [fname]
+             if m and int(m["idx"]) == 1 else [fname])
+    size = 0
+    try:
+        for i, n in enumerate(names, 1):
+            def progress(got: int, total: int | None, n=n, i=i) -> None:
+                _progress[name] = {"file": n, "part": i, "parts": len(names), "got": got, "total": total}
+            size += _download(url_of(n), headers, client_kw, cache_dir / n, progress)
+    finally:
+        _progress.pop(name, None)
     return cache_dir / fname, size
 
 

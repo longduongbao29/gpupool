@@ -17,7 +17,7 @@ from gpupool.agent.gpu import probe_devices
 from gpupool.agent.rpc_cache import prune as prune_rpc_cache
 from gpupool.agent.rpc_cache import rpc_cache_dir
 from gpupool.agent.memlog import parse_buffers
-from gpupool.agent.models_cache import ensure_model, list_models
+from gpupool.agent.models_cache import download_progress, ensure_model, list_models
 from gpupool.agent.procs import (
     EngineExists, PortInUse, ProcessManager, build_number, disable_core_dumps, llama_cuda_archs,
     llama_version,
@@ -285,6 +285,10 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         if st is None:
             raise HTTPException(404, "unknown engine")
         return st
+
+    @app.get("/models/progress", dependencies=[auth])
+    def models_progress():
+        return download_progress()
 
     @app.post("/models/ensure", dependencies=[auth])
     async def models_ensure(body: EnsureBody):

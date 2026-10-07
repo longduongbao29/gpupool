@@ -540,6 +540,7 @@
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
                     <span class="chip" x-show="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
+                    <div class="rnote rep-stage" x-show="p.stage" x-text="p.stage" :title="p.stage"></div>
                   </div>
                 </template>
                 <details class="why">

@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A launching replica shows what it is doing and for how long, on the Models page and in `replicas[].stage`:
+  downloading the model file to the head (part, GB done of total, percent), starting RPC servers, then loading with
+  llama-server's latest log line. A first launch of a big model (a 50 GB download, then weights sent to remote GPUs)
+  no longer looks hung. Agent API: `GET /models/progress`.
+
 ## [0.7.1] - 2026-10-07
 
 ### Fixed

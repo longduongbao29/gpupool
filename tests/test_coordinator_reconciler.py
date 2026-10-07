@@ -2195,3 +2195,35 @@ async def test_plan_error_backs_off_and_start_retries_at_once():
     await rec.tick()
     assert len(calls) == 3
     await rec.shutdown()
+
+
+async def test_launch_stage_shows_download_progress_then_clears(mock_health):
+    class SlowDownload(FakeClient):
+        release = None
+
+        async def download_progress(self, url):
+            return {"m.gguf": {"file": "m.gguf", "part": 1, "parts": 1, "got": 13_500_000_000, "total": 27e9}}
+
+        async def ensure_model(self, url, name, source):
+            self.calls.append(("ensure", url, name, source))
+            await asyncio.wait_for(self.release.wait(), 5)
+            return "/cache/" + name
+
+    client = SlowDownload()
+    client.release = asyncio.Event()
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    rid = store.list_replicas()[0].replica_id
+    for _ in range(100):
+        st = rec.stage(rid)
+        if st and st["text"].startswith("downloading"):
+            break
+        await asyncio.sleep(0.01)
+    assert st["text"] == "downloading m.gguf to a: 13.5 of 27.0 GB (50%)"
+    client.release.set()
+    await settle(rec)
+    assert store.list_replicas()[0].state == "ready"
+    assert rec.stage(rid) is None
+    await rec.shutdown()
