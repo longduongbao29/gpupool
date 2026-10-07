@@ -8,6 +8,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Một port trong `GPUPOOL_PORT_RANGE` bị tiến trình ngoài gpupool chiếm không còn chặn model mãi mãi: coordinator
+  chọn lại đúng port đó ở mỗi lần thử. Port bị agent từ chối giờ được bỏ qua trên máy đó trong một giờ, launch được
+  thử lại ngay với port khác, và cảnh báo `port_busy` nêu rõ port đó.
+
 ### Thay đổi
 
 - Launch đang nạp weights không còn bị dừng ở `launch_timeout_s`: khi llama-server còn báo tiến độ nạp, thời gian chờ

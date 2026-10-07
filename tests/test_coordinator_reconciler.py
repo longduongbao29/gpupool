@@ -2271,3 +2271,33 @@ async def test_loading_progress_extends_the_launch_timeout():
     r = store.list_replicas()[0]
     assert r.state == "failed" and "without loading progress" in r.error
     await rec.shutdown()
+
+
+async def test_port_held_by_another_process_is_skipped_on_the_next_launch(mock_health):
+    from gpupool.coordinator.agent_client import AgentError
+
+    class Busy(FakeClient):
+        busy: int | None = None
+
+        async def start_engine(self, url, spec):
+            if spec.kind == "server" and self.busy in (None, spec.port):
+                self.busy = spec.port  # something outside gpupool holds the first head port
+                self.calls.append(("start", url, spec.engine_id, spec))
+                raise AgentError(422, f'{{"detail":"port {spec.port} not available on 10.0.0.1"}}', url)
+            return await super().start_engine(url, spec)
+
+    client = Busy()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    first = store.list_replicas()[0]
+    assert first.state == "failed" and "not available" in first.error
+    await rec.tick()  # no backoff: relaunched right away, on another port
+    await settle(rec)
+    second = [r for r in store.list_replicas() if r.replica_id != first.replica_id][0]
+    assert second.state == "ready"
+    assert second.placement.head_port != client.busy
+    assert any(e.kind == "port_busy" for e in store.list_events())
+    await rec.shutdown()

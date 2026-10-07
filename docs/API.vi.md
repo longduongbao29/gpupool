@@ -526,7 +526,7 @@ nó đang hiển thị, nên event đến trong lúc đó được giữ lại).
 event mới nhất.
 
 Các loại event có trong code: `server_added`, `server_removed`, `node_online`, `node_offline`,
-`model_started`, `model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`,
+`model_started`, `model_stopped`, `launch_failed`, `port_busy`, `engine_crashed`, `crash_loop`, `gpu_missing`,
 `realloc_started`, `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`,
 `unloaded_idle`, `cold_start`, `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (head của model `mtp` không nháp được bằng MTP: phục
 vụ không speculative), `llama_version_mismatch` (các server đã đăng ký chạy bản llama.cpp khác nhau; model bị chia
