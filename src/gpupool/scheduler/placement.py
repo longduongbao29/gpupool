@@ -254,8 +254,22 @@ def _order(devs: list[_Dev], head_id: str, big_last: bool = False) -> list[_Dev]
     return others + head_cpu + head_cuda
 
 
+def _can_hold_a_layer(meta, ctx, ct, devs: list[_Dev]) -> list[_Dev]:
+    """The devices that can hold at least one layer (the draft's pinned one always stays).
+    Every device of a split gets one layer or more, and the multi-node tiers take whole nodes,
+    so a nearly full GPU (250 MB left) on an otherwise roomy node made every split infeasible."""
+    smallest: dict[str, int] = {}
+    for d in devs:  # the need depends on the device kind only
+        if d.dev.kind not in smallest:
+            smallest[d.dev.kind] = min(_need(meta, ctx, ct, d, i, 1, False) for i in range(meta.n_layers))
+    return [d for d in devs if d.pin or d.dev.usable_mb >= smallest[d.dev.kind]]
+
+
 def _solve(meta, ctx, ct, devs: list[_Dev]) -> tuple[list[_Dev], list[int], str] | None:
     """Order + split for a device set; head = node with most layers (fixed point)."""
+    devs = _can_hold_a_layer(meta, ctx, ct, devs)
+    if not devs:
+        return None
     pinned = next((d for d in devs if d.pin), None)
     if pinned is not None:
         # the head is dictated (it holds the draft), so skip the most-layers fixed point

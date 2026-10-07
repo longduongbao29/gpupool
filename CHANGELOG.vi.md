@@ -8,6 +8,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Placement: một GPU đầy tới mức không chứa nổi một layer (vd. còn 250 MB) không còn làm mọi cách chia trên node của
+  nó bất khả thi. Placement nhiều node lấy nguyên node và mỗi thiết bị trong cách chia phải nhận ít nhất một layer, nên
+  một GPU như vậy cạnh một GPU còn rộng gây NoFit dù pool còn dư chỗ; giờ nó được bỏ ra khỏi cách chia.
+
 ## [0.7.0] - 2026-10-06
 
 ### Thêm
