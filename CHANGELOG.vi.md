@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.8.0] - 2026-10-07
+
 ### Thêm
 
 - Cài đặt suy nghĩ cho model có thinking (Qwen3, DeepSeek-R1, gpt-oss...): **Thinking** auto / on / off, **Effort**
@@ -398,7 +400,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/longduongbao29/gpupool/compare/v0.7.0...v0.7.1
