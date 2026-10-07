@@ -528,7 +528,7 @@ listed, so an event that arrives meanwhile is kept). Returns `{"deleted": n, "un
 the newest 1000 events.
 
 Event kinds in the code: `server_added`, `server_removed`, `node_online`, `node_offline`, `model_started`,
-`model_stopped`, `launch_failed`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
+`model_stopped`, `launch_failed`, `port_busy`, `engine_crashed`, `crash_loop`, `gpu_missing`, `realloc_started`,
 `realloc_failed`, `realloc_done`, `preempted`, `scaled_up`, `scaled_down`, `unloaded_idle`, `cold_start`,
 `rebalance_started`, `rebalanced`, `rebalance_failed`, `calibrated`, `mtp_unavailable` (an `mtp` model's head cannot draft with MTP:
 served without speculation), `llama_version_mismatch` (registered servers

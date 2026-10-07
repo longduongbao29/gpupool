@@ -2227,3 +2227,77 @@ async def test_launch_stage_shows_download_progress_then_clears(mock_health):
     assert store.list_replicas()[0].state == "ready"
     assert rec.stage(rid) is None
     await rec.shutdown()
+
+
+def test_load_status_reads_the_dots_llama_cpp_prints_while_loading():
+    from gpupool.coordinator.reconciler import _load_status
+    tail = ["0.02.938.501 I load_tensors: offloading 65 repeating layers to GPU",
+            "0.02.938.583 I load_tensors: loading model tensors, this can take a while... (load_mode = mmap)",
+            "." * 37]
+    assert _load_status(tail) == (
+        "load_tensors: loading model tensors, this can take a while... (load_mode = mmap)", 37)
+    # past the load: the dots line is no longer the latest, so no percent
+    assert _load_status(tail[:2] + ["." * 100, "llama_context: constructing"]) == ("llama_context: constructing", None)
+    assert _load_status([]) == ("", None)
+
+
+async def test_loading_progress_extends_the_launch_timeout():
+    # 37% -> 38% -> ... keeps the launch alive past launch_timeout_s; it fails only when progress stops
+    client = FakeClient()
+    cfg = make_cfg(launch_timeout_s=0.3)
+    rec, store, clock = make_reconciler(cfg=cfg, client=client)
+    rec.poll_s = 0.05
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    dots = {"n": 1}
+    real_get = client.get_engine
+
+    async def get_engine(url, eid):
+        st = await real_get(url, eid)
+        if st is not None and eid.endswith("-head"):
+            dots["n"] = min(dots["n"] + 1, 12)  # grows for ~0.55 s, then stalls
+            st = st.model_copy(update={"state": "starting", "log_tail": ["load_tensors: loading", "." * dots["n"]]})
+        return st
+
+    client.get_engine = get_engine
+    with respx.mock() as m:
+        m.get(url__regex=HEALTH).mock(side_effect=httpx.ConnectError("not yet"))
+        await rec.tick()
+        rid = store.list_replicas()[0].replica_id
+        await asyncio.sleep(0.45)  # past launch_timeout_s, but progress is still arriving
+        assert store.list_replicas()[0].state == "launching"
+        assert rec.stage(rid)["text"].endswith("%, load_tensors: loading")
+        await asyncio.wait_for(settle(rec), 5)
+    r = store.list_replicas()[0]
+    assert r.state == "failed" and "without loading progress" in r.error
+    await rec.shutdown()
+
+
+async def test_port_held_by_another_process_is_skipped_on_the_next_launch(mock_health):
+    from gpupool.coordinator.agent_client import AgentError
+
+    class Busy(FakeClient):
+        busy: int | None = None
+
+        async def start_engine(self, url, spec):
+            if spec.kind == "server" and self.busy in (None, spec.port):
+                self.busy = spec.port  # something outside gpupool holds the first head port
+                self.calls.append(("start", url, spec.engine_id, spec))
+                raise AgentError(422, f'{{"detail":"port {spec.port} not available on 10.0.0.1"}}', url)
+            return await super().start_engine(url, spec)
+
+    client = Busy()
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    first = store.list_replicas()[0]
+    assert first.state == "failed" and "not available" in first.error
+    await rec.tick()  # no backoff: relaunched right away, on another port
+    await settle(rec)
+    second = [r for r in store.list_replicas() if r.replica_id != first.replica_id][0]
+    assert second.state == "ready"
+    assert second.placement.head_port != client.busy
+    assert any(e.kind == "port_busy" for e in store.list_events())
+    await rec.shutdown()

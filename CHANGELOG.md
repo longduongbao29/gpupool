@@ -8,6 +8,19 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A port in `GPUPOOL_PORT_RANGE` held by a process outside gpupool no longer blocks a model forever: the coordinator
+  picked the same busy port on every retry. A port an agent refuses is now skipped on that server for an hour, the
+  launch is retried at once on another one, and a `port_busy` warning names it.
+
+### Changed
+
+- A launch that is still loading weights is no longer killed at `launch_timeout_s`: while llama-server reports load
+  progress the timeout counts from the latest progress. A first load that sends many GB to remote GPUs over a slow
+  link used to fail at 10 minutes and start over.
+- The launch stage shows the load percent (llama.cpp's progress dots) and drops llama.cpp's log timestamp prefix.
+
 ## [0.7.2] - 2026-10-07
 
 ### Added

@@ -30,7 +30,7 @@ from gpupool.common.models import (
 )
 from gpupool.common.net import internal_client
 from gpupool.coordinator import preemption
-from gpupool.coordinator.agent_client import AgentClient
+from gpupool.coordinator.agent_client import AgentClient, AgentError
 from gpupool.coordinator.autoscaler import bounds
 from gpupool.coordinator.events import Notifier
 from gpupool.coordinator.store import NodeRecord, Store, gpu_key, planning_factor
@@ -45,6 +45,10 @@ log = logging.getLogger("gpupool.reconciler")
 
 class LaunchError(Exception):
     pass
+
+
+class _PortTaken(LaunchError):
+    """An agent refused an engine port that something outside gpupool holds."""
 
 
 class _Superseded(Exception):
@@ -70,6 +74,32 @@ def _progress_text(d: dict) -> str:
     if total:
         return out + f"{got / 1e9:.1f} of {_gb(total)} ({100 * got / total:.0f}%)"
     return out + _gb(got)
+
+
+# llama.cpp's log prefix with timestamps on ("0.02.938.583 I "): not worth showing
+_LOG_PREFIX = re.compile(r"^\d+\.\d+\.\d+\.\d+ [A-Z] ")
+
+
+def _load_status(log_tail: list[str]) -> tuple[str, int | None]:
+    """(latest meaningful log line, model load percent or None) from llama-server's log tail.
+
+    While loading weights llama.cpp prints one dot per percent on a line of its own and ends it
+    at 100% (llama_model_load's default progress callback); the agent's tail includes that
+    unfinished line. Weights for RPC devices are sent during this same load, so the dots cover
+    the network transfer too."""
+    pct = None
+    last = ""
+    for ln in reversed(log_tail):
+        t = _LOG_PREFIX.sub("", ln.strip())
+        if not t:
+            continue
+        if set(t) == {"."}:
+            if pct is None and not last:
+                pct = min(100, len(t))
+            continue
+        last = t
+        break
+    return last, pct
 
 
 def _port_of(endpoint: str) -> int:
@@ -152,6 +182,7 @@ class Reconciler:
     # A move reloads a whole model, so it must be clearly better, not just better (score points).
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
+    BUSY_PORT_S = 3600.0  # how long a port another process held is skipped on that node
     CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
     SPEED_SAMPLE_S = 60.0  # how often ready replicas feed the speed model
     SPEED_ALPHA = 0.2  # EMA weight of one speed sample (one per replica per SPEED_SAMPLE_S)
@@ -184,6 +215,10 @@ class Reconciler:
         # replica id -> (what its launch is doing now, since when): shown while it is not ready yet,
         # so a long download or weight upload is not mistaken for a hung launch
         self._stages: dict[str, tuple[str, float]] = {}
+        # node id -> {port: skip until}: ports an agent refused because another process holds them.
+        # The coordinator only knows the ports it handed out, so without this it would pick the
+        # same busy port on every retry and the model would never start.
+        self._busy_ports: dict[str, dict[int, float]] = {}
         self._suspect: set[str] = set()
         self._tick_lock = asyncio.Lock()
         self._nofit: dict[str, str] = {}
@@ -450,9 +485,12 @@ class Reconciler:
         lo, hi = self.cfg.port_range
         used_cache: dict[str, set[int]] = {}
 
+        now = self.clock()
+
         def port_alloc(node_id: str) -> int:
             if node_id not in used_cache:
-                used_cache[node_id] = self._used_ports(node_id) | reported_ports.get(node_id, set())
+                busy = {p for p, until in self._busy_ports.get(node_id, {}).items() if until > now}
+                used_cache[node_id] = self._used_ports(node_id) | reported_ports.get(node_id, set()) | busy
             taken = used_cache[node_id] | handed.setdefault(node_id, set())
             for p in range(lo, hi + 1):
                 if p not in taken:
@@ -1312,7 +1350,7 @@ class Reconciler:
 
             head_id = f"{rid}-head"
             created.append((head_url, head_id))
-            await self.client.start_engine(head_url, EngineSpec(
+            await self._start_engine(head_url, p.head_node, EngineSpec(
                 engine_id=head_id, kind="server", port=p.head_port,
                 devices=[a.llama_device for a in p.assignments],
                 rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
@@ -1357,7 +1395,8 @@ class Reconciler:
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
-            self._bump_backoff(spec.name, self.clock())
+            if not isinstance(e, _PortTaken):  # a busy port is now skipped: retry at once on another
+                self._bump_backoff(spec.name, self.clock())
         finally:
             try:
                 if became_ready:
@@ -1368,6 +1407,19 @@ class Reconciler:
                 self._launches.pop(rid, None)
                 self._stages.pop(rid, None)
 
+    async def _start_engine(self, url: str, node_id: str, spec: EngineSpec) -> None:
+        try:
+            await self.client.start_engine(url, spec)
+        except AgentError as e:
+            if e.status == 422 and "not available" in e.body:
+                self._busy_ports.setdefault(node_id, {})[spec.port] = self.clock() + self.BUSY_PORT_S
+                self._emit("warning", "port_busy",
+                           f"Port {spec.port} on {node_id} is held by another process; gpupool skips it "
+                           f"for {self.BUSY_PORT_S / 60:.0f} min (free it or change GPUPOOL_PORT_RANGE)",
+                           node_id=node_id)
+                raise _PortTaken(str(e)) from e
+            raise
+
     async def _start_rpc_engines(self, rid: str, p: Placement, agent: Callable[[str], str],
                                  head_host: str, created: list[tuple[str, str]]) -> None:
         """Start every RPC engine of `p`, then wait until all of them listen. Each one is added to
@@ -1377,7 +1429,7 @@ class Reconciler:
             eid = rpc_engine_id(rid, devs)
             url = agent(devs[0].node_id)
             created.append((url, eid))
-            await self.client.start_engine(url, EngineSpec(
+            await self._start_engine(url, devs[0].node_id, EngineSpec(
                 engine_id=eid, kind="rpc", port=_port_of(endpoint), devices=[a.device_id for a in devs],
                 allowed_peers=[head_host]))  # only the head connects to an RPC engine
             rpc_ids.append((url, eid))
@@ -1528,6 +1580,7 @@ class Reconciler:
     async def _wait_health(self, agent_url: str, head_id: str, health_url: str, rid: str | None = None) -> None:
         deadline = time.monotonic() + self.cfg.launch_timeout_s
         stage = self._stages.get(rid, ("", 0.0))[0] if rid else ""
+        best_pct = -1
         while True:
             try:
                 r = await self._http_client().get(health_url)
@@ -1538,10 +1591,18 @@ class Reconciler:
             st = await self.client.get_engine(agent_url, head_id)
             if st is not None and st.state in ("exited", "failed"):
                 raise LaunchError(f"head engine {st.state} (exit={st.exit_code})")
-            if rid and stage and st is not None and st.log_tail:
-                # llama-server's latest line says where loading is (tensors, KV cache, warmup)
-                last = next((ln.strip() for ln in reversed(st.log_tail) if ln.strip(".\n ")), "")
-                self._set_stage(rid, f"{stage}: {last[:160]}" if last else stage)
+            if st is not None and st.log_tail:
+                last, pct = _load_status(st.log_tail)
+                if pct is not None and pct > best_pct:
+                    # Still loading: a first load that sends many GB to remote GPUs over a slow
+                    # link can take longer than launch_timeout_s, and killing it would restart
+                    # it from scratch. The timeout counts from the last progress instead.
+                    best_pct = pct
+                    deadline = max(deadline, time.monotonic() + self.cfg.launch_timeout_s)
+                if rid and stage:
+                    detail = ", ".join(x for x in (f"{pct}%" if pct is not None else "", last[:160]) if x)
+                    self._set_stage(rid, f"{stage}: {detail}" if detail else stage)
             if time.monotonic() > deadline:
-                raise LaunchError(f"{health_url} not healthy after {self.cfg.launch_timeout_s}s")
+                raise LaunchError(f"{health_url} not healthy after {self.cfg.launch_timeout_s}s"
+                                  + (" without loading progress" if best_pct >= 0 else ""))
             await asyncio.sleep(self.poll_s)
