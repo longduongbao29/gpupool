@@ -601,3 +601,15 @@ def test_fallback_order_only_when_the_default_does_not_fit():
     pl = plan(meta, SPEC, nodes, "r", Ports())
     head = [a.device_id for a in pl.assignments if a.node_id == pl.head_node]
     assert head == ["CUDA0", "CUDA1"][:len(head)]
+
+
+def test_nearly_full_gpu_on_a_roomy_node_does_not_cause_nofit():
+    # 0.7.0: the multi-node tiers take whole nodes and every device of a split gets a layer, so a
+    # 250 MB GPU next to a 21 GB one made every split infeasible (52 GB needed, 85 GB usable).
+    meta = _hybrid_27b()
+    nodes = [node("s3", dev("CUDA0", 21666), dev("CUDA1", 21603)),
+             node("s4", dev("CUDA0", 250), dev("CUDA1", 21617)),
+             node("dl2", dev("CUDA0", 10032), dev("CUDA1", 9926))]
+    pl = plan(meta, ModelSpec(name="q", source="x", ctx_size=4096), nodes, "r", Ports())
+    assert sum(a.layers for a in pl.assignments) == 65
+    assert ("s4", "CUDA0") not in {(a.node_id, a.device_id) for a in pl.assignments}
