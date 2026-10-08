@@ -1,6 +1,6 @@
 [project]
 name = "gpupool"
-version = "0.9.0"
+version = "0.9.1"
 description = "Pool scattered GPU memory across servers to serve LLMs via llama.cpp"
 readme = "README.md"
 license = "MIT"
