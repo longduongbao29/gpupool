@@ -8,6 +8,11 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Models: on a deployment pinned to devices, the *Pinned to* row and its device chips no longer fall out of the
+  card (squeezing the endpoint box); the replica placement layout rule only applies inside a replica row.
+
 ## [0.9.0] - 2026-10-08
 
 ### Changed

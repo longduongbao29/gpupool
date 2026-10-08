@@ -1110,3 +1110,13 @@ def test_ui_visual_language():
     assert "::view-transition-old(root)" in css and ".nav-pill" in css
     # entrances fill "backwards" so hover transforms work once they end
     assert re.search(r"\.view > \*, \.pg > \.panel \{ animation: rise [^}]*backwards", css)
+
+
+def test_ui_pinned_row_stays_in_model_card():
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    # the "Pinned to" row also carries class "place"; a bare .place flex-basis of 100% made it as tall as the
+    # column-flex model card, so its chips fell out of the card. The placement layout is scoped to replica rows.
+    assert 'class="place row wrap"' in html
+    assert not re.search(r"(^|\n)\.place \{[^}]*flex:", css)
+    assert re.search(r"\.rep \.place \{[^}]*flex: 1 0 100%", css)

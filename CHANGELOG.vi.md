@@ -8,6 +8,11 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- Models: với deployment được ghim vào thiết bị, dòng *Pinned to* và các thẻ thiết bị không còn tụt ra ngoài card
+  (làm bóp khung endpoint); quy tắc bố cục placement của replica chỉ áp dụng trong dòng replica.
+
 ## [0.9.0] - 2026-10-08
 
 ### Thay đổi
