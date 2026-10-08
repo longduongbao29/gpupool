@@ -216,7 +216,8 @@ async def test_model_file_replicas_listing_and_outstanding(env):
     st = (await c.get("/api/state")).json()
     m = model_state(st)
     assert m["file"] == "x.gguf"
-    assert [r["replica_id"] for r in m["replicas"]] == ["m-new", "m-live"]  # active + newest failed only
+    # active only: the newest failure predates the ready replica, so it is history
+    assert [r["replica_id"] for r in m["replicas"]] == ["m-live"]
     assert all(r["outstanding"] == 0 for r in m["replicas"])
     assert model_state(st)["spec"]["source"] == "coordinator://x.gguf"
 
@@ -895,3 +896,23 @@ async def test_state_shows_the_speed_model(env):
     assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.5, "hop_ms": 2.0}
     set_speed_model(0.62, 0.0007)
     assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.62, "hop_ms": 0.7}
+
+
+async def test_failure_newer_than_the_ready_replica_is_listed(env):
+    c, store, rec, _, clock, _ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 2}))
+    put_replica(store, "m-live", state="ready", now=1.0)
+    put_replica(store, "m-bad", state="failed", now=2.0, head_port=9001)
+    m = model_state((await c.get("/api/state")).json())
+    assert [r["replica_id"] for r in m["replicas"]] == ["m-live", "m-bad"]
+
+
+async def test_delete_replica_only_removes_terminal_ones(env):
+    c, store, rec, _, clock, _ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 1}))
+    put_replica(store, "m-bad", state="failed", now=1.0)
+    put_replica(store, "m-live", state="ready", now=2.0, head_port=9001)
+    assert (await c.delete("/api/models/m/replicas/m-live")).status_code == 409
+    assert (await c.delete("/api/models/other/replicas/m-bad")).status_code == 404
+    assert (await c.delete("/api/models/m/replicas/m-bad")).status_code == 200
+    assert store.get_replica("m-bad") is None and store.get_replica("m-live") is not None

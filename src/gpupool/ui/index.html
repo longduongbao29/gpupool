@@ -542,6 +542,7 @@
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
                     <span class="chip" x-show="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
+                    <button type="button" class="btn ghost danger icon rep-del" x-show="p.state==='failed' || p.state==='stopped'" @click="deleteReplica(m, p.id)" title="Remove this failed replica from the list" aria-label="Remove replica" x-html="icon('trash')"></button>
                     <div class="rnote rep-stage" x-show="p.stage" x-text="p.stage" :title="p.stage"></div>
                   </div>
                 </template>

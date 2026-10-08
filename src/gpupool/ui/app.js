@@ -1404,6 +1404,13 @@ function app() {
         await this.refresh();
       } catch (e) { this.fail(e); }
     },
+    // Forget a failed / stopped replica record: it holds no engine, only its row in the card.
+    deleteReplica: async function (m, rid) {
+      try {
+        await this.api("DELETE", "/api/models/" + encodeURIComponent(m.spec.name) + "/replicas/" + encodeURIComponent(rid));
+        await this.refresh();
+      } catch (e) { this.fail(e); }
+    },
     deleteModel: async function (m) {
       if (!(await this.confirmBox("Delete the deployment \"" + m.spec.name + "\"?\n\nIts replicas are stopped and its settings removed. The model file stays in the library.", { ok: "Stop and delete", danger: true }))) return;
       try {

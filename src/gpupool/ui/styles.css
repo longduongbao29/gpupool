@@ -429,6 +429,7 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .rep .chips { display: flex; order: 5; flex: 1 0 100%; gap: var(--s-1); flex-wrap: wrap; min-width: 0; padding-left: 16px; }
 .rep .tps { font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; margin-left: auto; order: 3; }
 .rep .mark { order: 2; }
+.rep .rep-del { order: 4; width: 24px; height: 24px; min-height: 0; padding: 0; }
 .rep .rep-stage { order: 6; flex: 1 0 100%; padding-left: 16px; margin-top: 0; overflow-wrap: anywhere; }
 .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
 .sdot.green { background: var(--success); }
