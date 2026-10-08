@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.1] - 2026-10-08
+
 ### Sửa lỗi
 
 - Models: với deployment được ghim vào thiết bị, dòng *Pinned to* và các thẻ thiết bị không còn tụt ra ngoài card
@@ -421,7 +423,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.9.0...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/longduongbao29/gpupool/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...v0.7.3
