@@ -8,6 +8,22 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.0] - 2026-10-08
+
+### Thay đổi
+
+- **Servers & GPUs** gộp thành một trang: trang *GPUs* thành chế độ *All GPUs* của nó (`#gpus` vẫn mở được). Server
+  đóng chỉ hiện số và các ô GPU tô màu theo utilization, không có thanh; server mở có sparkline CPU, RAM và mỗi GPU
+  một cặp thanh utilization + bộ nhớ; GPU có vòng utilization và sparkline, bộ nhớ xếp chồng theo model (kèm phần
+  pool dùng được và dự phòng), thanh nhiệt độ có vùng và bộ nhớ theo tiến trình.
+- Biểu đồ mới: **GPU memory by model** cho cả pool, placement của replica thành thanh theo thiết bị (theo layer),
+  sparkline *Busy* của model có mục tiêu autoscaling, tok/s đo được so với ước tính dạng bullet chart, và dòng thời
+  gian sự kiện. Lịch sử sparkline giữ trong trình duyệt; màu series là bộ màu sáng/tối đã kiểm tra.
+- Một model launch fail 5 lần liên tiếp không còn tự retry (event `launch_gave_up`); bấm Start hoặc lưu lại
+  settings để thử lại. Request tới model đó nhận 503 ngay.
+- Replica failed chỉ hiện trên card model cho tới khi một replica launch sau nó chạy được; replica failed hoặc
+  stopped có thể xóa (`DELETE /api/models/{name}/replicas/{id}`, nút thùng rác).
+
 ## [0.8.0] - 2026-10-07
 
 ### Thêm
@@ -400,7 +416,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...v0.7.2

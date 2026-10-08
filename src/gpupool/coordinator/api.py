@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
-    ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_UBATCH, LIVE_STATES, AutoscalePolicy, FlashAttn, KvCacheType,
+    ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_UBATCH, LIVE_STATES, TERMINAL_STATES, AutoscalePolicy, FlashAttn, KvCacheType,
     ModelSpec, Reasoning, ReasoningEffort, SpecMode, Spread,
 )
 from gpupool.coordinator.agent_client import AgentError
@@ -234,13 +234,20 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 state, error = "failed", nofit
             else:
                 state = "starting"  # desired > 0, the next reconcile tick will launch it
+            if state == "failed" and (gave_up := reconciler.gave_up(spec.name)):
+                error = f"{gave_up}\n\n{error}"
         elif any(r.state in ("draining", "ready", "launching", "pending") for r in reps):
             state = "stopping"
         else:
             state = "stopped"
         if error is None and newest_failed is not None and state == "starting":
             error = newest_failed.error
-        listed = active + ([newest_failed] if newest_failed is not None else [])
+        # The newest failure is shown only while it is news: once a replica launched after it
+        # is serving, the failed attempt is history and listing it beside the live one only
+        # looked like a second copy of the model.
+        last_ready = max((r.created_at for r in reps if r.state == "ready"), default=None)
+        show_failed = newest_failed is not None and (last_ready is None or newest_failed.created_at > last_ready)
+        listed = active + ([newest_failed] if show_failed else [])
         listed.sort(key=lambda r: (r.created_at, r.replica_id))
         file = spec.source[len(COORD_PREFIX):] if spec.source.startswith(COORD_PREFIX) else None
         lo, hi = bounds(spec)
@@ -475,6 +482,17 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         await drain_and_delete_model(store, reconciler, name)
         emit("info", "model_stopped", f"Model {name} removed", model=name)
         reconciler.wake()
+        return {"ok": True}
+
+    @router.delete("/models/{name}/replicas/{replica_id}")
+    async def delete_replica(name: str, replica_id: str) -> dict:
+        """Forget a failed or stopped replica (its record only: it holds no engine or port)."""
+        rec = store.get_replica(replica_id)
+        if rec is None or rec.model != name:
+            raise HTTPException(404, f"no replica {replica_id} of model {name}")
+        if not store.delete_replica(replica_id, set(TERMINAL_STATES)):
+            raise HTTPException(409, f"replica {replica_id} is {rec.state}; only a failed or stopped "
+                                     "replica can be deleted (stop the model to remove a live one)")
         return {"ok": True}
 
     @router.post("/models/{name}/plan")

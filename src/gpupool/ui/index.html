@@ -47,8 +47,7 @@
     <nav class="nav vivid" x-effect="view; $nextTick(() => { const b = $el.querySelector('button.active'); navY = b ? b.offsetTop : null; })">
       <span class="nav-pill" aria-hidden="true" x-show="navY !== null" :style="'transform: translateY(' + navY + 'px)'"></span>
       <button class="vivid blue" :class="{active: view==='overview'}" @click="go('overview')"><span x-html="icon('grid')"></span> Overview</button>
-      <button class="vivid cyan" :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers</button>
-      <button class="vivid green" :class="{active: view==='gpus'}" @click="go('gpus')"><span x-html="icon('chip')"></span> GPUs</button>
+      <button class="vivid cyan" :class="{active: view==='servers'}" @click="go('servers')"><span x-html="icon('server')"></span> Servers &amp; GPUs</button>
       <button class="vivid purple" :class="{active: view==='models'}" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
       <button class="vivid blue" :class="{active: view==='playground'}" @click="go('playground')"><span x-html="icon('chat')"></span> Playground</button>
       <button class="vivid amber" :class="{active: view==='events'}" @click="go('events')"><span x-html="icon('list')"></span> Events
@@ -118,6 +117,7 @@
 
     <template x-if="st">
     <div>
+    <div class="viz-tip" x-show="tip.show" x-cloak :style="tipStyle()" x-text="tip.text" aria-hidden="true"></div>
 
     <!-- ============ stat cards ============ -->
     <div class="stats view" x-show="view==='overview'">
@@ -135,12 +135,67 @@
         <div class="ico vivid amber" x-html="icon('db')"></div></div>
     </div>
 
-    <!-- ============ servers (overview + servers) ============ -->
+    <!-- ============ servers & GPUs (overview + servers) ============ -->
+    <!-- GPU memory by model: which deployment holds memory on which card (the placement view of the pool) -->
+    <div :class="{folded: folded('vram')}" class="panel view vram-panel" x-show="(view==='overview' || view==='servers') && vramRows().length">
+      <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('vram')}" @click="toggleFold('vram')" :aria-expanded="String(!folded('vram'))" :title="folded('vram') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand GPU memory by model" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('vram')">GPU memory by model</h2><span class="muted small">Model shares are placement estimates</span></div>
+      <div class="panel-body">
+        <div class="viz-legend">
+          <template x-for="l in vramLegend()" :key="'vl' + l.k"><span><i class="sw" :class="l.cls" :style="l.color ? 'background:' + l.color : ''"></i><span x-text="l.label"></span></span></template>
+        </div>
+        <div class="vram-rows">
+          <template x-for="r in vramRows()" :key="'vr' + r.key">
+            <div class="vram-row" :class="{stale: !r.s.alive, sel: isSel(r.s, r.d)}" @click="select(r.s, r.d)">
+              <div class="vram-lbl" :title="r.s.node_id + ' / ' + r.d.device_id + ' · ' + r.d.name"><b x-text="r.d.device_id"></b><span class="muted ellipsis" x-text="r.s.node_id"></span></div>
+              <div class="stack lg">
+                <template x-for="g in r.segs" :key="g.k">
+                  <i :class="g.cls" :style="'width:' + g.pct + '%' + (g.color ? ';background:' + g.color : '')" @mouseenter="tipOn($event, g.tip)" @mousemove="tipMove($event)" @mouseleave="tipOff()"></i>
+                </template>
+              </div>
+              <div class="vram-val small"><span x-text="mem(r.d)"></span></div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <div class="cols view" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
       <div :class="{folded: folded('servers')}" class="panel">
-        <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('servers')}" @click="toggleFold('servers')" :aria-expanded="String(!folded('servers'))" :title="folded('servers') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Servers" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('servers')">Servers</h2><span class="muted small" x-text="filteredServers().length + ' shown'"></span></div>
-        <div class="empty" x-show="filteredServers().length === 0">No servers yet. Click <b>Add Server</b> to register an agent.</div>
-        <template x-for="s in filteredServers()" :key="s.node_id">
+        <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('servers')}" @click="toggleFold('servers')" :aria-expanded="String(!folded('servers'))" :title="folded('servers') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Servers" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('servers')">Servers &amp; GPUs</h2>
+          <span class="muted small" x-text="srvMode === 'gpus' ? allGpuRows().length + ' GPUs' : filteredServers().length + ' shown'"></span>
+          <div class="seg right" role="tablist" aria-label="Group">
+            <button type="button" role="tab" :aria-selected="String(srvMode === 'server')" :class="{active: srvMode === 'server'}" @click="srvMode = 'server'">By server</button>
+            <button type="button" role="tab" :aria-selected="String(srvMode === 'gpus')" :class="{active: srvMode === 'gpus'}" @click="srvMode = 'gpus'">All GPUs</button>
+          </div></div>
+        <div class="empty" x-show="filteredServers().length === 0 && srvMode === 'server'">No servers yet. Click <b>Add Server</b> to register an agent.</div>
+
+        <!-- flat list of every GPU, for comparing cards across servers -->
+        <div x-show="srvMode === 'gpus'">
+          <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
+          <div class="tbl-scroll tall" x-show="allGpuRows().length > 0">
+          <table>
+            <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
+            <tbody>
+              <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
+                <tr class="click" :class="{stale: !r.s.alive, sel: isSel(r.s, r.d)}" :title="r.s.alive ? '' : 'Server offline: last reported values'" @click="select(r.s, r.d)">
+                  <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
+                  <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id + (archLabel(r.d) ? ' · ' + archLabel(r.d) : '')" :title="archHelp(r.d)"></div>
+                    <span class="pill red lead" x-show="r.d.kernels_ok === false" :title="'The agent\'s llama.cpp was built for ' + ((r.s.report && r.s.report.cuda_archs) || []).join(', ') + '. Rebuild with this GPU in CUDA_ARCHS.'">No kernels in this build</span></td>
+                  <td @click.stop><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
+                  <td><b class="num" x-text="pct(r.d.util_pct)"></b></td>
+                  <td><span x-text="mem(r.d)"></span> <span class="muted small" x-show="r.d.total_mb" x-text="'(' + memPct(r.d) + '%)'"></span></td>
+                  <td x-text="bw(r.d)"></td>
+                  <td x-text="val(r.d.temp_c, '°C')"></td>
+                  <td x-text="val(r.d.power_w, ' W')"></td>
+                  <td x-text="(r.d.processes || []).map(function (p) { return (p.name || p.pid); }).join(', ') || dash" class="ellipsis proc-list"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          </div>
+        </div>
+
+        <template x-for="s in (srvMode === 'server' ? filteredServers() : [])" :key="s.node_id">
           <div class="server" :class="{offline: !s.alive}">
             <div class="server-head" @click="toggleOpen(s)">
               <span class="chev" :class="{open: isOpen(s)}" x-html="icon('chev')"></span>
@@ -153,19 +208,37 @@
                 <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span><span x-show="llamaVer(s)"> &middot; llama.cpp <span x-text="llamaVer(s)"></span></span></div>
               </div>
               <div class="meters" x-show="s.report">
-                <div class="meter"><div class="t"><span>CPU</span><span x-text="pct(s.report && s.report.cpu_pct)"></span></div>
-                  <div class="bar" :class="level(s.report && s.report.cpu_pct)"><i :style="'width:' + clamp(s.report && s.report.cpu_pct) + '%'"></i></div></div>
-                <div class="meter"><div class="t"><span>RAM</span>
-                  <span x-text="s.report && s.report.ram_total_mb ? gb(s.report.ram_used_mb) + ' / ' + gb(s.report.ram_total_mb) + ' GB' : dash"></span></div>
-                  <div class="bar" :class="level(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : null)">
-                    <i :style="'width:' + clamp(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : 0) + '%'"></i></div></div>
+                <div class="stat-num"><span>CPU</span><b x-text="pct(cpuPct(s))"></b></div>
+                <div class="stat-num" :title="ramText(s)"><span>RAM</span><b x-text="pct(ramPct(s))"></b></div>
+                <div class="stat-num" x-show="gpus(s).length" title="Average utilization of this server's GPUs"><span>GPU</span><b x-text="pct(srvUtil(s))"></b></div>
+                <div class="stat-num" x-show="gpus(s).length" :title="srvMemText(s)"><span>VRAM</span><b x-text="pct(srvMemPct(s))"></b></div>
               </div>
             </div>
 
             <div class="callout danger" x-show="!s.alive" x-text="offlineInfo(s)"></div>
 
-            <!-- expanded: GPU table -->
+            <!-- opened: CPU trend, RAM, every GPU's utilization and memory side by side, then the GPU table -->
             <div class="server-body" x-show="isOpen(s)">
+              <div class="srv-viz" x-show="s.report">
+                <div class="srv-host">
+                  <div class="viz-t"><span>CPU</span><b x-text="pct(cpuPct(s))"></b></div>
+                  <div class="spark-box" @mousemove="sparkHover($event, 'cpu:' + s.node_id, 'CPU')" @mouseleave="sparkOff()" x-html="spark('cpu:' + s.node_id)" role="img" :aria-label="'CPU utilization of ' + s.node_id + ' over the last 10 minutes'"></div>
+                  <div class="viz-t" style="margin-top:var(--s-3)"><span>RAM</span><b x-text="ramText(s)"></b></div>
+                  <div class="hb seq"><i :style="'width:' + clamp(ramPct(s)) + '%'"></i></div>
+                </div>
+                <div class="gpu-bars" x-show="gpus(s).length">
+                  <div class="viz-legend"><span><i class="sw util"></i>Utilization</span><span><i class="sw mem"></i>Memory</span></div>
+                  <template x-for="d in gpus(s)" :key="'gb' + d.device_id">
+                    <div class="gb-row" :class="{sel: isSel(s,d)}" @click="select(s,d)">
+                      <div class="gb-lbl ellipsis" :title="devName(d)" x-text="d.device_id"></div>
+                      <div class="gb-pair">
+                        <div class="gb-line" @mouseenter="tipOn($event, d.device_id + ' utilization: ' + pct(d.util_pct))" @mousemove="tipMove($event)" @mouseleave="tipOff()"><div class="hb util"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div><span x-text="pct(d.util_pct)"></span></div>
+                        <div class="gb-line" @mouseenter="tipOn($event, d.device_id + ' memory: ' + mem(d) + ' (' + memPct(d) + '%)')" @mousemove="tipMove($event)" @mouseleave="tipOff()"><div class="hb mem"><i :style="'width:' + memPct(d) + '%'"></i></div><span x-text="memPct(d) + '%'"></span></div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
               <div class="empty" x-show="devs(s).length === 0" x-text="s.report ? 'No devices reported' : 'This server has never been reached'"></div>
               <div class="tbl-scroll" x-show="devs(s).length > 0">
               <table>
@@ -175,8 +248,8 @@
                     <tr class="click" :class="{sel: isSel(s,d)}" @click="select(s,d)">
                       <td @click.stop><label class="switch" x-show="isGpu(d)" :title="'Include in the pool'"><input type="checkbox" :checked="enabled(s,d)" @change="toggleGpu(s,d,$event.target.checked)"><span></span></label></td>
                       <td><div style="font-weight:600" x-text="devName(d)"></div><div class="muted small" x-text="d.device_id"></div></td>
-                      <td><div class="util-cell"><div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div><b x-text="pct(d.util_pct)"></b></div></td>
-                      <td x-text="mem(d)"></td>
+                      <td><b class="num" x-text="pct(d.util_pct)"></b></td>
+                      <td><span x-text="mem(d)"></span> <span class="muted small" x-show="d.total_mb" x-text="'(' + memPct(d) + '%)'"></span></td>
                       <td x-text="val(d.temp_c, '°C')"></td>
                       <td x-text="val(d.power_w, ' W')"></td>
                       <td x-text="d.processes ? d.processes.length : dash"></td>
@@ -188,13 +261,15 @@
               </div>
             </div>
 
-            <!-- collapsed: tiles -->
+            <!-- closed: one tile per device, tinted by utilization (a small heatmap of the server) -->
             <div class="tiles" x-show="!isOpen(s)" style="padding-top:2px">
               <template x-for="d in devs(s)" :key="d.device_id">
-                <div class="tile" :class="{sel: isSel(s,d)}" @click="select(s,d)">
-                  <div class="p" x-text="pct(d.util_pct)"></div>
-                  <div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div>
-                  <div class="n ellipsis" style="margin-top:4px" x-text="d.kind === 'cpu' ? 'CPU' : d.device_id"></div>
+                <div class="tile" :class="{sel: isSel(s,d)}" :style="'background:' + heatBg(d.util_pct)" @click="select(s,d)">
+                  <div class="n ellipsis" x-text="d.kind === 'cpu' ? 'CPU' : d.device_id"></div>
+                  <div class="tile-nums">
+                    <div title="Utilization"><b x-text="pct(d.util_pct)"></b><span>util</span></div>
+                    <div :title="mem(d)"><b x-text="d.total_mb ? memPct(d) + '%' : dash"></b><span>mem</span></div>
+                  </div>
                 </div>
               </template>
             </div>
@@ -217,40 +292,55 @@
             <div class="panel-body">
               <div class="ring">
                 <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
-                  <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(selected().d.util_pct)"
-                    :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(selected().d.util_pct)"/></svg>
+                  <circle class="fg" cx="75" cy="75" r="60" :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(selected().d.util_pct)"/></svg>
                 <div class="c"><b x-text="pct(selected().d.util_pct)"></b><span>Utilization</span></div>
               </div>
-              <div class="kv3">
+              <div class="viz-t"><span>Utilization, last 10 min</span></div>
+              <div class="spark-box" @mousemove="sparkHover($event, gpuKey(selected().s, selected().d), 'Utilization')" @mouseleave="sparkOff()" x-html="spark(gpuKey(selected().s, selected().d))" role="img" aria-label="GPU utilization over the last 10 minutes"></div>
+              <div class="kv3" style="margin-top:var(--s-3)">
                 <div><div class="l">Memory</div><div class="v" x-text="gb(selected().d.total_mb - selected().d.free_mb) + ' GB'"></div></div>
                 <div><div class="l">Temperature</div><div class="v" x-text="val(selected().d.temp_c, '°C')"></div></div>
                 <div><div class="l">Power</div><div class="v" x-text="val(selected().d.power_w, ' W')"></div></div>
               </div>
-              <div class="tabs">
-                <button :class="{active: detailTab==='overview'}" @click="detailTab='overview'">Overview</button>
-                <button :class="{active: detailTab==='processes'}" @click="detailTab='processes'">Processes</button>
+
+              <h3 class="sec">Memory</h3>
+              <div class="viz-t"><span x-text="mem(selected().d) + ' in use'"></span><b x-text="memPct(selected().d) + '%'"></b></div>
+              <div class="stack lg" role="img" :aria-label="'Memory: ' + mem(selected().d)">
+                <template x-for="g in vramSegs(selected().s, selected().d)" :key="g.k">
+                  <i :class="g.cls" :style="'width:' + g.pct + '%' + (g.color ? ';background:' + g.color : '')" @mouseenter="tipOn($event, g.tip)" @mousemove="tipMove($event)" @mouseleave="tipOff()"></i>
+                </template>
               </div>
-              <div x-show="detailTab==='overview'">
-                <div class="small muted" style="margin-bottom:4px">Memory <span x-text="mem(selected().d)"></span></div>
-                <div class="bar" :class="level(memPct(selected().d))"><i :style="'width:' + memPct(selected().d) + '%'"></i></div>
-                <div class="small muted" style="margin-top:8px">Usable for the pool: <b style="color:var(--text);font-weight:600" x-text="gb(selected().d.usable_mb) + ' GB'"></b></div>
+              <div class="viz-legend col">
+                <template x-for="g in vramSegs(selected().s, selected().d)" :key="'l' + g.k">
+                  <span><i class="sw" :class="g.cls" :style="g.color ? 'background:' + g.color : ''"></i><span class="ellipsis" x-text="g.label"></span><b x-text="gb(g.mb) + ' GB'"></b></span>
+                </template>
               </div>
-              <div x-show="detailTab==='processes' || detailTab==='overview'">
-                <h3 class="sec">Running Processes</h3>
-                <table>
-                  <thead><tr><th>PID</th><th>Process</th><th>GPU Memory</th></tr></thead>
-                  <tbody>
-                    <template x-for="p in (selected().d.processes || [])" :key="p.pid">
-                      <tr><td x-text="p.pid"></td><td x-text="p.name || '(hidden)'"></td><td x-text="p.used_mb == null ? dash : gb(p.used_mb) + ' GB'"></td></tr>
-                    </template>
-                  </tbody>
-                </table>
-                <div class="muted small" x-show="!(selected().d.processes || []).length" style="padding:8px 12px">No processes</div>
+
+              <div x-show="selected().d.temp_c != null">
+                <h3 class="sec">Temperature</h3>
+                <div class="gauge" role="img" :aria-label="'Temperature ' + val(selected().d.temp_c, '°C') + ', ' + tempBand(selected().d).label">
+                  <div class="g-bands"><i class="ok" style="width:58.3%"></i><i class="warm" style="width:21.7%"></i><i class="hot" style="width:20%"></i></div>
+                  <div class="g-mark" :style="'left:' + clamp(tempPct(selected().d)) + '%'"></div>
+                </div>
+                <div class="g-scale small muted"><span>30°C</span><span style="left:58.3%">65</span><span style="left:80%">78</span><span>90°C</span></div>
+                <div class="small" style="margin-top:4px"><span class="pill lead" :class="tempBand(selected().d).cls" x-text="tempBand(selected().d).label"></span> <b x-text="val(selected().d.temp_c, '°C')"></b></div>
               </div>
+
+              <div x-show="(selected().d.processes || []).length">
+                <h3 class="sec">Memory by process</h3>
+                <div class="hbars">
+                  <template x-for="p in procBars(selected().d)" :key="'pb' + p.pid">
+                    <div class="hbar" @mouseenter="tipOn($event, p.name + ' (pid ' + p.pid + '): ' + gb(p.mb) + ' GB')" @mousemove="tipMove($event)" @mouseleave="tipOff()"><span class="ellipsis" x-text="p.name"></span><div class="hb util"><i :style="'width:' + p.pct + '%'"></i></div><b x-text="gb(p.mb) + ' GB'"></b></div>
+                  </template>
+                </div>
+              </div>
+              <div class="muted small" x-show="!(selected().d.processes || []).length" style="padding:8px 0">No processes</div>
+
               <h3 class="sec">GPU Details</h3>
               <dl class="dl">
                 <dt>Model</dt><dd x-text="devName(selected().d)"></dd>
                 <dt>Total memory</dt><dd x-text="gb(selected().d.total_mb) + ' GB'"></dd>
+                <dt>Usable for the pool</dt><dd x-text="gb(selected().d.usable_mb) + ' GB'"></dd>
                 <dt>CUDA</dt><dd x-text="selected().d.cuda || dash"></dd>
                 <dt>Architecture</dt><dd x-text="archLabel(selected().d) || dash" :title="archHelp(selected().d)"></dd>
                 <dt>Driver</dt><dd x-text="selected().d.driver || dash"></dd>
@@ -258,33 +348,6 @@
             </div>
           </div>
         </template>
-      </div>
-    </div>
-
-    <!-- ============ GPUs ============ -->
-    <div :class="{folded: folded('gpus')}" class="panel view" x-show="view==='gpus'">
-      <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('gpus')}" @click="toggleFold('gpus')" :aria-expanded="String(!folded('gpus'))" :title="folded('gpus') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand All GPUs" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('gpus')">All GPUs</h2><span class="muted small" x-text="allGpuRows().length + ' devices'"></span></div>
-      <div class="empty" x-show="allGpuRows().length === 0">No GPUs reported yet.</div>
-      <div class="tbl-scroll tall" x-show="allGpuRows().length > 0">
-      <table>
-        <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
-        <tbody>
-          <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
-            <tr :class="{stale: !r.s.alive}" :title="r.s.alive ? '' : 'Server offline: last reported values'">
-              <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
-              <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id + (archLabel(r.d) ? ' · ' + archLabel(r.d) : '')" :title="archHelp(r.d)"></div>
-                <span class="pill red lead" x-show="r.d.kernels_ok === false" :title="'The agent\'s llama.cpp was built for ' + ((r.s.report && r.s.report.cuda_archs) || []).join(', ') + '. Rebuild with this GPU in CUDA_ARCHS.'">No kernels in this build</span></td>
-              <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
-              <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
-              <td x-text="mem(r.d)"></td>
-              <td x-text="bw(r.d)"></td>
-              <td x-text="val(r.d.temp_c, '°C')"></td>
-              <td x-text="val(r.d.power_w, ' W')"></td>
-              <td x-text="(r.d.processes || []).map(function (p) { return (p.name || p.pid); }).join(', ') || dash" class="ellipsis proc-list"></td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
       </div>
     </div>
 
@@ -481,7 +544,7 @@
                   <div class="v" x-text="replicasText(m)"></div></div>
                 <div class="metric"><div class="l">Busy</div>
                   <div class="v" x-text="scalingOf(m) ? busyPct(scalingOf(m).avg_busy) : dash"></div>
-                  <div class="bar" :class="level(scalingOf(m) && scalingOf(m).avg_busy != null ? scalingOf(m).avg_busy * 100 : null)"><i :style="'width:' + clamp(scalingOf(m) && scalingOf(m).avg_busy != null ? scalingOf(m).avg_busy * 100 : 0) + '%'"></i></div></div>
+                  <div class="spark-box sm" x-show="scalingOf(m)" @mousemove="sparkHover($event, 'busy:' + m.spec.name, 'Busy')" @mouseleave="sparkOff()" x-html="spark('busy:' + m.spec.name, busyTarget(m))" role="img" :aria-label="'Busy ratio of ' + m.spec.name + ' over the last 10 minutes' + (busyTarget(m) != null ? ', target ' + busyTarget(m) + '%' : '')"></div></div>
                 <div class="metric"><div class="l">Est. speed</div>
                   <div class="v" x-text="modelTps(m)"></div></div>
                 <div class="metric"><div class="l">Mode</div>
@@ -514,7 +577,7 @@
                                   <td class="c-id ellipsis" :title="r.replica_id" x-text="r.replica_id"></td>
                                   <td class="c-busy" x-text="busyPct(r.busy)"></td>
                                   <td class="c-req"><span x-text="r.requests_processing == null ? dash : r.requests_processing"></span> / <span x-text="r.requests_deferred == null ? dash : r.requests_deferred"></span></td>
-                                  <td class="c-tps"><span x-text="tpsNum(r.measured_decode_tps)"></span> / <span x-text="tpsNum(r.est_decode_tps)"></span></td>
+                                  <td class="c-tps"><div class="bullet" x-show="r.measured_decode_tps != null || r.est_decode_tps != null" @mouseenter="tipOn($event, 'Measured ' + tps(r.measured_decode_tps) + ' · estimated ' + tps(r.est_decode_tps))" @mousemove="tipMove($event)" @mouseleave="tipOff()"><i :style="'width:' + bulletPct(r.measured_decode_tps, r) + '%'"></i><b :style="'left:' + bulletPct(r.est_decode_tps, r) + '%'" x-show="r.est_decode_tps != null"></b></div><span x-text="tpsNum(r.measured_decode_tps)"></span> / <span x-text="tpsNum(r.est_decode_tps)"></span></td>
                                   <td class="c-ok"><span class="pill lead" :class="r.metrics_ok ? 'green' : 'amber'" :title="r.metrics_ok ? 'Metrics available' : 'Metrics unavailable'" x-text="r.metrics_ok ? 'Ok' : 'None'"></span></td>
                                 </tr>
                               </template>
@@ -538,10 +601,22 @@
                   <div class="rep">
                     <span class="sdot" :class="replicaClass(p.state)" :title="p.state"></span>
                     <code class="rep-id" :title="'Replica ' + p.id + ' (' + p.state + ')'" x-text="p.id"></code>
-                    <span class="chips"><template x-for="c in p.devs" :key="c"><span class="chip mono" :title="c" x-text="c"></span></template></span>
+                    <div class="place" role="img" :aria-label="'Placement: ' + p.text">
+                      <div class="place-bar">
+                        <template x-for="g in p.segs" :key="g.k">
+                          <i :style="'width:' + g.pct + '%;background:' + g.color" @mouseenter="tipOn($event, g.tip)" @mousemove="tipMove($event)" @mouseleave="tipOff()"></i>
+                        </template>
+                      </div>
+                      <div class="place-lbls">
+                        <template x-for="g in p.segs" :key="'l' + g.k">
+                          <span class="ellipsis" :style="'width:' + g.pct + '%'" :title="g.tip" x-text="g.label"></span>
+                        </template>
+                      </div>
+                    </div>
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
                     <span class="chip" x-show="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
+                    <button type="button" class="btn ghost danger icon rep-del" x-show="p.state==='failed' || p.state==='stopped'" @click="deleteReplica(m, p.id)" title="Remove this failed replica from the list" aria-label="Remove replica" x-html="icon('trash')"></button>
                     <div class="rnote rep-stage" x-show="p.stage" x-text="p.stage" :title="p.stage"></div>
                   </div>
                 </template>
@@ -584,6 +659,17 @@
           <select x-model="evFilter" style="width:130px"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select>
           <button class="btn" @click="markRead()" :disabled="unread() === 0">Mark all read</button>
           <button class="btn danger" @click="clearEvents()" :disabled="!(evList || []).length && !events().length"><span x-html="icon('trash')"></span> Clear all</button></div></div>
+      <div class="ev-timeline" x-show="filteredEvents().length > 0" role="img" :aria-label="'Timeline of ' + filteredEvents().length + ' events'">
+        <template x-for="lane in evLanes()" :key="lane.level">
+          <div class="ev-lane"><span class="ev-lane-l"><span class="pill lead" :class="evClass({level: lane.level})" x-text="lane.label"></span></span>
+            <div class="ev-track">
+              <template x-for="e in lane.events" :key="'t' + e.id">
+                <i class="ev-dot" :class="lane.level" :style="'left:' + e.x + '%'" @mouseenter="tipOn($event, clock(e.ts) + ' · ' + e.kind.replace(/_/g, ' ') + '\n' + e.message)" @mousemove="tipMove($event)" @mouseleave="tipOff()"></i>
+              </template>
+            </div></div>
+        </template>
+        <div class="ev-axis small muted"><span x-text="evSpan().from"></span><span>now</span></div>
+      </div>
       <div class="empty" x-show="filteredEvents().length === 0">No events.</div>
       <div class="tbl-scroll tall" x-show="filteredEvents().length > 0">
       <table>

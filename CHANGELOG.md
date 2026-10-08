@@ -8,6 +8,22 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-08
+
+### Changed
+
+- **Servers & GPUs** is one page: the *GPUs* page became its *All GPUs* mode (`#gpus` still opens it). Closed
+  servers show plain numbers and utilization-tinted GPU tiles, no bars; an opened server shows a CPU sparkline, RAM
+  and a utilization + memory bar pair per GPU; a GPU shows a utilization ring and sparkline, memory stacked by model
+  (with the pool's usable share and reserve), a banded temperature gauge and memory per process.
+- New charts: **GPU memory by model** across the pool, a replica's placement as a bar per device (by layers), the
+  model *Busy* sparkline with the autoscaling target, measured vs estimated tok/s as a bullet chart, and an events
+  timeline. Sparkline history is kept in the browser; series colours are a validated light/dark set.
+- A launch that fails 5 times in a row is no longer retried on its own (`launch_gave_up` event); Start or saving
+  the model's settings retries. Requests to such a model get 503 at once.
+- A failed replica is listed on its model card only until a replica launched after it is serving, and failed or
+  stopped replicas can be removed (`DELETE /api/models/{name}/replicas/{id}`, trash button).
+
 ## [0.8.0] - 2026-10-07
 
 ### Added
@@ -404,7 +420,8 @@ All notable changes to gpupool are documented here. The format follows
   before `--device`; the agent reaps orphaned engines.
 - Documentation in English and Vietnamese: README, design, test report.
 
-[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/longduongbao29/gpupool/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/longduongbao29/gpupool/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/longduongbao29/gpupool/compare/v0.7.1...v0.7.2

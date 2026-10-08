@@ -428,6 +428,7 @@ async def test_crash_after_ready_backs_off_then_relaunches(mock_health):
 
 async def test_repeated_crashes_double_delay_up_to_cap(mock_health):
     rec, store, clock = make_reconciler()
+    rec.MAX_LAUNCH_FAILURES = 100  # this test is about the delays, not the give-up limit
     beat(store, clock, node("a"))
     store.put_model(SPEC)
     expected = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 300.0, 300.0]
@@ -2368,4 +2369,26 @@ async def test_reasoning_settings_reach_only_a_head_that_supports_them(mock_heal
     got = (hs.reasoning, hs.reasoning_effort, hs.reasoning_budget)
     assert got == (("off", "low", 256) if sent else ("auto", "default", -1))
     assert any(e.kind == "reasoning_unavailable" for e in store.list_events()) is not sent
+    await rec.shutdown()
+
+
+async def test_launch_retries_stop_after_max_failures_until_retry_now(mock_health):
+    client = FakeClient()
+    client.fail_start_on = "-head"
+    rec, store, clock = make_reconciler(client=client)
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    for _ in range(rec.MAX_LAUNCH_FAILURES + 3):
+        await rec.tick()
+        await settle(rec)
+        clock.t += 600  # past any backoff
+        beat(store, clock, node("a"))
+    assert len(store.list_replicas()) == rec.MAX_LAUNCH_FAILURES
+    assert rec.gave_up("m")
+    assert len([e for e in store.list_events(limit=100) if e.kind == "launch_gave_up"]) == 1
+    rec.retry_now("m")  # Start / Save
+    assert rec.gave_up("m") is None
+    await rec.tick()
+    await settle(rec)
+    assert len(store.list_replicas()) == rec.MAX_LAUNCH_FAILURES + 1
     await rec.shutdown()

@@ -399,7 +399,9 @@ def create_app(
         balancer=balancer, metrics=metrics, api_keys=router_keys(cfg),
         on_replica_error=reconciler.note_error,
         max_body_bytes=cfg.max_request_mb * 1024 * 1024,
-        on_request=autoscaler.note_request, can_cold_start=autoscaler.can_cold_start,
+        on_request=autoscaler.note_request,
+        # a model the reconciler gave up on will not load: answer at once instead of holding
+        can_cold_start=lambda m: autoscaler.can_cold_start(m) and not reconciler.gave_up(m),
         cold_start_timeout_s=cfg.cold_start_timeout_s,
     ))
 

@@ -355,6 +355,18 @@ class Store:
             )
             self._version += 1
 
+    def delete_replica(self, replica_id: str, states: set[str]) -> bool:
+        """Delete one replica record if its state is in `states`. True when a row went."""
+        if not states:
+            return False
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"DELETE FROM replicas WHERE replica_id=? AND state IN ({','.join('?' * len(states))})",
+                (replica_id, *sorted(states)))
+            if cur.rowcount:
+                self._version += 1
+            return bool(cur.rowcount)
+
     def prune_replicas(self, keep_per_model: int) -> int:
         """Delete terminal replicas (state 'stopped' or 'failed') of each model beyond the
         newest `keep_per_model` (order: created_at, replica_id). Never deletes any other state."""

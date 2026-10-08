@@ -189,6 +189,10 @@ class Reconciler:
     REBALANCE_MIN_GAIN = 25.0
     REBALANCE_EXTRA_TIMEOUT_S = 60.0  # slack on top of launch_timeout_s before a move is abandoned
     REPEAT_EVENT_S = 600.0  # a failure that keeps repeating the same way notifies at most this often
+    # Consecutive failed launches (or crashes soon after start) after which a model is no longer
+    # retried on its own: retrying a broken setting forever only filled the logs on the
+    # coordinator and the agents. Start or a settings change (retry_now) tries again.
+    MAX_LAUNCH_FAILURES = 5
     BUSY_PORT_S = 3600.0  # how long a port another process held is skipped on that node
     CAL_ALPHA = 0.5  # EMA weight of a new calibration sample
     SPEED_SAMPLE_S = 60.0  # how often ready replicas feed the speed model
@@ -1031,7 +1035,22 @@ class Reconciler:
         delay = min(300.0, 5.0 * 2 ** (n - 1))
         self._backoff[model] = (n, now + delay)
         self._save_backoff()
+        if n == self.MAX_LAUNCH_FAILURES:
+            log.error("%s failed %d times in a row; not retried until it is started again or its "
+                      "settings change", model, n)
+            self._emit("error", "launch_gave_up",
+                       f"{model} failed to start {n} times in a row; gpupool stopped retrying. Fix the "
+                       "cause (see the previous error), then press Start or save its settings to retry.",
+                       model=model)
         return n, delay
+
+    def gave_up(self, model: str) -> str | None:
+        """Why `model` is no longer retried on its own, None while it still is."""
+        n, _ = self._backoff.get(model, (0, 0.0))
+        if n < self.MAX_LAUNCH_FAILURES:
+            return None
+        return (f"Stopped retrying after {n} failed attempts in a row: press Start or edit the "
+                "settings to try again.")
 
     def _clear_stable_backoff(self, now: float) -> None:
         """A model whose replica has stayed ready for STABLE_S is healthy again: forget its backoff."""
@@ -1051,7 +1070,7 @@ class Reconciler:
         log.warning("replica %s failed: %s", rec.replica_id, reason)
         if model_fault and rec.state == "ready" and now - rec.updated_at < self.STABLE_S:
             n, delay = self._bump_backoff(rec.model, now)
-            if n >= 2:
+            if 2 <= n < self.MAX_LAUNCH_FAILURES:  # at the limit launch_gave_up says it instead
                 self._emit_repeat("warning", "crash_loop", rec.model, "crash_loop",
                                   f"{rec.model} crashed {n} times shortly after start; next attempt in "
                                   f"{delay:.0f} s", now)
@@ -1238,7 +1257,7 @@ class Reconciler:
 
     async def _maybe_launch(self, spec: ModelSpec, now: float, wanted: int | None = None) -> None:
         fails, not_before = self._backoff.get(spec.name, (0, 0.0))
-        if now < not_before:
+        if now < not_before or fails >= self.MAX_LAUNCH_FAILURES:
             return
         seen = self._nofit_seen.get(spec.name)
         if seen is not None and spec.name in self._nofit and now - seen[1] < self.NOFIT_RETRY_S \
@@ -1432,7 +1451,8 @@ class Reconciler:
             retry = ""
             if not isinstance(e, _PortTaken):  # a busy port is now skipped: retry at once on another
                 n, delay = self._bump_backoff(spec.name, now)
-                retry = f"; retrying in {delay:.0f} s (attempt {n + 1})"
+                retry = (f"; retrying in {delay:.0f} s (attempt {n + 1})" if n < self.MAX_LAUNCH_FAILURES
+                         else "; not retried again until it is started or its settings change")
             # what failed, without the replica id or the head log's timestamps: the same failure on
             # the next attempt must compare equal
             sig = _failure_sig(f"{type(e).__name__}: {e}", rid)
