@@ -340,7 +340,22 @@ Trang chat để thử một model đã deploy và xem độ trễ, tốc độ 
   router dùng để đặt trọng số cho replica.
 - **Điện thoại**: các nút ở đầu khung (Check placement / Rebalance now) xuống dòng thay vì tràn ngang.
 - **Hàng đều nhau**: các thẻ model trên một hàng cao bằng nhau, hàng nút nằm sát đáy thẻ.
-- **Khung thu gọn được**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events và các
+- **Servers & GPUs** là một trang (trang *GPUs* cũ và `#gpus` mở chế độ *All GPUs* của nó, bảng phẳng mọi card).
+  Mỗi biểu đồ trả lời một câu hỏi:
+  - **Server đóng**: chỉ có số (CPU, RAM, GPU trung bình, VRAM) và mỗi thiết bị một ô, tô màu theo utilization
+    (một tông màu, như một heatmap nhỏ); không có thanh. Server mặc định đóng.
+  - **Server mở**: sparkline CPU (10 phút gần nhất), thanh RAM, và mỗi GPU một cặp thanh utilization + bộ nhớ.
+  - **Chi tiết GPU**: vòng utilization và sparkline, thanh bộ nhớ xếp chồng theo model / dùng khác / trống pool dùng
+    được / dự phòng, thanh nhiệt độ có vùng ghi nhãn (bình thường < 65 °C, ấm < 78 °C, nóng), bộ nhớ theo tiến trình.
+  - **GPU memory by model** (trên danh sách server): cùng thanh bộ nhớ xếp chồng cho mọi GPU của pool. Phần của model
+    là bộ nhớ dự kiến của các replica (nhân hệ số hiệu chỉnh đo được của model), không phải số đo.
+  - **Thẻ model**: *Busy* là sparkline có mục tiêu autoscaling là đường gạch; placement của replica là một thanh, mỗi
+    thiết bị một đoạn theo số layer; *Scaling details* vẽ tok/s đo được thành thanh, ước tính là vạch (bullet chart).
+  - **Events**: dòng thời gian trên bảng, mỗi mức một làn, từ sự kiện cũ nhất đang hiện tới bây giờ.
+  Sparkline chỉ giữ lịch sử trong trình duyệt (từ lúc mở trang). Màu series là bộ màu phân loại đã kiểm tra
+  (`--c1`..`--c8`, có bước sáng và tối riêng); mỗi model giữ màu của nó khi còn tồn tại (nhớ trong `localStorage`
+  `gpupool.modelColors`). Mọi mark đều có tooltip khi rê chuột.
+- **Khung thu gọn được**: GPU memory by model, Servers & GPUs, Model library, Conversions, Placement health, Deployments, Events và các
   mục trong Settings có mũi tên ở đầu khung (bấm vào tiêu đề cũng được) để thu khung lại chỉ còn phần đầu, nên một khung
   quá dài (nhiều conversion hay deployment) không đẩy các khung khác ra khỏi màn hình. Mọi khung mặc định mở; khung đã
   thu gọn được nhớ theo trình duyệt (`localStorage` `gpupool.folded`). Các nút ở đầu khung (Add model, Rebalance

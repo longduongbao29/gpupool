@@ -138,6 +138,21 @@ function emptyBrowse() {
   return { loading: false, loaded: false, err: "", roots: [], files: [], truncated: false };
 }
 
+// Short history of fast-changing numbers for the sparklines, kept in this browser only: key ->
+// [[ts, value], ...]. Outside Alpine on purpose (no proxies over hundreds of samples); the
+// component's histTick tells the templates a sample landed.
+var HIST = {};
+var HIST_WINDOW_S = 600; // what a sparkline shows
+// Categorical series colours, by slot: CSS tokens --c1..--c8 (validated set, light and dark steps).
+var SLOTS = 8;
+var MODEL_COLORS_STORE = "gpupool.modelColors";
+function histPush(key, ts, v) {
+  if (v == null || isNaN(v)) return;
+  var a = HIST[key] || (HIST[key] = []);
+  a.push([ts, v]);
+  while (a.length && a[0][0] < ts - HIST_WINDOW_S) a.shift();
+}
+
 // Conversion: stage order of a job and how each job state maps onto it.
 // "calibrate" (the importance matrix) is only shown for jobs with imatrix_used.
 var CONV_STAGES = [["download", "Download"], ["convert", "Convert"], ["calibrate", "Calibrate"], ["quantize", "Quantize"], ["validate", "Validate"]];
@@ -183,6 +198,11 @@ function app() {
     navOpen: false,
     search: "",
     expanded: {}, // node_id -> true when the server's full view (charts, GPU table) is open
+    srvMode: "server", // Servers & GPUs: "server" (grouped) or "gpus" (flat list of every GPU)
+    histTick: 0, // bumped when HIST gets a sample
+    sp: null, // sparkline hover: { key, t }
+    tip: { show: false, x: 0, y: 0, r: null, b: null, text: "" }, // the one hover tooltip of every chart mark
+    modelSlots: null, // model name -> colour slot (1..8), remembered per browser
     sel: null, // { node: node_id, dev: device_id }
     detailTab: "overview",
     toasts: [],
@@ -225,7 +245,8 @@ function app() {
     // ================= lifecycle =================
     init: function () {
       var hv = (location.hash || "").replace("#", "");
-      if (["overview", "servers", "gpus", "models", "playground", "events", "settings"].indexOf(hv) >= 0) this.view = hv;
+      if (hv === "gpus") { this.view = "servers"; this.srvMode = "gpus"; } // the old All GPUs page
+      else if (["overview", "servers", "models", "playground", "events", "settings"].indexOf(hv) >= 0) this.view = hv;
       this.theme = savedTheme();
       var saved = "";
       try { saved = localStorage.getItem(KEY_STORE) || ""; } catch (e) { saved = ""; }
@@ -296,6 +317,7 @@ function app() {
     refresh: async function () {
       try {
         this.st = await this.api("GET", "/api/state");
+        this.record();
         this.processEvents();
         this.noteUnread();
         if (this.view === "events") this.loadEvents();
@@ -478,14 +500,179 @@ function app() {
       this.gpus(s).forEach(function (d) { if (d.total_mb) { t += d.total_mb; u += d.total_mb - d.free_mb; } });
       return t ? "GPU memory " + this.gb(u) + " / " + this.gb(t) + " GB" : "";
     },
-    // A GPU's memory split for the stacked bar: what listed processes hold, the rest in use, free.
-    memSegments: function (d) {
+    // ----- charts -----
+    // One sample per poll for every series a sparkline can show.
+    record: function () {
+      var ts = Date.now() / 1000, self = this;
+      this.servers().forEach(function (s) {
+        if (!s.report || !s.alive) return;
+        histPush("cpu:" + s.node_id, ts, s.report.cpu_pct);
+        self.gpus(s).forEach(function (d) { histPush(self.gpuKey(s, d), ts, d.util_pct); });
+      });
+      this.models().forEach(function (m) {
+        if (m.scaling && m.scaling.avg_busy != null) histPush("busy:" + m.spec.name, ts, m.scaling.avg_busy * 100);
+      });
+      this.histTick++;
+    },
+    gpuKey: function (s, d) { return "gpu:" + s.node_id + "/" + d.device_id; },
+    // Sparkline of HIST[key] over the last HIST_WINDOW_S on a fixed 0-100 scale (all series are
+    // percents), with an optional dashed target line and the hover crosshair. SVG markup for x-html:
+    // only numbers go into it.
+    spark: function (key, target) {
+      void this.histTick;
+      var a = HIST[key] || [], W = 300, H = 44, now = Date.now() / 1000, t0 = now - HIST_WINDOW_S;
+      function x(t) { return ((t - t0) / HIST_WINDOW_S * W).toFixed(1); }
+      function y(v) { return (H - 2 - Math.max(0, Math.min(100, v)) / 100 * (H - 4)).toFixed(1); }
+      var out = '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
+        '<line class="sg" x1="0" x2="' + W + '" y1="' + y(50) + '" y2="' + y(50) + '"/>' +
+        '<line class="sb" x1="0" x2="' + W + '" y1="' + y(0) + '" y2="' + y(0) + '"/>';
+      if (target != null) out += '<line class="st" x1="0" x2="' + W + '" y1="' + y(target) + '" y2="' + y(target) + '"/>';
+      if (a.length > 1) {
+        var d = a.map(function (p, i) { return (i ? "L" : "M") + x(p[0]) + " " + y(p[1]); }).join("");
+        out += '<path class="sa" d="' + d + "L" + x(a[a.length - 1][0]) + " " + H + "L" + x(a[0][0]) + " " + H + 'Z"/>';
+        out += '<path class="sl" d="' + d + '"/>';
+      }
+      if (this.sp && this.sp.key === key && a.length) {
+        var p = this.sparkAt(key, this.sp.t);
+        if (p) out += '<line class="sx" x1="' + x(p[0]) + '" x2="' + x(p[0]) + '" y1="0" y2="' + H + '"/>';
+      }
+      return out + "</svg>" + (a.length < 2 ? '<span class="spark-empty">collecting…</span>' : "");
+    },
+    sparkAt: function (key, t) {
+      var a = HIST[key] || [], best = null;
+      a.forEach(function (p) { if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; });
+      return best;
+    },
+    sparkHover: function (ev, key, label) {
+      var r = ev.currentTarget.getBoundingClientRect();
+      var t = Date.now() / 1000 - HIST_WINDOW_S * (1 - (ev.clientX - r.left) / r.width);
+      var p = this.sparkAt(key, t);
+      this.sp = { key: key, t: t };
+      if (p) this.tipOn(ev, label + " " + Math.round(p[1]) + "% · " + this.ago(p[0]));
+      else this.tipOff();
+    },
+    sparkOff: function () { this.sp = null; this.tipOff(); },
+    tipOn: function (ev, text) { this.tip = Object.assign({ show: true, text: text }, this.tipAt(ev)); },
+    tipMove: function (ev) { if (this.tip.show) Object.assign(this.tip, this.tipAt(ev)); },
+    // Beside the pointer, flipped to its left / above it near the right / bottom edge.
+    tipAt: function (ev) {
+      var w = window.innerWidth, h = window.innerHeight;
+      return { x: ev.clientX > w - 340 ? null : ev.clientX + 14, r: ev.clientX > w - 340 ? w - ev.clientX + 14 : null,
+        y: ev.clientY > h - 120 ? null : ev.clientY + 14, b: ev.clientY > h - 120 ? h - ev.clientY + 14 : null };
+    },
+    tipStyle: function () {
+      var t = this.tip;
+      return (t.x != null ? "left:" + t.x + "px;" : "right:" + t.r + "px;") + (t.y != null ? "top:" + t.y + "px" : "bottom:" + t.b + "px");
+    },
+    tipOff: function () { this.tip.show = false; },
+    // Utilization as a tint (one hue, light -> strong): the closed server's tiles read as a heatmap.
+    heatBg: function (p) { return p == null ? "" : "color-mix(in srgb, var(--seq) " + Math.round(this.clamp(p) * 0.5) + "%, var(--surface-2))"; },
+    // Colour slot of a model: kept for as long as the model exists, so a new model never repaints
+    // the others; past 8 models the rest share the neutral "other models" colour.
+    modelColor: function (name) {
+      if (!this.modelSlots) {
+        try { this.modelSlots = JSON.parse(localStorage.getItem(MODEL_COLORS_STORE) || "{}") || {}; } catch (e) { this.modelSlots = {}; }
+      }
+      var map = this.modelSlots, live = {}, changed = false;
+      this.models().forEach(function (m) { live[m.spec.name] = true; });
+      Object.keys(map).forEach(function (n) { if (!live[n]) { delete map[n]; changed = true; } });
+      if (!map[name] && live[name]) {
+        var used = {};
+        Object.keys(map).forEach(function (n) { used[map[n]] = true; });
+        for (var i = 1; i <= SLOTS; i++) if (!used[i]) { map[name] = i; changed = true; break; }
+      }
+      if (changed) { try { localStorage.setItem(MODEL_COLORS_STORE, JSON.stringify(map)); } catch (e) { /* storage blocked */ } }
+      return map[name] ? "var(--c" + map[name] + ")" : "var(--c-other)";
+    },
+    // Estimated MB each model holds on one GPU: its live replicas' planned share, scaled by the
+    // model's measured calibration factor when there is one.
+    modelMbOn: function (s, d) {
+      var out = {};
+      this.models().forEach(function (m) {
+        var f = m.calibration && m.calibration.factor ? m.calibration.factor : 1;
+        (m.replicas || []).forEach(function (r) {
+          if (["pending", "launching", "ready", "draining"].indexOf(r.state) < 0 || !r.placement) return;
+          r.placement.assignments.forEach(function (a) {
+            if (a.node_id === s.node_id && a.device_id === d.device_id) out[m.spec.name] = (out[m.spec.name] || 0) + a.est_mb * f;
+          });
+        });
+      });
+      return out;
+    },
+    // A GPU's memory as stacked segments: each model, other use, free the pool can use, reserve.
+    vramSegs: function (s, d) {
       if (!d.total_mb) return [];
-      var used = Math.max(0, d.total_mb - d.free_mb);
-      var procs = Math.min(used, (d.processes || []).reduce(function (a, p) { return a + (p.used_mb || 0); }, 0));
-      var segs = [{ k: "procs", label: "Processes", mb: procs }, { k: "other", label: "Other in use", mb: used - procs },
-        { k: "free", label: "Free", mb: Math.max(0, d.free_mb) }];
-      return segs.filter(function (x) { return x.mb > 0; }).map(function (x) { x.pct = x.mb * 100 / d.total_mb; return x; });
+      var self = this, used = Math.max(0, d.total_mb - d.free_mb), mbs = this.modelMbOn(s, d);
+      var names = Object.keys(mbs).sort(), sum = names.reduce(function (a, n) { return a + mbs[n]; }, 0);
+      var scale = sum > used && sum > 0 ? used / sum : 1; // a model still loading has not taken its share yet
+      var usable = Math.max(0, Math.min(d.usable_mb || 0, d.free_mb)), free = Math.max(0, d.free_mb);
+      var segs = names.map(function (n) {
+        return { k: "m:" + n, cls: "model", label: n, mb: mbs[n] * scale, color: self.modelColor(n) };
+      });
+      segs.push({ k: "other", cls: "other", label: "Other use", mb: Math.max(0, used - sum * scale) });
+      segs.push({ k: "usable", cls: "usable", label: "Free, usable by the pool", mb: usable });
+      segs.push({ k: "reserve", cls: "reserve", label: "Free, kept in reserve", mb: free - usable });
+      return segs.filter(function (g) { return g.mb >= 1; }).map(function (g) {
+        g.pct = g.mb * 100 / d.total_mb;
+        g.tip = s.node_id + "/" + d.device_id + " · " + g.label + ": " + self.gb(g.mb) + " GB (" + Math.round(g.pct) + "%)";
+        return g;
+      });
+    },
+    vramRows: function () {
+      var rows = [], self = this;
+      this.servers().forEach(function (s) {
+        self.gpus(s).forEach(function (d) {
+          if (d.total_mb) rows.push({ key: s.node_id + "/" + d.device_id, s: s, d: d, segs: self.vramSegs(s, d) });
+        });
+      });
+      return rows;
+    },
+    vramLegend: function () {
+      var seen = {}, self = this, out = [];
+      this.vramRows().forEach(function (r) { r.segs.forEach(function (g) { if (g.cls === "model") seen[g.label] = true; }); });
+      Object.keys(seen).sort().forEach(function (n) { out.push({ k: "m:" + n, label: n, cls: "model", color: self.modelColor(n) }); });
+      return out.concat([{ k: "other", label: "Other use", cls: "other" }, { k: "usable", label: "Free, usable", cls: "usable" },
+        { k: "reserve", label: "Reserve", cls: "reserve" }]);
+    },
+    // A replica's placement as one bar: a segment per device, sized by its layers.
+    placeSegs: function (r) {
+      var as = (r.placement && r.placement.assignments) || [], self = this;
+      var total = as.reduce(function (a, x) { return a + (x.layers || 0); }, 0) || 1;
+      return as.map(function (a, i) {
+        var label = a.node_id + "/" + a.device_id + " · " + a.layers + " L";
+        return { k: a.node_id + "/" + a.device_id, pct: a.layers * 100 / total, color: "var(--c" + (i % SLOTS + 1) + ")",
+          label: a.device_id + " · " + a.layers + " L",
+          tip: label + " · ~" + self.gb(a.est_mb) + " GB" + (a.rpc_endpoint ? " (over RPC)" : "") };
+      });
+    },
+    // Busy target of an autoscaled model, in percent (null without autoscaling).
+    busyTarget: function (m) { var a = m.spec.autoscale; return a && a.target_busy != null ? Math.round(a.target_busy * 100) : null; },
+    // Position of a tok/s value on a replica's bullet: the scale ends 20% past the larger of
+    // measured and estimated, so both always fit.
+    bulletPct: function (v, r) {
+      var top = Math.max(r.measured_decode_tps || 0, r.est_decode_tps || 0) * 1.2;
+      return v == null || !top ? 0 : Math.min(100, v * 100 / top);
+    },
+    // Temperature bands of the gauge (30-90 °C scale): below 65 normal, 65-78 warm, above hot.
+    tempBand: function (d) {
+      var t = d.temp_c;
+      if (t == null) return { label: "", cls: "" };
+      return t >= 78 ? { label: "Hot", cls: "red" } : (t >= 65 ? { label: "Warm", cls: "amber" } : { label: "Normal", cls: "green" });
+    },
+    // Events on a time axis, one lane per level, from the oldest shown event to now.
+    evSpan: function () {
+      void this.nowTs;
+      var ev = this.filteredEvents(), now = Date.now() / 1000;
+      var t0 = ev.reduce(function (a, e) { return Math.min(a, e.ts); }, now);
+      if (now - t0 < 60) t0 = now - 60;
+      return { t0: t0, now: now, from: this.ago(t0) };
+    },
+    evLanes: function () {
+      var sp = this.evSpan(), ev = this.filteredEvents(), len = sp.now - sp.t0;
+      return [["error", "Errors"], ["warning", "Warnings"], ["info", "Info"]].map(function (l) {
+        return { level: l[0], label: l[1], events: ev.filter(function (e) { return e.level === l[0]; })
+          .map(function (e) { return { id: e.id, ts: e.ts, kind: e.kind, message: e.message, x: Math.max(0, Math.min(100, (e.ts - sp.t0) * 100 / len)) }; }) };
+      }).filter(function (l) { return l.events.length; });
     },
     // Processes by GPU memory, largest first, each as a percent of the GPU's total.
     procBars: function (d) {
@@ -494,7 +681,7 @@ function app() {
         .map(function (p) { return { pid: p.pid, name: p.name || ("pid " + p.pid), mb: p.used_mb, pct: Math.min(100, p.used_mb * 100 / t) }; })
         .sort(function (a, b) { return b.mb - a.mb; });
     },
-    // Temperature on a 30-90 °C scale, so the bar's colour bands match how hot the card runs.
+    // Temperature on the gauge's 30-90 °C scale.
     tempPct: function (d) { return d.temp_c == null ? null : (d.temp_c - 30) * 100 / 60; },
     ringColor: function (p) { var l = this.level(p); return l === "red" ? "var(--danger)" : (l === "amber" ? "var(--warning)" : "var(--success)"); },
 
@@ -1150,7 +1337,7 @@ function app() {
         });
         out.push({ id: r.replica_id, state: r.state, tier: String(r.placement.tier).replace("_", " "), text: parts.join(", "),
           note: self.replicaNote(r), mark: self.replicaMark(m, r),
-          devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }),
+          devs: r.placement.assignments.map(function (a) { return a.node_id + "/" + a.device_id; }), segs: self.placeSegs(r),
           tps: self.tps(r.placement.est_decode_tps), draft: r.placement.draft_est_mb ? "+draft " + Math.round(r.placement.draft_est_mb) + " MB" : "", reasons: (r.placement.reasons || []).join("; "),
           time: self.tokenTime(r.placement),
           stage: r.stage ? r.stage.text + " (" + self.ago(r.stage.since).replace(/ ago$/, "") + ")" : "" });
@@ -1842,8 +2029,8 @@ function app() {
     },
     goNow: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
     title: function () {
-      return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers", "Manage servers and the GPUs in the pool"],
-        gpus: ["GPUs", "Every GPU across all servers"], events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"],
+      return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers & GPUs", "Manage servers and the GPUs in the pool"],
+        events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"],
         playground: ["Playground", "Chat with a deployed model and see how fast it answers"], settings: ["Settings", "Connection details and snippets"] }[this.view];
     }
   };

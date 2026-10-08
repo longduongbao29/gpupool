@@ -194,8 +194,9 @@ def test_html_never_renders_server_data_as_html():
     # x-html is only for the static icon() helper and pgMd(); other data fields must use x-text.
     html = (UI / "index.html").read_text(encoding="utf-8")
     for expr in re.findall(r'x-html="([^"]*)"', html):
-        # icon() and logo() return fixed SVG markup; pgMd() returns DOMPurify-sanitized Markdown
-        assert expr.startswith(("icon(", "pgMd(")) or expr == "logo()", expr
+        # icon() and logo() return fixed SVG markup; pgMd() returns DOMPurify-sanitized Markdown;
+        # spark() draws a sparkline from numbers only (the key selects a series, it is not printed)
+        assert expr.startswith(("icon(", "pgMd(", "spark(")) or expr == "logo()", expr
 
 
 def test_markdown_is_sanitized_before_it_reaches_the_page():
@@ -1055,7 +1056,7 @@ def test_ui_large_panels_collapse_and_start_open():
     js = (UI / "app.js").read_text(encoding="utf-8")
     css = (UI / "styles.css").read_text(encoding="utf-8")
     ids = re.findall(r"toggleFold\('([a-z-]+)'\)\" :aria-expanded", html)
-    assert {"servers", "gpus", "library", "conversions", "placement", "deployments", "events"} <= set(ids)
+    assert {"servers", "vram", "library", "conversions", "placement", "deployments", "events"} <= set(ids)
     for fid in ids:  # each foldable panel is bound to its own state
         assert f":class=\"{{folded: folded('{fid}')}}\"" in html, fid
     # open unless the viewer folded it: the saved map only lists folded panels

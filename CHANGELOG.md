@@ -10,9 +10,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ### Changed
 
-- Servers and GPUs show plain percentages (CPU, RAM, GPU utilization, VRAM) until clicked. A server opens to
-  CPU / RAM rings, a utilization + memory column chart per GPU and the GPU table; a GPU opens to utilization and
-  memory rings, a memory breakdown (processes / other / free), a temperature gauge and memory per process.
+- **Servers & GPUs** is one page: the *GPUs* page became its *All GPUs* mode (`#gpus` still opens it). Closed
+  servers show plain numbers and utilization-tinted GPU tiles, no bars; an opened server shows a CPU sparkline, RAM
+  and a utilization + memory bar pair per GPU; a GPU shows a utilization ring and sparkline, memory stacked by model
+  (with the pool's usable share and reserve), a banded temperature gauge and memory per process.
+- New charts: **GPU memory by model** across the pool, a replica's placement as a bar per device (by layers), the
+  model *Busy* sparkline with the autoscaling target, measured vs estimated tok/s as a bullet chart, and an events
+  timeline. Sparkline history is kept in the browser; series colours are a validated light/dark set.
 - A launch that fails 5 times in a row is no longer retried on its own (`launch_gave_up` event); Start or saving
   the model's settings retries. Requests to such a model get 503 at once.
 - A failed replica is listed on its model card only until a replica launched after it is serving, and failed or

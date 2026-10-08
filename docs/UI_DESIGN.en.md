@@ -342,7 +342,23 @@ A chat page for trying a deployed model and seeing its latency and speed, as a c
   weighs replicas by.
 - **Phone**: panel header buttons (Check placement / Rebalance now) wrap instead of overflowing.
 - **Even rows**: model cards in a row share its height, with their action row at the bottom.
-- **Collapsible panels**: Servers, All GPUs, Model library, Conversions, Placement health, Deployments, Events and
+- **Servers & GPUs** is one page (the old *GPUs* page and `#gpus` open its *All GPUs* mode, a flat table of every
+  card). Each chart answers one question:
+  - **Closed server**: plain numbers (CPU, RAM, GPU average, VRAM) and one tile per device, tinted by utilization
+    (one hue, a small heatmap); no bars. Servers start closed.
+  - **Opened server**: a CPU sparkline (last 10 min), a RAM bar, and a utilization + memory bar pair per GPU.
+  - **GPU detail**: a utilization ring and sparkline, a memory bar stacked by model / other use / free usable by the
+    pool / reserve, a temperature gauge with labelled bands (normal < 65 °C, warm < 78 °C, hot), memory per process.
+  - **GPU memory by model** (above the servers): the same stacked memory bar for every GPU of the pool. Model shares are
+    the replicas' planned memory (times the model's measured calibration factor), not a measurement.
+  - **Model card**: *Busy* is a sparkline with the autoscaling target as a dashed line; a replica's placement is a
+    bar with a segment per device, sized by layers; *Scaling details* draws measured tok/s as a bar with the estimate
+    as a tick (bullet chart).
+  - **Events**: a timeline above the table, one lane per level, from the oldest shown event to now.
+  Sparklines keep their history in the browser only (from when the page opened). Series colours are a validated
+  categorical set (`--c1`..`--c8`, own light and dark steps); a model keeps its colour while it exists (remembered
+  in `localStorage` `gpupool.modelColors`). Every mark has a hover tooltip.
+- **Collapsible panels**: GPU memory by model, Servers & GPUs, Model library, Conversions, Placement health, Deployments, Events and
   the Settings sections have a chevron in their header (a click on the title works too) that folds the panel down to
   its header, so a long one (many conversions or deployments) does not push the others off screen. Every panel starts
   open; folded ones are remembered per browser (`localStorage` `gpupool.folded`). Header buttons (Add model, Rebalance
