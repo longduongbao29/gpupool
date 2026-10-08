@@ -8,6 +8,16 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Servers and GPUs show plain percentages (CPU, RAM, GPU utilization, VRAM) until clicked. A server opens to
+  CPU / RAM rings, a utilization + memory column chart per GPU and the GPU table; a GPU opens to utilization and
+  memory rings, a memory breakdown (processes / other / free), a temperature gauge and memory per process.
+- A launch that fails 5 times in a row is no longer retried on its own (`launch_gave_up` event); Start or saving
+  the model's settings retries. Requests to such a model get 503 at once.
+- A failed replica is listed on its model card only until a replica launched after it is serving, and failed or
+  stopped replicas can be removed (`DELETE /api/models/{name}/replicas/{id}`, trash button).
+
 ## [0.8.0] - 2026-10-07
 
 ### Added

@@ -182,7 +182,7 @@ function app() {
     view: "overview",
     navOpen: false,
     search: "",
-    collapsed: {}, // node_id -> true when collapsed
+    expanded: {}, // node_id -> true when the server's full view (charts, GPU table) is open
     sel: null, // { node: node_id, dev: device_id }
     detailTab: "overview",
     toasts: [],
@@ -459,6 +459,43 @@ function app() {
     busy: function (d) { return d.util_pct != null && d.util_pct >= 50; },
     ringDash: function (p) { var c = 2 * Math.PI * 60; return c + " " + c; },
     ringOffset: function (p) { var c = 2 * Math.PI * 60; return c * (1 - this.clamp(p) / 100); },
+    cpuPct: function (s) { return s.report ? s.report.cpu_pct : null; },
+    ramPct: function (s) { var r = s.report; return r && r.ram_total_mb ? r.ram_used_mb * 100 / r.ram_total_mb : null; },
+    ramText: function (s) { var r = s.report; return r && r.ram_total_mb ? this.gb(r.ram_used_mb) + " / " + this.gb(r.ram_total_mb) + " GB" : this.dash; },
+    // Average utilization of a server's GPUs (null when none reports it).
+    srvUtil: function (s) {
+      var v = this.gpus(s).map(function (d) { return d.util_pct; }).filter(function (x) { return x != null; });
+      return v.length ? v.reduce(function (a, b) { return a + b; }, 0) / v.length : null;
+    },
+    // Memory in use over all of a server's GPUs, as a percent of their total.
+    srvMemPct: function (s) {
+      var t = 0, u = 0;
+      this.gpus(s).forEach(function (d) { if (d.total_mb) { t += d.total_mb; u += d.total_mb - d.free_mb; } });
+      return t ? u * 100 / t : null;
+    },
+    srvMemText: function (s) {
+      var t = 0, u = 0;
+      this.gpus(s).forEach(function (d) { if (d.total_mb) { t += d.total_mb; u += d.total_mb - d.free_mb; } });
+      return t ? "GPU memory " + this.gb(u) + " / " + this.gb(t) + " GB" : "";
+    },
+    // A GPU's memory split for the stacked bar: what listed processes hold, the rest in use, free.
+    memSegments: function (d) {
+      if (!d.total_mb) return [];
+      var used = Math.max(0, d.total_mb - d.free_mb);
+      var procs = Math.min(used, (d.processes || []).reduce(function (a, p) { return a + (p.used_mb || 0); }, 0));
+      var segs = [{ k: "procs", label: "Processes", mb: procs }, { k: "other", label: "Other in use", mb: used - procs },
+        { k: "free", label: "Free", mb: Math.max(0, d.free_mb) }];
+      return segs.filter(function (x) { return x.mb > 0; }).map(function (x) { x.pct = x.mb * 100 / d.total_mb; return x; });
+    },
+    // Processes by GPU memory, largest first, each as a percent of the GPU's total.
+    procBars: function (d) {
+      var t = d.total_mb || 1;
+      return (d.processes || []).filter(function (p) { return p.used_mb != null; })
+        .map(function (p) { return { pid: p.pid, name: p.name || ("pid " + p.pid), mb: p.used_mb, pct: Math.min(100, p.used_mb * 100 / t) }; })
+        .sort(function (a, b) { return b.mb - a.mb; });
+    },
+    // Temperature on a 30-90 °C scale, so the bar's colour bands match how hot the card runs.
+    tempPct: function (d) { return d.temp_c == null ? null : (d.temp_c - 30) * 100 / 60; },
     ringColor: function (p) { var l = this.level(p); return l === "red" ? "var(--danger)" : (l === "amber" ? "var(--warning)" : "var(--success)"); },
 
     // ================= derived data =================
@@ -528,8 +565,9 @@ function app() {
     },
 
     // ================= servers =================
-    isOpen: function (s) { return !this.collapsed[s.node_id]; },
-    toggleOpen: function (s) { this.collapsed[s.node_id] = !this.collapsed[s.node_id]; },
+    // Servers show plain percentages until clicked; the charts and the GPU table are the detail view.
+    isOpen: function (s) { return !!this.expanded[s.node_id]; },
+    toggleOpen: function (s) { this.expanded[s.node_id] = !this.expanded[s.node_id]; },
     select: function (s, d) {
       this.sel = { node: s.node_id, dev: d.device_id };
       this.detailTab = "overview";

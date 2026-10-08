@@ -153,12 +153,10 @@
                 <div class="muted small ellipsis"><span x-text="host(s)"></span> &middot; <span x-text="gpus(s).length"></span> GPUs &middot; <span x-text="gpuModel(s)"></span><span x-show="llamaVer(s)"> &middot; llama.cpp <span x-text="llamaVer(s)"></span></span></div>
               </div>
               <div class="meters" x-show="s.report">
-                <div class="meter"><div class="t"><span>CPU</span><span x-text="pct(s.report && s.report.cpu_pct)"></span></div>
-                  <div class="bar" :class="level(s.report && s.report.cpu_pct)"><i :style="'width:' + clamp(s.report && s.report.cpu_pct) + '%'"></i></div></div>
-                <div class="meter"><div class="t"><span>RAM</span>
-                  <span x-text="s.report && s.report.ram_total_mb ? gb(s.report.ram_used_mb) + ' / ' + gb(s.report.ram_total_mb) + ' GB' : dash"></span></div>
-                  <div class="bar" :class="level(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : null)">
-                    <i :style="'width:' + clamp(s.report && s.report.ram_total_mb ? s.report.ram_used_mb * 100 / s.report.ram_total_mb : 0) + '%'"></i></div></div>
+                <div class="stat-num"><span>CPU</span><b :class="'lv-' + level(cpuPct(s))" x-text="pct(cpuPct(s))"></b></div>
+                <div class="stat-num" :title="ramText(s)"><span>RAM</span><b :class="'lv-' + level(ramPct(s))" x-text="pct(ramPct(s))"></b></div>
+                <div class="stat-num" x-show="gpus(s).length" title="Average utilization of this server's GPUs"><span>GPU</span><b :class="'lv-' + level(srvUtil(s))" x-text="pct(srvUtil(s))"></b></div>
+                <div class="stat-num" x-show="gpus(s).length" :title="srvMemText(s)"><span>VRAM</span><b :class="'lv-' + level(srvMemPct(s))" x-text="pct(srvMemPct(s))"></b></div>
               </div>
             </div>
 
@@ -166,6 +164,30 @@
 
             <!-- expanded: GPU table -->
             <div class="server-body" x-show="isOpen(s)">
+              <div class="srv-viz" x-show="s.report">
+                <div class="rings">
+                  <div class="ring sm"><svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
+                    <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(cpuPct(s))" :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(cpuPct(s))"/></svg>
+                    <div class="c"><b x-text="pct(cpuPct(s))"></b><span>CPU</span></div></div>
+                  <div class="ring sm" :title="ramText(s)"><svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
+                    <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(ramPct(s))" :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(ramPct(s))"/></svg>
+                    <div class="c"><b x-text="pct(ramPct(s))"></b><span>RAM</span><small x-text="ramText(s)"></small></div></div>
+                </div>
+                <div class="cols-chart" x-show="gpus(s).length" role="img" :aria-label="'Utilization and memory of each GPU on ' + s.node_id">
+                  <div class="cc-legend"><span><i class="sw util"></i>Utilization</span><span><i class="sw mem"></i>Memory</span></div>
+                  <div class="cc-plot">
+                    <template x-for="d in gpus(s)" :key="'cc' + d.device_id">
+                      <div class="cc-group" :class="{sel: isSel(s,d)}" @click="select(s,d)" :title="devName(d) + ': ' + pct(d.util_pct) + ' busy, ' + mem(d)">
+                        <div class="cc-bars">
+                          <div class="cc-col util" :style="'height:' + clamp(d.util_pct) + '%'"><span x-text="pct(d.util_pct)"></span></div>
+                          <div class="cc-col mem" :style="'height:' + memPct(d) + '%'"><span x-text="memPct(d) + '%'"></span></div>
+                        </div>
+                        <div class="cc-label" x-text="d.device_id"></div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
               <div class="empty" x-show="devs(s).length === 0" x-text="s.report ? 'No devices reported' : 'This server has never been reached'"></div>
               <div class="tbl-scroll" x-show="devs(s).length > 0">
               <table>
@@ -175,8 +197,8 @@
                     <tr class="click" :class="{sel: isSel(s,d)}" @click="select(s,d)">
                       <td @click.stop><label class="switch" x-show="isGpu(d)" :title="'Include in the pool'"><input type="checkbox" :checked="enabled(s,d)" @change="toggleGpu(s,d,$event.target.checked)"><span></span></label></td>
                       <td><div style="font-weight:600" x-text="devName(d)"></div><div class="muted small" x-text="d.device_id"></div></td>
-                      <td><div class="util-cell"><div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div><b x-text="pct(d.util_pct)"></b></div></td>
-                      <td x-text="mem(d)"></td>
+                      <td><b class="num" :class="'lv-' + level(d.util_pct)" x-text="pct(d.util_pct)"></b></td>
+                      <td><span x-text="mem(d)"></span> <span class="muted small" x-show="d.total_mb" x-text="'(' + memPct(d) + '%)'"></span></td>
                       <td x-text="val(d.temp_c, '°C')"></td>
                       <td x-text="val(d.power_w, ' W')"></td>
                       <td x-text="d.processes ? d.processes.length : dash"></td>
@@ -192,9 +214,11 @@
             <div class="tiles" x-show="!isOpen(s)" style="padding-top:2px">
               <template x-for="d in devs(s)" :key="d.device_id">
                 <div class="tile" :class="{sel: isSel(s,d)}" @click="select(s,d)">
-                  <div class="p" x-text="pct(d.util_pct)"></div>
-                  <div class="bar" :class="level(d.util_pct)"><i :style="'width:' + clamp(d.util_pct) + '%'"></i></div>
-                  <div class="n ellipsis" style="margin-top:4px" x-text="d.kind === 'cpu' ? 'CPU' : d.device_id"></div>
+                  <div class="n ellipsis" x-text="d.kind === 'cpu' ? 'CPU' : d.device_id"></div>
+                  <div class="tile-nums">
+                    <div title="Utilization"><b :class="'lv-' + level(d.util_pct)" x-text="pct(d.util_pct)"></b><span>util</span></div>
+                    <div :title="mem(d)"><b :class="'lv-' + level(d.total_mb ? memPct(d) : null)" x-text="d.total_mb ? memPct(d) + '%' : dash"></b><span>mem</span></div>
+                  </div>
                 </div>
               </template>
             </div>
@@ -215,11 +239,19 @@
               <div class="muted small"><span x-text="selected().s.node_id"></span> / <span x-text="selected().d.device_id"></span></div></div>
               <button class="btn ghost icon sm" @click="sel = null" aria-label="Close" x-html="icon('x')"></button></div>
             <div class="panel-body">
-              <div class="ring">
-                <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
-                  <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(selected().d.util_pct)"
-                    :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(selected().d.util_pct)"/></svg>
-                <div class="c"><b x-text="pct(selected().d.util_pct)"></b><span>Utilization</span></div>
+              <div class="rings">
+                <div class="ring">
+                  <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
+                    <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(selected().d.util_pct)"
+                      :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(selected().d.util_pct)"/></svg>
+                  <div class="c"><b x-text="pct(selected().d.util_pct)"></b><span>Utilization</span></div>
+                </div>
+                <div class="ring">
+                  <svg viewBox="0 0 150 150"><circle class="bg" cx="75" cy="75" r="60"/>
+                    <circle class="fg" cx="75" cy="75" r="60" :stroke="ringColor(memPct(selected().d))"
+                      :stroke-dasharray="ringDash()" :stroke-dashoffset="ringOffset(memPct(selected().d))"/></svg>
+                  <div class="c"><b x-text="memPct(selected().d) + '%'"></b><span>Memory</span><small x-text="mem(selected().d)"></small></div>
+                </div>
               </div>
               <div class="kv3">
                 <div><div class="l">Memory</div><div class="v" x-text="gb(selected().d.total_mb - selected().d.free_mb) + ' GB'"></div></div>
@@ -232,8 +264,27 @@
               </div>
               <div x-show="detailTab==='overview'">
                 <div class="small muted" style="margin-bottom:4px">Memory <span x-text="mem(selected().d)"></span></div>
-                <div class="bar" :class="level(memPct(selected().d))"><i :style="'width:' + memPct(selected().d) + '%'"></i></div>
+                <div class="stack" role="img" :aria-label="'Memory: ' + mem(selected().d)">
+                  <template x-for="seg in memSegments(selected().d)" :key="seg.k">
+                    <i :class="seg.k" :style="'width:' + seg.pct + '%'" :title="seg.label + ': ' + gb(seg.mb) + ' GB'"></i>
+                  </template>
+                </div>
+                <div class="stack-legend">
+                  <template x-for="seg in memSegments(selected().d)" :key="'l' + seg.k">
+                    <span><i class="sw" :class="seg.k"></i><span x-text="seg.label"></span> <b x-text="gb(seg.mb) + ' GB'"></b></span>
+                  </template>
+                </div>
                 <div class="small muted" style="margin-top:8px">Usable for the pool: <b style="color:var(--text);font-weight:600" x-text="gb(selected().d.usable_mb) + ' GB'"></b></div>
+                <div class="gauges">
+                  <div x-show="selected().d.temp_c != null"><div class="t"><span>Temperature</span><b x-text="val(selected().d.temp_c, '°C')"></b></div>
+                    <div class="bar" :class="level(tempPct(selected().d))"><i :style="'width:' + clamp(tempPct(selected().d)) + '%'"></i></div></div>
+                  <div x-show="(selected().d.processes || []).length"><div class="t"><span>Memory by process</span></div>
+                    <div class="hbars">
+                      <template x-for="p in procBars(selected().d)" :key="'pb' + p.pid">
+                        <div class="hbar"><span class="ellipsis" x-text="p.name"></span><div class="bar"><i :style="'width:' + p.pct + '%'"></i></div><b x-text="gb(p.mb) + ' GB'"></b></div>
+                      </template>
+                    </div></div>
+                </div>
               </div>
               <div x-show="detailTab==='processes' || detailTab==='overview'">
                 <h3 class="sec">Running Processes</h3>
@@ -270,13 +321,13 @@
         <thead><tr><th>Server</th><th>GPU</th><th>In pool</th><th>Utilization</th><th>Memory</th><th>Bandwidth</th><th>Temp</th><th>Power</th><th>Processes</th></tr></thead>
         <tbody>
           <template x-for="r in allGpuRows()" :key="r.s.node_id + '/' + r.d.device_id">
-            <tr :class="{stale: !r.s.alive}" :title="r.s.alive ? '' : 'Server offline: last reported values'">
+            <tr class="click" :class="{stale: !r.s.alive, sel: isSel(r.s, r.d)}" :title="r.s.alive ? '' : 'Server offline: last reported values'" @click="select(r.s, r.d); go('servers')">
               <td><span x-text="r.s.node_id"></span> <span class="pill red lead" x-show="!r.s.alive">Offline</span></td>
               <td><div style="font-weight:600" x-text="r.d.name"></div><div class="muted small" x-text="r.d.device_id + (archLabel(r.d) ? ' · ' + archLabel(r.d) : '')" :title="archHelp(r.d)"></div>
                 <span class="pill red lead" x-show="r.d.kernels_ok === false" :title="'The agent\'s llama.cpp was built for ' + ((r.s.report && r.s.report.cuda_archs) || []).join(', ') + '. Rebuild with this GPU in CUDA_ARCHS.'">No kernels in this build</span></td>
-              <td><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
-              <td><div class="util-cell"><div class="bar" :class="level(r.d.util_pct)"><i :style="'width:' + clamp(r.d.util_pct) + '%'"></i></div><b x-text="pct(r.d.util_pct)"></b></div></td>
-              <td x-text="mem(r.d)"></td>
+              <td @click.stop><label class="switch"><input type="checkbox" :checked="enabled(r.s,r.d)" @change="toggleGpu(r.s,r.d,$event.target.checked)"><span></span></label></td>
+              <td><b class="num" :class="'lv-' + level(r.d.util_pct)" x-text="pct(r.d.util_pct)"></b></td>
+              <td><span x-text="mem(r.d)"></span> <span class="muted small" x-show="r.d.total_mb" x-text="'(' + memPct(r.d) + '%)'"></span></td>
               <td x-text="bw(r.d)"></td>
               <td x-text="val(r.d.temp_c, '°C')"></td>
               <td x-text="val(r.d.power_w, ' W')"></td>

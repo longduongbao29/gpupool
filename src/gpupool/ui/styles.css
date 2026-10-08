@@ -362,6 +362,47 @@ tr.sel td, tr.sel:hover td { background: var(--accent-soft); }
 .server-head .name { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 10px; }
 .meters { display: flex; gap: var(--s-6); margin-left: auto; align-items: center; }
 .meter { width: 130px; }
+.stat-num { display: flex; flex-direction: column; align-items: flex-end; min-width: 48px; }
+.stat-num span { font-size: var(--fs-xs); color: var(--text-muted); }
+.stat-num b { font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; }
+.lv-green { color: var(--success); } .lv-amber { color: var(--warning); } .lv-red { color: var(--danger); }
+b.num { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile-nums { display: flex; gap: var(--s-3); margin-top: 2px; }
+.tile-nums > div { display: flex; flex-direction: column; }
+.tile-nums b { font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile-nums span { font-size: 11px; color: var(--text-muted); }
+.srv-viz { display: flex; flex-wrap: wrap; gap: var(--s-4); align-items: stretch; padding: var(--s-4); border-bottom: 1px solid var(--border); }
+.rings { display: flex; gap: var(--s-4); justify-content: center; flex-wrap: wrap; }
+.ring.sm { width: 112px; height: 112px; margin: 0; }
+.ring.sm .c b { font-size: var(--fs-lg); }
+.detail .rings .ring { width: 128px; height: 128px; margin: 6px 0 var(--s-4); }
+.ring .c small { color: var(--text-muted); font-size: 10.5px; margin-top: 2px; }
+.cols-chart { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.cc-legend, .stack-legend { display: flex; flex-wrap: wrap; gap: 4px var(--s-3); font-size: var(--fs-xs); color: var(--text-muted); }
+.cc-legend span, .stack-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.stack-legend b { color: var(--text); font-weight: 600; }
+.sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; background: var(--track); }
+.sw.util, .cc-col.util { background: var(--accent); }
+.sw.mem, .cc-col.mem { background: var(--info); }
+.cc-plot { display: flex; gap: var(--s-4); align-items: flex-end; height: 140px; overflow-x: auto; padding-top: 16px;
+  background: repeating-linear-gradient(to top, var(--border) 0 1px, transparent 1px 25%); }
+.cc-group { display: flex; flex-direction: column; align-items: center; height: 100%; cursor: pointer; border-radius: 6px; padding: 0 4px; flex: none; }
+.cc-group:hover, .cc-group.sel { background: var(--accent-soft); }
+.cc-bars { flex: 1; display: flex; gap: 8px; align-items: flex-end; }
+.cc-col { width: 20px; min-height: 2px; border-radius: 3px 3px 0 0; position: relative; transition: height var(--t-slow) var(--ease); }
+.cc-col span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); font-size: 10px; line-height: 14px; color: var(--text-muted); white-space: nowrap; }
+.cc-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.stack { display: flex; height: 10px; border-radius: var(--r-pill); overflow: hidden; background: var(--track); margin-bottom: 6px; }
+.stack > i { display: block; height: 100%; transition: width var(--t-slow) var(--ease); }
+.stack > i.procs, .sw.procs { background: var(--accent); }
+.stack > i.other, .sw.other { background: var(--warning); }
+.stack > i.free, .sw.free { background: var(--track); }
+.gauges { display: flex; flex-direction: column; gap: var(--s-3); margin-top: var(--s-3); }
+.gauges .t { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--text-muted); margin-bottom: 4px; }
+.gauges .t b { color: var(--text); font-weight: 600; }
+.hbars { display: flex; flex-direction: column; gap: 4px; }
+.hbar { display: grid; grid-template-columns: minmax(0, 110px) 1fr 56px; gap: var(--s-2); align-items: center; font-size: var(--fs-xs); }
+.hbar b { text-align: right; font-weight: 600; }
 .meter .t { display: flex; justify-content: space-between; font-size: var(--fs-xs); color: var(--text-muted); margin-bottom: 6px; }
 .server-body { border-top: 1px solid var(--border); background: var(--surface); }
 .tiles { display: flex; flex-wrap: wrap; gap: var(--s-2); padding: 2px var(--s-4) var(--s-4) 70px; }

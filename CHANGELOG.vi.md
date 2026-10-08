@@ -8,6 +8,16 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- Server và GPU chỉ hiện phần trăm (CPU, RAM, GPU, VRAM) cho tới khi được bấm vào. Bấm một server để xem vòng
+  CPU / RAM, biểu đồ cột utilization + bộ nhớ của từng GPU và bảng GPU; bấm một GPU để xem vòng utilization và bộ
+  nhớ, phân bổ bộ nhớ (tiến trình / khác / trống), thanh nhiệt độ và bộ nhớ theo tiến trình.
+- Một model launch fail 5 lần liên tiếp không còn tự retry (event `launch_gave_up`); bấm Start hoặc lưu lại
+  settings để thử lại. Request tới model đó nhận 503 ngay.
+- Replica failed chỉ hiện trên card model cho tới khi một replica launch sau nó chạy được; replica failed hoặc
+  stopped có thể xóa (`DELETE /api/models/{name}/replicas/{id}`, nút thùng rác).
+
 ## [0.8.0] - 2026-10-07
 
 ### Thêm
