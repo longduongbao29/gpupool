@@ -1120,3 +1120,19 @@ def test_ui_pinned_row_stays_in_model_card():
     assert 'class="place row wrap"' in html
     assert not re.search(r"(^|\n)\.place \{[^}]*flex:", css)
     assert re.search(r"\.rep \.place \{[^}]*flex: 1 0 100%", css)
+
+
+def test_ui_content_stays_in_its_box():
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    # A series that stopped updating keeps samples older than the window (they are only pruned on push):
+    # the sparkline drops them, and clips, so they cannot plot into the card on its left.
+    assert re.search(r"filter\(function \(p\) \{ return p\[0\] >= t0; \}\)", js)
+    assert re.search(r"\.spark-box svg \{[^}]*overflow: hidden", css)
+    # "0% 93%" did not fit a fixed 78px GPU tile
+    assert re.search(r"\n\.tile \{[^}]*min-width: 78px", css)
+    assert not re.search(r"\n\.tile \{\s*width:", css)
+    # long chip values (model name, draft) ellipsize instead of running out of the card
+    assert re.search(r"\n\.chip \{[^}]*overflow: hidden; text-overflow: ellipsis", css)
+    # phone width: a long server name in GPU memory by model ellipsizes instead of widening the page
+    assert re.search(r"\.vram-lbl \{ flex-direction: column;[^}]*align-items: stretch", css)

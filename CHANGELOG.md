@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- UI: content no longer runs out of its card. The *Busy* sparkline of a model whose series stopped updating drew
+  old samples into the *Replicas* card; GPU tiles were too narrow for "0% 93%"; long chip values (Playground model,
+  *Spec: draft ...*, a replica's draft) now end in an ellipsis with the full text as a tooltip; on a phone a long
+  server name in *GPU memory by model* widened the page; a long replica id wrapped away from its status dot.
+
 ## [0.9.1] - 2026-10-08
 
 ### Fixed
