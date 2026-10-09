@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Sửa lỗi
+
+- UI: nội dung không còn tràn ra ngoài ô. Sparkline *Busy* của model có chuỗi số liệu đã ngừng cập nhật vẽ các mẫu
+  cũ sang ô *Replicas*; ô GPU quá hẹp cho "0% 93%"; giá trị dài trong chip (model ở Playground, *Spec: draft ...*,
+  draft của replica) giờ kết thúc bằng dấu ba chấm và hiện đầy đủ khi rê chuột; trên điện thoại tên server dài trong
+  *GPU memory by model* làm trang rộng ra; id replica dài xuống dòng tách khỏi chấm trạng thái.
+
 ## [0.9.1] - 2026-10-08
 
 ### Sửa lỗi

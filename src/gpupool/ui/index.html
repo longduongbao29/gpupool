@@ -530,7 +530,7 @@
                   <div class="muted small ellipsis" style="margin-top:2px"><span x-text="m.file || m.spec.source"></span> &middot; ctx <span x-text="m.spec.ctx_size"></span> &middot; parallel <span x-text="m.spec.parallel"></span></div></div>
               </div>
               <div class="row wrap" style="gap:6px;margin-top:8px" x-show="specChips(m).length">
-                <template x-for="c in specChips(m)" :key="c"><span class="chip" x-text="c"></span></template></div>
+                <template x-for="c in specChips(m)" :key="c"><span class="chip" :title="c" x-text="c"></span></template></div>
               <div class="endpoint ep">
                 <div class="ep-head"><span class="muted small">OpenAI-compatible API</span>
                   <button class="btn sm ghost" @click="copy(curlSnippet(m.spec.name))" title="Copy a ready curl command for this model" aria-label="Copy curl command for this model"><span x-html="icon('copy')"></span> Copy curl</button></div>
@@ -614,7 +614,7 @@
                       </div>
                     </div>
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
-                    <span class="chip" x-show="p.draft" x-text="p.draft"></span>
+                    <span class="chip" x-show="p.draft" :title="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
                     <button type="button" class="btn ghost danger icon rep-del" x-show="p.state==='failed' || p.state==='stopped'" @click="deleteReplica(m, p.id)" title="Remove this failed replica from the list" aria-label="Remove replica" x-html="icon('trash')"></button>
                     <div class="rnote rep-stage" x-show="p.stage" x-text="p.stage" :title="p.stage"></div>
@@ -697,7 +697,7 @@
         <section class="panel pg-chat" aria-label="Chat">
           <div class="panel-head">
             <h2>Chat</h2>
-            <span class="chip mono" x-show="pgCurrent()" x-text="pg.model"></span>
+            <span class="chip mono" x-show="pgCurrent()" :title="pg.model" x-text="pg.model"></span>
             <button class="btn sm right" @click="pgClear()" :disabled="!pg.msgs.length || pg.busy"><span x-html="icon('trash')"></span> Clear chat</button>
           </div>
           <div class="pg-stats" aria-live="polite">

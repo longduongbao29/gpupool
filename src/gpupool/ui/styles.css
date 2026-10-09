@@ -303,7 +303,8 @@ input[type=checkbox] { accent-color: var(--accent-solid); width: 16px; height: 1
 a.pill:hover { filter: brightness(1.15); }
 .pill .ic { width: 13px; height: 13px; }
 .spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; display: inline-block; flex: none; }
-.chip { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: var(--r-badge); background: var(--track); color: var(--text-muted); font-size: 11.5px; font-weight: 500; white-space: nowrap; max-width: 100%; }
+/* text-only: a block box so a long value ends in an ellipsis instead of running out of its card */
+.chip { display: inline-block; vertical-align: middle; height: 22px; line-height: 22px; overflow: hidden; text-overflow: ellipsis; padding: 0 8px; border-radius: var(--r-badge); background: var(--track); color: var(--text-muted); font-size: 11.5px; font-weight: 500; white-space: nowrap; max-width: 100%; }
 .chip.mono { font-family: var(--mono); }
 .badge {
   position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: var(--r-pill); background: var(--danger-solid); color: #fff;
@@ -373,7 +374,7 @@ tr.sel td, tr.sel:hover td { background: var(--accent-soft); }
 .stat-num span { font-size: var(--fs-xs); color: var(--text-muted); }
 .stat-num b { font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; }
 b.num { font-weight: 600; font-variant-numeric: tabular-nums; }
-.tile-nums { display: flex; gap: var(--s-3); margin-top: 2px; }
+.tile-nums { display: flex; gap: var(--s-3); margin-top: 2px; white-space: nowrap; }
 .tile-nums > div { display: flex; flex-direction: column; }
 .tile-nums b { font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
 .tile-nums span { font-size: 11px; color: var(--text-muted); }
@@ -403,7 +404,7 @@ b.num { font-weight: 600; font-variant-numeric: tabular-nums; }
 /* sparkline: recessive grid, 2px line, light area */
 .spark-box { position: relative; height: 44px; cursor: crosshair; }
 .spark-box.sm { height: 28px; margin-top: 4px; }
-.spark-box svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.spark-box svg { width: 100%; height: 100%; display: block; overflow: hidden; }
 .spark-box line, .spark-box path { vector-effect: non-scaling-stroke; }
 .spark-box .sg { stroke: var(--border); stroke-dasharray: 2 3; }
 .spark-box .sb { stroke: var(--border-strong); }
@@ -480,7 +481,7 @@ b.num { font-weight: 600; font-variant-numeric: tabular-nums; }
 .server-body { border-top: 1px solid var(--border); background: var(--surface); }
 .tiles { display: flex; flex-wrap: wrap; gap: var(--s-2); padding: 2px var(--s-4) var(--s-4) 70px; }
 .tile {
-  width: 78px; padding: var(--s-2); border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface); cursor: pointer; font-size: 11.5px;
+  min-width: 78px; max-width: 160px; padding: var(--s-2); border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface); cursor: pointer; font-size: 11.5px;
   transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .tile:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: var(--shadow-md); }
@@ -539,7 +540,8 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .reps { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface); padding: var(--s-1); }
 .rep { display: flex; align-items: center; flex-wrap: wrap; gap: 4px var(--s-2); min-height: 32px; padding: 5px var(--s-2); border-radius: 6px; }
 .rep:hover { background: var(--hover); }
-.rep-id { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+/* max-width: a long id ellipsizes beside its dot and speed instead of wrapping onto its own line */
+.rep-id { flex: 0 1 auto; min-width: 0; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .rep .chips { display: flex; order: 5; flex: 1 0 100%; gap: var(--s-1); flex-wrap: wrap; min-width: 0; padding-left: 16px; }
 .rep .tps { font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; margin-left: auto; order: 3; }
 .rep .mark { order: 2; }
@@ -735,7 +737,7 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
   .meters { display: none; }
   .srv-viz { grid-template-columns: minmax(0, 1fr); }
   .vram-row { grid-template-columns: 96px minmax(0, 1fr); }
-  .vram-lbl { flex-direction: column; gap: 0; }
+  .vram-lbl { flex-direction: column; gap: 0; align-items: stretch; }
   .vram-val { display: none; }
   .search { width: 100%; }
   .model-grid { grid-template-columns: minmax(0, 1fr); }
