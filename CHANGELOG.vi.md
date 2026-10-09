@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.2] - 2026-10-09
+
 ### Sửa lỗi
 
 - UI: nội dung không còn tràn ra ngoài ô. Sparkline *Busy* của model có chuỗi số liệu đã ngừng cập nhật vẽ các mẫu
@@ -430,7 +432,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   trước `--device`; agent dọn các engine mồ côi.
 - Tài liệu song ngữ Anh và Việt: README, thiết kế, báo cáo kiểm thử.
 
-[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.9.1...HEAD
+[Chưa phát hành]: https://github.com/longduongbao29/gpupool/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/longduongbao29/gpupool/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/longduongbao29/gpupool/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/longduongbao29/gpupool/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/longduongbao29/gpupool/compare/v0.7.3...v0.8.0
