@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.3] - 2026-10-09
+
+### Sửa lỗi
+
+- UI: khi *Thinking* đặt *Off* trong phần Reasoning của model, *Effort* và *Thinking budget* bị khoá và không còn
+  được gửi đi; sparkline *Busy* của model đã dừng được ẩn thay vì hiện "collecting..." mãi.
+
 ## [0.9.2] - 2026-10-09
 
 ### Sửa lỗi
