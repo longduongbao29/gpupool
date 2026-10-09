@@ -544,7 +544,7 @@
                   <div class="v" x-text="replicasText(m)"></div></div>
                 <div class="metric"><div class="l">Busy</div>
                   <div class="v" x-text="scalingOf(m) ? busyPct(scalingOf(m).avg_busy) : dash"></div>
-                  <div class="spark-box sm" x-show="scalingOf(m)" @mousemove="sparkHover($event, 'busy:' + m.spec.name, 'Busy')" @mouseleave="sparkOff()" x-html="spark('busy:' + m.spec.name, busyTarget(m))" role="img" :aria-label="'Busy ratio of ' + m.spec.name + ' over the last 10 minutes' + (busyTarget(m) != null ? ', target ' + busyTarget(m) + '%' : '')"></div></div>
+                  <div class="spark-box sm" x-show="scalingOf(m) && scalingOf(m).avg_busy != null" @mousemove="sparkHover($event, 'busy:' + m.spec.name, 'Busy')" @mouseleave="sparkOff()" x-html="spark('busy:' + m.spec.name, busyTarget(m))" role="img" :aria-label="'Busy ratio of ' + m.spec.name + ' over the last 10 minutes' + (busyTarget(m) != null ? ', target ' + busyTarget(m) + '%' : '')"></div></div>
                 <div class="metric"><div class="l">Est. speed</div>
                   <div class="v" x-text="modelTps(m)"></div></div>
                 <div class="metric"><div class="l">Mode</div>
@@ -1173,11 +1173,11 @@
             <option value="on">On</option>
             <option value="off">Off</option></select></label>
         <label class="field grow"><span>Effort</span>
-          <select x-model="form.effort" style="width:100%">
+          <select x-model="form.effort" :disabled="form.rea === 'off'" title="Not used while thinking is off" style="width:100%">
             <option value="default">Template default</option>
             <template x-for="e in ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']" :key="e"><option :value="e" :selected="e === form.effort" x-text="e"></option></template></select></label>
         <label class="field grow"><span>Thinking budget (tokens)</span>
-          <input type="number" min="0" step="1" x-model="form.budget" placeholder="Unlimited" style="width:100%"></label>
+          <input type="number" min="0" step="1" x-model="form.budget" :disabled="form.rea === 'off'" :placeholder="form.rea === 'off' ? 'Not used' : 'Unlimited'" style="width:100%"></label>
       </div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)">For thinking models (Qwen3, DeepSeek-R1, gpt-oss, GLM...): the defaults for requests that do not set their own; a request still can (<code>reasoning_effort</code>, <code>"none"</code> turns thinking off). Effort is handed to the chat template: only templates that read it change anything (gpt-oss: low, medium, high). Budget 0 ends thinking at once. Needs the agent's llama.cpp b11413 or newer; applies from the next launch.</div>
       <h3 class="sec" style="margin-top:4px">Scaling</h3>

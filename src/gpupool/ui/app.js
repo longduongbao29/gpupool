@@ -1736,14 +1736,15 @@ function app() {
       var ub = parseInt(f.ubatch, 10) || 512, b = Math.max(parseInt(f.batch, 10) || 2048, ub);
       if (kv !== "f16" && fa === "off") return { error: "A quantized KV cache needs flash attention (Auto or On)" };
       // the switch is hidden at one slot, where it means nothing: never send a value the user cannot see
-      var bud = String(f.budget == null ? "" : f.budget).trim(), budget = -1;
+      // effort and budget mean nothing with thinking off: never send a value the user cannot change
+      var off = f.rea === "off", bud = off ? "" : String(f.budget == null ? "" : f.budget).trim(), budget = -1;
       if (bud !== "") {
         budget = Number(bud);
         if (!isFinite(budget) || Math.floor(budget) !== budget || budget < 0) return { error: "Thinking budget must be a whole number of tokens (empty = unlimited)" };
       }
       var common = { kv_cache_type: kv, flash_attn: fa, ubatch: ub, batch: b,
                      kv_unified: !!f.kvu && (parseInt(f.parallel, 10) || 1) > 1,
-                     reasoning: f.rea || "auto", reasoning_effort: f.effort || "default", reasoning_budget: budget };
+                     reasoning: f.rea || "auto", reasoning_effort: off ? "default" : f.effort || "default", reasoning_budget: budget };
       var n = parseFloat(f.draftN);
       if (sp === "mtp") {
         if (isNaN(n) || Math.floor(n) !== n || n < 1 || n > 16) return { error: "Draft tokens must be a whole number between 1 and 16" };
