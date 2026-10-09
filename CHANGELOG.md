@@ -8,6 +8,13 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-09
+
+### Fixed
+
+- UI: with *Thinking* set to *Off* in a model's Reasoning settings, *Effort* and *Thinking budget* are disabled and
+  no longer sent; the *Busy* sparkline of a stopped model is hidden instead of showing "collecting..." forever.
+
 ## [0.9.2] - 2026-10-09
 
 ### Fixed
