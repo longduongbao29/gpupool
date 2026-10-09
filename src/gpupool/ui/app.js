@@ -520,7 +520,10 @@ function app() {
     // only numbers go into it.
     spark: function (key, target) {
       void this.histTick;
-      var a = HIST[key] || [], W = 300, H = 44, now = Date.now() / 1000, t0 = now - HIST_WINDOW_S;
+      var W = 300, H = 44, now = Date.now() / 1000, t0 = now - HIST_WINDOW_S;
+      // Samples are only pruned on push, so a series that stopped updating still holds points
+      // older than the window: drop them here or they plot left of the box.
+      var a = (HIST[key] || []).filter(function (p) { return p[0] >= t0; });
       function x(t) { return ((t - t0) / HIST_WINDOW_S * W).toFixed(1); }
       function y(v) { return (H - 2 - Math.max(0, Math.min(100, v)) / 100 * (H - 4)).toFixed(1); }
       var out = '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
