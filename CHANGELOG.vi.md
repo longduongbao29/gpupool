@@ -8,6 +8,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- UI: phần giới thiệu của Overview chia hai cột (bên trái là đoạn mô tả và bốn điểm nổi bật, bên phải là hình minh hoạ pool).
+  Hình vẽ từ pool thật: request đi từ app vào coordinator rồi toả xuống tối đa ba server cùng các GPU của chúng, bên dưới là
+  các layer của một model chia theo tỉ lệ VRAM. Hình có hoạt ảnh, trừ khi hệ thống yêu cầu giảm chuyển động.
+
 ## [0.9.4] - 2026-10-12
 
 ### Thay đổi

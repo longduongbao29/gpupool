@@ -2041,6 +2041,29 @@ function app() {
       });
       return out;
     },
+    // The intro picture: up to three of the pool's servers (online first) with their GPUs, and how one
+    // model's layers would spread over them in proportion to their VRAM. Placeholders while the pool is empty.
+    ovPool: function () {
+      var self = this;
+      var list = this.servers().slice().sort(function (a, b) { return (b.alive ? 1 : 0) - (a.alive ? 1 : 0); }).slice(0, 3).map(function (s) {
+        var g = self.gpus(s);
+        var mb = g.reduce(function (t, d) { return t + (d.total_mb || 0); }, 0);
+        return { k: s.node_id, name: s.node_id, alive: s.alive, mb: mb,
+                 gpus: g.slice(0, 8).map(function (d) { return { k: d.device_id, pct: self.memPct(d), tip: d.device_id + " · " + d.name + " · " + self.mem(d) }; }) };
+      });
+      var demo = !list.length;
+      if (demo) list = [1, 2, 3].map(function (i) { return { k: "demo" + i, name: "gpu-server-" + i, alive: true, mb: 1, gpus: [{ k: "a", pct: 0 }, { k: "b", pct: 0 }] }; });
+      var tot = list.reduce(function (t, s) { return t + (s.alive ? s.mb : 0); }, 0) || 1;
+      var layer = 0, layers = 80;
+      list.forEach(function (s, i) {
+        var n = s.alive ? Math.round(layers * s.mb / tot) : 0;
+        s.share = n * 100 / layers; s.from = layer; s.to = layer + n - 1; layer += n;
+        s.demo = demo;
+      });
+      var last = list.filter(function (s) { return s.alive; }).pop();
+      if (last && layer !== layers) { last.to = layers - 1; last.share += (layers - layer) * 100 / layers; }
+      return list;
+    },
     // The model the Overview snippets name: one that is serving, else the first deployment.
     ovModel: function () { var m = this.servingModels()[0]; return m ? m.spec.name : ""; },
     // Deployments that can answer requests now (idle ones cold-start on the next request).

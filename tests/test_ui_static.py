@@ -1150,3 +1150,14 @@ def test_overview_is_a_guide_not_a_copy_of_servers():
     assert "folded('set-api')" not in html and "folded('set-agent')" not in html
     for fn in ("setupSteps: function", "attention: function", "servingModels: function", "pySnippet: function (modelName)"):
         assert fn in js, fn
+
+
+def test_overview_pool_picture_is_live_and_respects_reduced_motion():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    css = (UI / "styles.css").read_text(encoding="utf-8")
+    assert 'class="pool-fig"' in html and "ovPool()" in html
+    assert "ovPool: function" in js
+    # the packets and the sweep stop when the system asks for less motion
+    rm = css[css.index("@media (prefers-reduced-motion: reduce) {\n  .pf-pkt"):]
+    assert ".pf-model::after" in rm[:200] and "animation: none" in rm[:300]
