@@ -198,6 +198,8 @@ function app() {
     navOpen: false,
     search: "",
     expanded: {}, // node_id -> true when the server's full view (charts, GPU table) is open
+    ovTab: "docker", // Overview "Connect GPU servers" step: "docker" or "uv"
+    ovApi: "curl", // Overview "Call the API" step: "curl" or "python"
     srvMode: "server", // Servers & GPUs: "server" (grouped) or "gpus" (flat list of every GPU)
     histTick: 0, // bumped when HIST gets a sample
     sp: null, // sparkline hover: { key, t }
@@ -2006,6 +2008,46 @@ function app() {
       return bits.join(" · ");
     },
 
+    // ================= overview =================
+    // The setup guide: each step is checked off from the live state, so a fresh pool shows what to do next.
+    setupSteps: function () {
+      var sm = this.summary();
+      var live = this.models().some(function (m) { return m.state === "running" || m.state === "idle"; });
+      return [
+        { k: "coord", done: true },
+        { k: "server", done: (sm.servers_online || 0) > 0 },
+        { k: "gpus", done: (sm.gpus_enabled || 0) > 0 },
+        { k: "library", done: this.readyLibrary().length > 0 },
+        { k: "deploy", done: live },
+        { k: "api", done: live }
+      ];
+    },
+    stepDone: function (k) { var st = this.setupSteps().find(function (x) { return x.k === k; }); return !!(st && st.done); },
+    stepsDone: function () { return this.setupSteps().filter(function (x) { return x.done; }).length; },
+    // The first step not done yet is highlighted as "next".
+    stepNext: function (k) { var st = this.setupSteps().find(function (x) { return !x.done; }); return !!st && st.k === k; },
+        // Things that need a look now: offline servers, failed models, GPUs the engine cannot use, mixed llama.cpp builds.
+    attention: function () {
+      var self = this, out = [];
+      this.servers().forEach(function (s) {
+        if (!s.alive) out.push({ k: "off:" + s.node_id, cls: "red", icon: "server", text: "Server " + s.node_id + " is offline", go: "servers" });
+        else if (self.llamaOdd(s)) out.push({ k: "ll:" + s.node_id, cls: "amber", icon: "alert", text: s.node_id + " runs a different llama.cpp build (" + self.llamaVer(s) + ")", go: "servers" });
+        self.gpus(s).forEach(function (d) {
+          if (d.kernels_ok === false) out.push({ k: "k:" + s.node_id + d.device_id, cls: "red", icon: "chip", text: s.node_id + " / " + d.device_id + ": no kernels for this GPU in the agent's llama.cpp build", go: "servers" });
+        });
+      });
+      this.models().forEach(function (m) {
+        if (m.state === "failed") out.push({ k: "m:" + m.spec.name, cls: "red", icon: "cube", text: "Model " + m.spec.name + " failed" + (m.error ? ": " + m.error : ""), go: "models" });
+      });
+      return out;
+    },
+    // The model the Overview snippets name: one that is serving, else the first deployment.
+    ovModel: function () { var m = this.servingModels()[0]; return m ? m.spec.name : ""; },
+    // Deployments that can answer requests now (idle ones cold-start on the next request).
+    servingModels: function () {
+      return this.models().filter(function (m) { return m.state === "running" || m.state === "idle" || m.state === "starting"; });
+    },
+
     // ================= snippets =================
     curlSnippet: function (modelName) {
       var name = modelName || (this.models().length ? this.models()[0].spec.name : "<model>");
@@ -2013,8 +2055,8 @@ function app() {
       return "curl " + this.endpoint() + "/chat/completions \\\n" + auth + "  -H \"Content-Type: application/json\" \\\n" +
         "  -d '{\"model\": \"" + name + "\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}'";
     },
-    pySnippet: function () {
-      var name = this.models().length ? this.models()[0].spec.name : "<model>";
+    pySnippet: function (modelName) {
+      var name = modelName || (this.models().length ? this.models()[0].spec.name : "<model>");
       return "from openai import OpenAI\n\nclient = OpenAI(base_url=\"" + this.endpoint() + "\", api_key=\"" + (this.settings().api_keys_set ? "<api key>" : "no key required") + "\")\n" +
         "resp = client.chat.completions.create(\n    model=\"" + name + "\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(resp.choices[0].message.content)";
     },
@@ -2033,9 +2075,9 @@ function app() {
     },
     goNow: function (v) { this.view = v; if (v === "models") { this.convPollAt = 0; this.convLoadOptions(); } try { history.replaceState(null, "", "#" + v); } catch (e) { /* ignore */ } if (v === "events") this.loadEvents(); this.navOpen = false; this.search = ""; },
     title: function () {
-      return { overview: ["Overview", "Monitor your GPU pool at a glance"], servers: ["Servers & GPUs", "Manage servers and the GPUs in the pool"],
+      return { overview: ["Overview", "What gpupool is, how to set it up, and what needs attention"], servers: ["Servers & GPUs", "Manage servers and the GPUs in the pool"],
         events: ["Events", "Failures, re-allocations and other cluster activity"], models: ["Models", "Library and deployments"],
-        playground: ["Playground", "Chat with a deployed model and see how fast it answers"], settings: ["Settings", "Connection details and snippets"] }[this.view];
+        playground: ["Playground", "Chat with a deployed model and see how fast it answers"], settings: ["Settings", "Appearance and session"] }[this.view];
     }
   };
 }

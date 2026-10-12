@@ -723,9 +723,46 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .skel-tile { height: 84px; }
 .skel-panel { height: 260px; }
 
+/* ---------- overview: intro, setup guide, attention ---------- */
+.ov-hero { padding: var(--s-5); margin-bottom: var(--s-4); display: grid; gap: var(--s-4); }
+.ov-hero h2 { margin: 0 0 6px; font-size: var(--fs-xl, 20px); letter-spacing: -.01em; }
+.ov-hero p { margin: 0; max-width: 78ch; line-height: 1.55; }
+.ov-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: var(--s-2); }
+.ov-node { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface-2); min-width: 0; }
+.ov-node b { font-size: var(--fs-sm); }
+.ov-node span { font-size: var(--fs-xs); color: var(--text-muted); }
+.ov-node.accent { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+.ov-arrow { align-self: center; color: var(--text-muted); }
+.ov-cols { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: var(--s-4); align-items: start; }
+.steps { list-style: none; margin: 0; padding: var(--s-2) var(--s-5) var(--s-4); counter-reset: step; }
+.step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: var(--s-3); padding: var(--s-3) 0; position: relative; counter-increment: step; }
+.step + .step { border-top: 1px solid var(--border); }
+.step-mark { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: var(--fs-xs); font-weight: 600;
+  border: 1.5px solid var(--border-strong); color: var(--text-muted); }
+.step-mark::before { content: counter(step); }
+.step.next .step-mark { border-color: var(--accent); color: var(--accent-text); box-shadow: 0 0 0 4px var(--accent-soft); }
+.step.done .step-mark { border-color: transparent; background: var(--success-soft); color: var(--success-text); }
+.step.done .step-mark::before { content: "\2713"; }
+.step-t { font-weight: 600; margin: 3px 0 4px; }
+.step.done .step-t { color: var(--text-muted); }
+.step-main .cmd { margin-top: var(--s-2); }
+.step-main code { font-size: 12px; }
+.step-note { margin-top: var(--s-2); }
+.step-acts { gap: var(--s-2); margin-top: var(--s-3); }
+.ov-tabs { margin: var(--s-3) 0 0; }
+.ov-list { padding: var(--s-2) 0; }
+.ov-item { display: flex; align-items: flex-start; gap: var(--s-3); padding: 8px var(--s-5); color: inherit; text-decoration: none; font-size: var(--fs-sm); }
+.ov-item.static { align-items: center; }
+a.ov-item:hover { background: var(--surface-2); color: inherit; }
+.ov-empty { padding: 8px var(--s-5); }
+.nowrap { white-space: nowrap; }
+.clamp2 { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1200px) {
   .stats, .skel-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ov-cols { grid-template-columns: minmax(0, 1fr); }
+  .ov-arrow { display: none; }
   .cols.with-detail { grid-template-columns: minmax(0, 1fr); }
   .detail { position: static; }
 }

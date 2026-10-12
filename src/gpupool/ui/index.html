@@ -105,7 +105,7 @@
             <div class="notif-foot"><a href="#" @click.prevent="evOpen=false;go('events')">View all events</a></div>
           </div>
         </div>
-        <button class="btn primary" @click="openAddServer()" x-show="view==='servers' || view==='overview'"><span x-html="icon('plus')"></span> Add Server</button>
+        <button class="btn primary" @click="openAddServer()" x-show="view==='servers'"><span x-html="icon('plus')"></span> Add Server</button>
       </div>
     </div>
 
@@ -135,9 +135,139 @@
         <div class="ico vivid amber" x-html="icon('db')"></div></div>
     </div>
 
-    <!-- ============ servers & GPUs (overview + servers) ============ -->
+    <!-- ============ overview: what gpupool is, the setup guide with its connection commands, what needs attention ============ -->
+    <div class="view ov" x-show="view==='overview'">
+      <div class="panel ov-hero">
+        <div class="ov-hero-text">
+          <h2>One OpenAI-compatible endpoint for all your GPUs</h2>
+          <p class="muted">gpupool pools the free VRAM of every GPU server into one. It reads each model's GGUF header, picks the
+            placement with the best estimated speed (one GPU, one server, or layers split over several servers through llama.cpp RPC),
+            launches and supervises the engines, and serves every deployed model behind <code>/v1</code>.</p>
+        </div>
+        <div class="ov-flow" aria-label="Request path">
+          <div class="ov-node"><b>Your app</b><span>OpenAI SDK, curl</span></div>
+          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
+          <div class="ov-node accent"><b>Coordinator</b><span>router &middot; scheduler &middot; reconciler &middot; library</span></div>
+          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
+          <div class="ov-node"><b>Agents</b><span>one per GPU server</span></div>
+          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
+          <div class="ov-node"><b>llama.cpp</b><span>llama-server + ggml-rpc-server</span></div>
+        </div>
+      </div>
+
+      <div class="ov-cols">
+        <!-- setup guide; the connection commands live here, next to the step that needs them -->
+        <div :class="{folded: folded('ov-setup')}" class="panel">
+          <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('ov-setup')}" @click="toggleFold('ov-setup')" :aria-expanded="String(!folded('ov-setup'))" :title="folded('ov-setup') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Set up and connect" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('ov-setup')">Set up and connect</h2>
+            <span class="pill lead keep-case right" :class="stepsDone() === setupSteps().length ? 'green' : 'amber'" x-text="stepsDone() + ' of ' + setupSteps().length + ' done'"></span></div>
+          <ol class="steps">
+            <li class="step" :class="{done: stepDone('coord'), next: stepNext('coord')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Start the coordinator</div>
+                <div class="muted small">Running at <code x-text="coordUrl()"></code>. It needs no GPU; it keeps the model library, plans placements and serves the API. Its admin key is printed in its log.</div>
+              </div>
+            </li>
+            <li class="step" :class="{done: stepDone('server'), next: stepNext('server')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Connect GPU servers</div>
+                <div class="muted small">Run this on every GPU machine. The agent reports its GPUs, starts the llama.cpp engines and joins with the cluster token below; the server shows up in <a href="#" @click.prevent="go('servers')">Servers &amp; GPUs</a> within a few seconds.
+                  <span x-show="summary().servers_total"> Now: <b x-text="summary().servers_online + ' of ' + summary().servers_total"></b> online.</span></div>
+                <div class="tabs ov-tabs"><button type="button" :class="{active: ovTab==='docker'}" @click="ovTab='docker'">Docker</button><button type="button" :class="{active: ovTab==='uv'}" @click="ovTab='uv'">Without Docker (uv)</button></div>
+                <div class="cmd"><span x-text="joinCmd(ovTab)"></span><button type="button" class="btn sm" @click="copy(joinCmd(ovTab))">Copy</button></div>
+                <div class="muted small step-note" x-show="ovTab==='docker'">Needs the NVIDIA Container Toolkit. <code>--network host</code> lets the coordinator and the other servers reach the agent and its RPC port.</div>
+                <div class="muted small step-note" x-show="ovTab==='uv'">Point <code>--llama-dir</code> at a llama.cpp build that has <code>llama-server</code> and <code>ggml-rpc-server</code>. Use the same llama.cpp version on every server.</div>
+                <div class="row wrap step-acts"><button class="btn sm" @click="openAddServer()"><span x-html="icon('plus')"></span> Add by agent URL</button></div>
+              </div>
+            </li>
+            <li class="step" :class="{done: stepDone('gpus'), next: stepNext('gpus')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Choose the GPUs in the pool</div>
+                <div class="muted small">Every GPU joins the pool by default. On shared machines, switch off the cards other people need; gpupool also keeps a reserve and only plans with the memory that is actually free.
+                  <span x-show="summary().gpus_total"> Now: <b x-text="summary().gpus_enabled + ' of ' + summary().gpus_total"></b> GPUs in the pool.</span></div>
+                <div class="row wrap step-acts"><button class="btn sm" @click="go('servers')"><span x-html="icon('server')"></span> Servers &amp; GPUs</button></div>
+              </div>
+            </li>
+            <li class="step" :class="{done: stepDone('library'), next: stepNext('library')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Add a model to the library</div>
+                <div class="muted small">Download a GGUF from Hugging Face, pick a file the coordinator can see, or convert safetensors weights to GGUF with the quantization you choose.
+                  <span x-show="library().length"> Now: <b x-text="readyLibrary().length"></b> ready.</span></div>
+                <div class="row wrap step-acts"><button class="btn sm" @click="openAddModel()"><span x-html="icon('plus')"></span> Add model</button>
+                  <button class="btn sm" @click="openConvert()"><span x-html="icon('swap')"></span> Convert a model</button></div>
+              </div>
+            </li>
+            <li class="step" :class="{done: stepDone('deploy'), next: stepNext('deploy')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Deploy it</div>
+                <div class="muted small">Choose the context size, replicas or autoscaling (scale to zero included) and, if you want, the servers it may use. The dialog shows the recommended placement and its impact before anything starts.</div>
+                <div class="row wrap step-acts"><button class="btn sm" @click="go('models')"><span x-html="icon('cube')"></span> Models</button>
+                  <button class="btn sm" @click="go('playground')" x-show="servingModels().length"><span x-html="icon('chat')"></span> Try it in the Playground</button></div>
+              </div>
+            </li>
+            <li class="step" :class="{done: stepDone('api'), next: stepNext('api')}">
+              <span class="step-mark" aria-hidden="true"></span>
+              <div class="step-main">
+                <div class="step-t">Call the API</div>
+                <div class="muted small">Any OpenAI client works: set the base URL, use a deployed model's name as <code>model</code>.
+                  <span x-show="settings().api_keys_set">Send one of the configured API keys as the Bearer token.</span>
+                  <span x-show="!settings().api_keys_set">No API keys are configured, so the endpoint is open.</span></div>
+                <div class="muted small step-note">Base URL</div>
+                <div class="cmd"><span x-text="endpoint()"></span><button type="button" class="btn sm" @click="copy(endpoint())" aria-label="Copy endpoint">Copy</button></div>
+                <div class="tabs ov-tabs"><button type="button" :class="{active: ovApi==='curl'}" @click="ovApi='curl'">curl</button><button type="button" :class="{active: ovApi==='python'}" @click="ovApi='python'">Python (openai)</button></div>
+                <div class="cmd"><span x-text="ovApi === 'python' ? pySnippet(ovModel()) : curlSnippet(ovModel())"></span><button type="button" class="btn sm" @click="copy(ovApi === 'python' ? pySnippet(ovModel()) : curlSnippet(ovModel()))">Copy</button></div>
+              </div>
+            </li>
+          </ol>
+        </div>
+
+        <div class="ov-side">
+          <div class="panel">
+            <div class="panel-head"><h2>Needs attention</h2><span class="pill lead keep-case right" :class="attention().length ? 'red' : 'green'" x-text="attention().length ? attention().length + ' open' : 'All clear'"></span></div>
+            <div class="ov-list">
+              <template x-for="a in attention()" :key="a.k">
+                <a href="#" class="ov-item" @click.prevent="go(a.go)"><span :class="'tone-' + a.cls" x-html="icon(a.icon)"></span><span class="grow" x-text="a.text"></span></a>
+              </template>
+              <div class="muted small ov-empty" x-show="!attention().length">Every server is online and no model has failed.</div>
+            </div>
+          </div>
+
+          <div class="panel mt">
+            <div class="panel-head"><h2>Serving now</h2><a href="#" class="small right" @click.prevent="go('models')">Models</a></div>
+            <div class="ov-list">
+              <template x-for="m in servingModels()" :key="'sv' + m.spec.name">
+                <div class="ov-item static">
+                  <span class="pill lead" :class="stateClass(m)" x-text="m.state"></span>
+                  <span class="grow ellipsis" style="font-weight:600" x-text="m.spec.name"></span>
+                  <span class="muted small" x-text="replicasText(m) + ' replicas'"></span>
+                  <button class="btn ghost icon sm" @click="copy(m.spec.name)" title="Copy model name" aria-label="Copy model name" x-html="icon('copy')"></button>
+                </div>
+              </template>
+              <div class="muted small ov-empty" x-show="!servingModels().length">No model is deployed yet.</div>
+            </div>
+          </div>
+
+          <div class="panel mt">
+            <div class="panel-head"><h2>Recent activity</h2><a href="#" class="small right" @click.prevent="go('events')">All events</a></div>
+            <div class="ov-list">
+              <template x-for="e in events().slice(0, 6)" :key="'oe' + e.id">
+                <div class="ov-item static"><span :class="'tone-' + evClass(e)" x-html="icon(evIcon(e))"></span>
+                  <span class="grow clamp2" :title="e.message" x-text="e.message"></span><span class="muted small nowrap" x-text="ago(e.ts)"></span></div>
+              </template>
+              <div class="muted small ov-empty" x-show="!events().length">No events yet.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ servers & GPUs ============ -->
     <!-- GPU memory by model: which deployment holds memory on which card (the placement view of the pool) -->
-    <div :class="{folded: folded('vram')}" class="panel view vram-panel" x-show="(view==='overview' || view==='servers') && vramRows().length">
+    <div :class="{folded: folded('vram')}" class="panel view vram-panel" x-show="view==='servers' && vramRows().length">
       <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('vram')}" @click="toggleFold('vram')" :aria-expanded="String(!folded('vram'))" :title="folded('vram') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand GPU memory by model" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('vram')">GPU memory by model</h2><span class="muted small">Model shares are placement estimates</span></div>
       <div class="panel-body">
         <div class="viz-legend">
@@ -159,7 +289,7 @@
       </div>
     </div>
 
-    <div class="cols view" :class="{'with-detail': sel && selected() && (view==='overview' || view==='servers')}" x-show="view==='overview' || view==='servers'">
+    <div class="cols view" :class="{'with-detail': sel && selected() && view==='servers'}" x-show="view==='servers'">
       <div :class="{folded: folded('servers')}" class="panel">
         <div class="panel-head wrap"><button type="button" class="fold" :class="{open: !folded('servers')}" @click="toggleFold('servers')" :aria-expanded="String(!folded('servers'))" :title="folded('servers') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Servers" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('servers')">Servers &amp; GPUs</h2>
           <span class="muted small" x-text="srvMode === 'gpus' ? allGpuRows().length + ' GPUs' : filteredServers().length + ' shown'"></span>
@@ -788,24 +918,7 @@
     </div>
 
     <div class="view" x-show="view==='settings'">
-      <div :class="{folded: folded('set-api')}" class="panel"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-api')}" @click="toggleFold('set-api')" :aria-expanded="String(!folded('set-api'))" :title="folded('set-api') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand API" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-api')">API</h2></div><div class="panel-body">
-        <div class="muted small">OpenAI-compatible base URL</div>
-        <div class="cmd" style="margin:6px 0 16px"><span x-text="endpoint()"></span><button class="btn sm" @click="copy(endpoint())">Copy</button></div>
-        <div class="muted small">curl</div>
-        <div class="cmd" style="margin:6px 0 16px"><span x-text="curlSnippet()"></span><button class="btn sm" @click="copy(curlSnippet())">Copy</button></div>
-        <div class="muted small">Python (openai)</div>
-        <div class="cmd" style="margin:6px 0"><span x-text="pySnippet()"></span><button class="btn sm" @click="copy(pySnippet())">Copy</button></div>
-        <div class="muted small" x-show="!settings().api_keys_set">API key: no key required (no API keys are configured, the OpenAI endpoint is open).</div>
-        <div class="muted small" x-show="settings().api_keys_set">API key: use one of the configured keys as the Bearer token.</div>
-      </div></div>
-      <div :class="{folded: folded('set-agent')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-agent')}" @click="toggleFold('set-agent')" :aria-expanded="String(!folded('set-agent'))" :title="folded('set-agent') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Add a GPU server" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-agent')">Add a GPU server</h2></div><div class="panel-body">
-        <div class="muted small">Run on each GPU server; it appears under Servers within a few seconds.</div>
-        <div class="muted small" style="margin-top:10px">Docker</div>
-        <div class="cmd" style="margin-top:6px"><span x-text="agentCmd()"></span><button class="btn sm" @click="copy(agentCmd())">Copy</button></div>
-        <div class="muted small" style="margin-top:12px">Without Docker (uv)</div>
-        <div class="cmd" style="margin-top:6px"><span x-text="agentCmdUv()"></span><button class="btn sm" @click="copy(agentCmdUv())">Copy</button></div>
-      </div></div>
-      <div :class="{folded: folded('set-look')}" class="panel mt"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-look')}" @click="toggleFold('set-look')" :aria-expanded="String(!folded('set-look'))" :title="folded('set-look') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Appearance" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-look')">Appearance</h2></div><div class="panel-body">
+      <div :class="{folded: folded('set-look')}" class="panel"><div class="panel-head"><button type="button" class="fold" :class="{open: !folded('set-look')}" @click="toggleFold('set-look')" :aria-expanded="String(!folded('set-look'))" :title="folded('set-look') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Appearance" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('set-look')">Appearance</h2></div><div class="panel-body">
         <div class="row wrap" style="justify-content:space-between">
           <div><div style="font-weight:500">Theme</div><div class="muted small">System follows your operating system setting.</div></div>
           <div class="seg" role="group" aria-label="Theme">

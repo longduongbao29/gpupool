@@ -22,7 +22,11 @@ Toàn bộ đóng gói thành Docker image.
 
 ## 2. Màn hình (theo mockup)
 
-- **Overview**: thẻ số server (online/tổng), GPU (đang bật/tổng), VRAM trống trong pool, số model đang chạy.
+- **Overview**: thẻ số server (online/tổng), GPU (đang bật/tổng), VRAM trống trong pool, số model đang chạy; phần giới
+  thiệu ngắn (gpupool làm gì, đường đi của request app → coordinator → agent → llama.cpp); hướng dẫn **Set up and connect**,
+  mỗi bước tự đánh dấu xong theo trạng thái thật (coordinator, GPU server với lệnh agent sẵn để copy cho Docker hoặc uv,
+  GPU trong pool, thư viện, deploy, API base URL kèm đoạn curl và Python); **Needs attention** (server offline, model lỗi,
+  GPU không có kernel, llama.cpp lệch phiên bản), **Serving now** và hoạt động gần đây. Các khung server và GPU chỉ nằm ở **Servers**.
 - **Servers**: mỗi server một thẻ: trạng thái, IP, thanh CPU/RAM, bảng GPU (utilization, bộ nhớ dùng/tổng,
   nhiệt độ, công suất, số process, trạng thái), checkbox mỗi GPU = bật/tắt trong pool. **Add Server** mở
   hộp thoại nhập URL kèm lệnh `docker run` cho agent để copy. Xoá có xác nhận, dừng engine của server
@@ -36,7 +40,7 @@ Toàn bộ đóng gói thành Docker image.
   - Mỗi dòng model: tên, dung lượng, trạng thái (stopped / starting / running / failed + lỗi), endpoint,
     số replica, ctx, **server/GPU được phép** (tất cả, hoặc chỉ những cái đã tick; xem mục 10), nút **Start** / **Stop**.
 - **Playground**: chat với một model đã deploy và xem nó trả lời nhanh thế nào (mục 12).
-- **Settings**: hiện API base URL, đoạn code client OpenAI, lệnh cài agent.
+- **Settings**: giao diện (theme) và phiên (cảnh báo desktop, đăng xuất). Các đoạn kết nối nằm ở Overview.
 
 ## 3. Thay đổi contract (`common/models.py`, mọi field mới đều tuỳ chọn để agent cũ vẫn chạy)
 

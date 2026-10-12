@@ -8,6 +8,15 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-10-12
+
+### Changed
+
+- UI: Overview no longer repeats the Servers & GPUs panels. It now introduces gpupool and holds a **Set up and connect**
+  guide whose steps check themselves off from the live state, with the agent command (Docker or uv), the API base URL and
+  curl / Python snippets; next to it **Needs attention**, **Serving now** and recent activity. The connection snippets
+  moved there from Settings, which keeps appearance and session.
+
 ## [0.9.3] - 2026-10-09
 
 ### Fixed

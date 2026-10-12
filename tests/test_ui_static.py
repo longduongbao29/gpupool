@@ -1136,3 +1136,17 @@ def test_ui_content_stays_in_its_box():
     assert re.search(r"\n\.chip \{[^}]*overflow: hidden; text-overflow: ellipsis", css)
     # phone width: a long server name in GPU memory by model ellipsizes instead of widening the page
     assert re.search(r"\.vram-lbl \{ flex-direction: column;[^}]*align-items: stretch", css)
+
+
+def test_overview_is_a_guide_not_a_copy_of_servers():
+    html = (UI / "index.html").read_text(encoding="utf-8")
+    js = (UI / "app.js").read_text(encoding="utf-8")
+    # the server/GPU panels belong to the Servers page only
+    assert "view==='overview' || view==='servers'" not in html
+    # Overview carries the setup guide with the connection commands, Settings no longer does
+    for needle in ("Set up and connect", "joinCmd(ovTab)", "curlSnippet(ovModel())", "pySnippet(ovModel())",
+                   "Needs attention", "Serving now"):
+        assert needle in html, needle
+    assert "folded('set-api')" not in html and "folded('set-agent')" not in html
+    for fn in ("setupSteps: function", "attention: function", "servingModels: function", "pySnippet: function (modelName)"):
+        assert fn in js, fn
