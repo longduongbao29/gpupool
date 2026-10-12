@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.4] - 2026-10-12
+
 ### Thay đổi
 
 - UI: Overview không còn lặp lại các khung Servers & GPUs. Trang giờ giới thiệu gpupool và có hướng dẫn **Set up and connect**,

@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-10-12
+
 ### Changed
 
 - UI: Overview no longer repeats the Servers & GPUs panels. It now introduces gpupool and holds a **Set up and connect**
