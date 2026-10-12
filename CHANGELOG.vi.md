@@ -8,6 +8,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thay đổi
+
+- UI: Overview không còn lặp lại các khung Servers & GPUs. Trang giờ giới thiệu gpupool và có hướng dẫn **Set up and connect**,
+  mỗi bước tự đánh dấu xong theo trạng thái thật, kèm lệnh agent (Docker hoặc uv), API base URL và đoạn curl / Python; bên
+  cạnh là **Needs attention**, **Serving now** và hoạt động gần đây. Các đoạn kết nối chuyển từ Settings sang đây; Settings
+  còn giao diện và phiên.
+
 ## [0.9.3] - 2026-10-09
 
 ### Sửa lỗi
