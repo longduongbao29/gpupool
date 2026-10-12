@@ -8,6 +8,15 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-12
+
+### Changed
+
+- UI: the Overview introduction is laid out in two columns (text and four highlights on the left, a picture of the pool on
+  the right). The picture is drawn from the live pool: a request travels from your app to the coordinator and fans out to up
+  to three servers with their GPUs, under which one model's layers are split in proportion to their VRAM. It is animated,
+  except when the system asks for reduced motion.
+
 ## [0.9.4] - 2026-10-12
 
 ### Changed

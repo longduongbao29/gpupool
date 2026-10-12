@@ -23,7 +23,8 @@ Toàn bộ đóng gói thành Docker image.
 ## 2. Màn hình (theo mockup)
 
 - **Overview**: thẻ số server (online/tổng), GPU (đang bật/tổng), VRAM trống trong pool, số model đang chạy; phần giới
-  thiệu ngắn (gpupool làm gì, đường đi của request app → coordinator → agent → llama.cpp); hướng dẫn **Set up and connect**,
+  thiệu ngắn (gpupool làm gì, bốn điểm nổi bật và hình động vẽ từ pool thật: request đi từ app vào coordinator rồi toả xuống
+  các server, bên dưới là các layer của một model chia theo VRAM); hướng dẫn **Set up and connect**,
   mỗi bước tự đánh dấu xong theo trạng thái thật (coordinator, GPU server với lệnh agent sẵn để copy cho Docker hoặc uv,
   GPU trong pool, thư viện, deploy, API base URL kèm đoạn curl và Python); **Needs attention** (server offline, model lỗi,
   GPU không có kernel, llama.cpp lệch phiên bản), **Serving now** và hoạt động gần đây. Các khung server và GPU chỉ nằm ở **Servers**.

@@ -724,15 +724,68 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .skel-panel { height: 260px; }
 
 /* ---------- overview: intro, setup guide, attention ---------- */
-.ov-hero { padding: var(--s-5); margin-bottom: var(--s-4); display: grid; gap: var(--s-4); }
-.ov-hero h2 { margin: 0 0 6px; font-size: var(--fs-xl, 20px); letter-spacing: -.01em; }
-.ov-hero p { margin: 0; max-width: 78ch; line-height: 1.55; }
-.ov-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: var(--s-2); }
-.ov-node { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface-2); min-width: 0; }
-.ov-node b { font-size: var(--fs-sm); }
-.ov-node span { font-size: var(--fs-xs); color: var(--text-muted); }
-.ov-node.accent { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
-.ov-arrow { align-self: center; color: var(--text-muted); }
+.ov-hero { padding: var(--s-5); margin-bottom: var(--s-4); display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: var(--s-6, 24px); align-items: center; }
+.ov-hero h2 { margin: 0 0 6px; font-size: var(--fs-xl); letter-spacing: -.01em; }
+.ov-hero p { margin: 0; line-height: 1.55; }
+.ov-feats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3); margin-top: var(--s-4); }
+.ov-feat { display: flex; align-items: center; gap: var(--s-3); padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-control); background: var(--surface-2); min-width: 0; }
+.ov-feat .ico { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex: none; }
+.ov-feat div { display: flex; flex-direction: column; min-width: 0; }
+.ov-feat b { font-size: var(--fs-sm); }
+.ov-feat div span { font-size: var(--fs-xs); color: var(--text-muted); }
+/* the pool picture: app -> coordinator, fanning out to the servers, one model's layers under them */
+.pool-fig { margin: 0; padding: var(--s-4); border-radius: var(--r-control); background:
+  radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%), var(--surface-2);
+  border: 1px solid var(--border); min-width: 0; }
+/* top: the app, a wire with the request travelling down it, the coordinator; all on the centre line */
+.pf-top { display: flex; flex-direction: column; align-items: center; }
+.pf-app { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: var(--r-pill); border: 1px solid var(--border);
+  background: var(--surface); font-size: var(--fs-xs); font-weight: 600; white-space: nowrap; }
+.pf-app svg.ic { width: 15px; height: 15px; }
+.pf-wire { position: relative; width: 2px; height: 30px; background: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.pf-wire code { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+.pf-coord { display: flex; align-items: center; gap: 8px; padding: 6px 14px 6px 8px; border-radius: 12px; background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 0 0 4px var(--accent-soft); animation: pf-glow 2.8s ease-in-out infinite; }
+.pf-logo { width: 28px; height: 28px; display: grid; place-items: center; }
+.pf-logo svg { width: 26px; height: 26px; }
+.pf-coord div { display: flex; flex-direction: column; line-height: 1.25; }
+.pf-coord b { font-size: var(--fs-sm); }
+.pf-coord span { font-size: 11px; color: var(--text-muted); }
+/* the fan: a stem down from the coordinator, then a rail across the servers */
+.pf-fan { height: 18px; position: relative; border-bottom: 1.5px solid var(--border-strong); }
+/* packets: down the wire, then out along the rail, then down into each server (one 2.8 s cycle) */
+.pf-pkt, .pf-fan i, .pf-srv:not(.off)::after { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 8px 2px color-mix(in srgb, var(--accent) 60%, transparent); opacity: 0; }
+.pf-pkt { left: -2px; animation: pf-down 2.8s ease-in infinite; }
+.pf-fan i { bottom: -3.5px; left: calc(50% - 3px); }
+.pf-fan i.l { animation: pf-left 2.8s linear infinite; }
+.pf-fan i.r { animation: pf-right 2.8s linear infinite; }
+.pf-srv:not(.off)::after { content: ""; left: calc(50% - 2.25px); top: -12px; animation: pf-drop 2.8s ease-out infinite; }
+@keyframes pf-down { 0% { top: -3px; opacity: 0; } 5% { opacity: 1; } 30% { top: 27px; opacity: 1; } 34%, 100% { top: 27px; opacity: 0; } }
+@keyframes pf-left { 0%, 40% { left: calc(50% - 3px); opacity: 0; } 42% { opacity: 1; } 66% { left: -3px; opacity: 1; } 68%, 100% { left: -3px; opacity: 0; } }
+@keyframes pf-right { 0%, 40% { left: calc(50% - 3px); opacity: 0; } 42% { opacity: 1; } 66% { left: calc(100% - 3px); opacity: 1; } 68%, 100% { left: calc(100% - 3px); opacity: 0; } }
+@keyframes pf-drop { 0%, 64% { top: -14px; opacity: 0; } 67% { opacity: 1; } 78% { top: -2px; opacity: 1; } 82%, 100% { top: -2px; opacity: 0; } }
+@keyframes pf-glow { 0%, 25%, 100% { box-shadow: 0 0 0 4px var(--accent-soft); } 34% { box-shadow: 0 0 0 7px var(--accent-soft), 0 0 18px color-mix(in srgb, var(--accent) 35%, transparent); } }
+@keyframes pf-sweep { 0%, 70% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+.pf-fan::before { content: ""; position: absolute; left: calc(50% - .75px); top: 0; bottom: 0; border-left: 1.5px solid var(--border-strong); }
+.pf-servers { display: grid; gap: var(--s-3); }
+.pf-srv { position: relative; padding: 10px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); min-width: 0; }
+.pf-srv::before { content: ""; position: absolute; left: 50%; top: -12px; height: 11px; border-left: 1.5px solid var(--border-strong); }
+.pf-srv.off { opacity: .55; }
+.pf-srv.off::before { border-left-style: dashed; }
+.pf-srv.demo { border-style: dashed; }
+.pf-name { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600; min-width: 0; }
+.pf-name .dot { width: 6px; height: 6px; animation: none; }
+.pf-name .dot.off { background: var(--danger); }
+.pf-gpus { display: flex; gap: 4px; margin: 8px 0 6px; height: 26px; }
+.pf-gpus i { flex: 1; max-width: 18px; border-radius: 3px; background: var(--track); position: relative; overflow: hidden; }
+.pf-gpus i b { position: absolute; left: 0; right: 0; bottom: 0; background: color-mix(in srgb, var(--seq) 70%, transparent); }
+.pf-layers { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.pf-model { display: flex; gap: 3px; height: 8px; margin-top: var(--s-3); position: relative; overflow: hidden; border-radius: 4px; }
+.pf-model::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .45), transparent); animation: pf-sweep 2.8s ease-in-out infinite; }
+.pf-model i { flex: 0 0 auto; border-radius: 4px; }
+.pf-model i.c0 { background: var(--g-blue-b); } .pf-model i.c1 { background: var(--g-purple-b); } .pf-model i.c2 { background: var(--g-cyan-b); }
+.pool-fig figcaption { margin-top: 8px; line-height: 1.45; }
 .ov-cols { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: var(--s-4); align-items: start; }
 .steps { list-style: none; margin: 0; padding: var(--s-2) var(--s-5) var(--s-4); counter-reset: step; }
 .step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: var(--s-3); padding: var(--s-3) 0; position: relative; counter-increment: step; }
@@ -762,7 +815,7 @@ a.ov-item:hover { background: var(--surface-2); color: inherit; }
 @media (max-width: 1200px) {
   .stats, .skel-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ov-cols { grid-template-columns: minmax(0, 1fr); }
-  .ov-arrow { display: none; }
+  .ov-hero { grid-template-columns: minmax(0, 1fr); }
   .cols.with-detail { grid-template-columns: minmax(0, 1fr); }
   .detail { position: static; }
 }
@@ -1085,3 +1138,11 @@ body { background-image: radial-gradient(1100px 520px at -5% -10%, color-mix(in 
 .login .logo { gap: var(--s-3); font-size: 22px; }
 .login .logo .mark, .login .logo-mark { width: 44px; height: 44px; }
 @media (prefers-reduced-motion: reduce) { .login::before { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .pf-pkt, .pf-fan i, .pf-srv::after, .pf-model::after { display: none; }
+  .pf-coord { animation: none; }
+}
+@media (max-width: 600px) {
+  .ov-feats { grid-template-columns: minmax(0, 1fr); }
+  .pf-coord div span { display: none; }
+}

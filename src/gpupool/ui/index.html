@@ -140,19 +140,41 @@
       <div class="panel ov-hero">
         <div class="ov-hero-text">
           <h2>One OpenAI-compatible endpoint for all your GPUs</h2>
-          <p class="muted">gpupool pools the free VRAM of every GPU server into one. It reads each model's GGUF header, picks the
-            placement with the best estimated speed (one GPU, one server, or layers split over several servers through llama.cpp RPC),
+          <p class="muted">gpupool pools the free VRAM of every GPU server into one. It reads each model's GGUF header, picks
+            the placement with the best estimated speed (one GPU, one server, or layers split over several servers through llama.cpp RPC),
             launches and supervises the engines, and serves every deployed model behind <code>/v1</code>.</p>
+          <div class="ov-feats">
+            <div class="ov-feat"><span class="ico blue" x-html="icon('chip')"></span><div><b>Bigger than one card</b><span>Layers split over GPUs and servers</span></div></div>
+            <div class="ov-feat"><span class="ico purple" x-html="icon('cube')"></span><div><b>Many models at once</b><span>Priority, preemption, scale to zero</span></div></div>
+            <div class="ov-feat"><span class="ico green" x-html="icon('server')"></span><div><b>Made for shared servers</b><span>No sudo, plans with the VRAM that is free</span></div></div>
+            <div class="ov-feat"><span class="ico amber" x-html="icon('swap')"></span><div><b>Keeps itself healthy</b><span>Failover and make-before-break rebalancing</span></div></div>
+          </div>
         </div>
-        <div class="ov-flow" aria-label="Request path">
-          <div class="ov-node"><b>Your app</b><span>OpenAI SDK, curl</span></div>
-          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
-          <div class="ov-node accent"><b>Coordinator</b><span>router &middot; scheduler &middot; reconciler &middot; library</span></div>
-          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
-          <div class="ov-node"><b>Agents</b><span>one per GPU server</span></div>
-          <span class="ov-arrow" aria-hidden="true">&rarr;</span>
-          <div class="ov-node"><b>llama.cpp</b><span>llama-server + ggml-rpc-server</span></div>
-        </div>
+        <!-- how it works, drawn with the live pool: a request enters the coordinator, which places one model's layers over the servers -->
+        <figure class="pool-fig" aria-label="A request reaches the coordinator, which runs one model split by layers over the GPU servers">
+          <div class="pf-top">
+            <div class="pf-app"><span x-html="icon('chat')"></span> Your app</div>
+            <div class="pf-wire"><i class="pf-pkt"></i><code>/v1</code></div>
+            <div class="pf-coord"><span class="pf-logo" x-html="logo()"></span><div><b>coordinator</b><span>routes, places, keeps it running</span></div></div>
+          </div>
+          <div class="pf-fan" aria-hidden="true" :style="'margin: 0 ' + (50 / ovPool().length) + '%'"><i class="l"></i><i class="r"></i></div>
+          <div class="pf-servers" :style="'grid-template-columns: repeat(' + ovPool().length + ', minmax(0, 1fr))'">
+            <template x-for="s in ovPool()" :key="'pf' + s.k">
+              <div class="pf-srv" :class="{off: !s.alive, demo: s.demo}">
+                <div class="pf-name"><span class="dot" :class="{off: !s.alive}"></span><span class="ellipsis" x-text="s.name"></span></div>
+                <div class="pf-gpus">
+                  <template x-for="d in s.gpus" :key="d.k"><i :title="d.tip || ''"><b :style="'height:' + Math.max(6, d.pct) + '%'"></b></i></template>
+                </div>
+                <div class="pf-layers" x-show="s.alive && s.to >= s.from"><span x-text="'layers ' + s.from + '–' + s.to"></span></div>
+                <div class="pf-layers muted" x-show="!s.alive">offline</div>
+              </div>
+            </template>
+          </div>
+          <div class="pf-model" aria-hidden="true">
+            <template x-for="(s, i) in ovPool()" :key="'pm' + s.k"><i :class="'c' + i" :style="'flex-basis:' + s.share + '%'" x-show="s.share > 0"></i></template>
+          </div>
+          <figcaption class="muted small">One 80-layer model spread over <span x-text="ovPool()[0].demo ? 'your servers' : 'these servers'"></span> in proportion to their VRAM, the way the scheduler splits a model that fits no single card.</figcaption>
+        </figure>
       </div>
 
       <div class="ov-cols">

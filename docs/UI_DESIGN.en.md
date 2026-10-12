@@ -23,7 +23,8 @@ one button. Everything ships as Docker images.
 ## 2. Screens (as in the mockup)
 
 - **Overview**: cards for servers (online/total), GPUs (enabled/total), free VRAM in the pool, models running; a short
-  introduction (what gpupool does, the request path app → coordinator → agents → llama.cpp); the **Set up and connect**
+  introduction (what gpupool does, four highlights, and an animated picture of the live pool: a request goes from the app
+  to the coordinator and fans out to the servers, under which one model's layers are split by VRAM); the **Set up and connect**
   guide, whose steps are checked off from the live state (coordinator, GPU servers with the ready-to-copy agent command
   for Docker or uv, GPUs in the pool, library, deploy, API base URL with curl and Python snippets); **Needs attention**
   (offline servers, failed models, GPUs without kernels, mixed llama.cpp builds), **Serving now** and recent activity.
