@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-10-12
+
 ### Changed
 
 - UI: the Overview introduction is laid out in two columns (text and four highlights on the left, a picture of the pool on

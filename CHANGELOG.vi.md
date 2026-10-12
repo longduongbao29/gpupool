@@ -8,6 +8,8 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.5] - 2026-10-12
+
 ### Thay đổi
 
 - UI: phần giới thiệu của Overview chia hai cột (bên trái là đoạn mô tả và bốn điểm nổi bật, bên phải là hình minh hoạ pool).
