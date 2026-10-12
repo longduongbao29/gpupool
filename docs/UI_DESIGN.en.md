@@ -22,7 +22,12 @@ one button. Everything ships as Docker images.
 
 ## 2. Screens (as in the mockup)
 
-- **Overview**: cards for servers (online/total), GPUs (enabled/total), free VRAM in the pool, models running.
+- **Overview**: cards for servers (online/total), GPUs (enabled/total), free VRAM in the pool, models running; a short
+  introduction (what gpupool does, the request path app → coordinator → agents → llama.cpp); the **Set up and connect**
+  guide, whose steps are checked off from the live state (coordinator, GPU servers with the ready-to-copy agent command
+  for Docker or uv, GPUs in the pool, library, deploy, API base URL with curl and Python snippets); **Needs attention**
+  (offline servers, failed models, GPUs without kernels, mixed llama.cpp builds), **Serving now** and recent activity.
+  The server and GPU panels live only on **Servers**.
 - **Servers**: one card per server: status, IP, CPU/RAM bars, GPU table (utilization, memory used/total,
   temperature, power, process count, status), a checkbox per GPU = in pool on/off. **Add Server** opens
   a dialog with the URL field and a ready-to-copy `docker run` command for the agent. Delete asks for
@@ -36,7 +41,7 @@ one button. Everything ships as Docker images.
   - Each model row: name, size, status (stopped / starting / running / failed + error), endpoint,
     replicas, ctx, **allowed servers/GPUs** (all, or only the ticked ones; see section 10), **Start** / **Stop** buttons.
 - **Playground**: chat with a deployed model and see how fast it answers (section 12).
-- **Settings**: shows the API base URL, the OpenAI client snippet, the agent install command.
+- **Settings**: appearance (theme) and session (desktop alerts, log out). The connection snippets are on Overview.
 
 ## 3. Contract changes (`common/models.py`, all new fields optional, so old agents keep working)
 

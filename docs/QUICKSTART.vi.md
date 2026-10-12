@@ -103,7 +103,7 @@ print(r.choices[0].message.content)
 ```
 
 Với Open WebUI, LangChain, LlamaIndex hay Continue: chọn "OpenAI-compatible" và nhập cùng base URL.
-Hỗ trợ streaming (`stream: true`). Trang Settings trên UI hiện sẵn các đoạn code này với địa chỉ thật
+Hỗ trợ streaming (`stream: true`). Trang Overview trên UI hiện sẵn các đoạn code này với địa chỉ thật
 của bạn.
 
 Muốn bắt client gửi key: chạy coordinator với `-e GPUPOOL_API_KEYS=key1,key2`.

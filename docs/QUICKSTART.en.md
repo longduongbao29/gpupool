@@ -106,7 +106,7 @@ print(r.choices[0].message.content)
 ```
 
 Tools like Open WebUI, LangChain, LlamaIndex or Continue: choose "OpenAI-compatible" and enter the same
-base URL. Streaming (`stream: true`) is supported. The Settings page of the UI shows these snippets with
+base URL. Streaming (`stream: true`) is supported. The Overview page of the UI shows these snippets with
 your real address.
 
 To require a key from clients, start the coordinator with `-e GPUPOOL_API_KEYS=key1,key2`.
