@@ -173,9 +173,10 @@ mới lấy giá trị mặc định.
 | `pin_devices` | danh sách string | rỗng (luôn ghi đè, bỏ trùng); cho phép `"node_id/*"`, xem mục 2 |
 | `priority` | int 0..100 hoặc null | giữ, nếu không có thì 50 |
 | `spread` | `gpu`/`node`/`none` hoặc null | giữ, nếu không có thì `gpu` |
-| `min_replicas`, `max_replicas` | int hoặc null | giữ, nếu không có thì để trống |
-| `autoscale` | object hoặc null | giữ, nếu không có thì để trống |
-| `idle_unload_s` | float `> 0` hoặc null | giữ, nếu không có thì để trống |
+| `min_replicas`, `max_replicas` | int hoặc null | giữ khi bỏ trống, nếu không có thì để trống; gửi `null` rõ ràng sẽ xoá (về số cố định) |
+| `autoscale` | object hoặc null | giữ khi bỏ trống, nếu không có thì để trống; gửi `null` rõ ràng sẽ xoá |
+| `idle_unload_s` | float `> 0` hoặc null | giữ khi bỏ trống, nếu không có thì để trống; gửi `null` rõ ràng sẽ xoá |
+| `replicas` | int `>= 1` hoặc null | số replica cố định của model đang chạy; giữ, bỏ qua khi model đã dừng (Start đặt giá trị này) |
 | `preemptible` | bool hoặc null | giữ, nếu không có thì true |
 | `kv_cache_type` | enum hoặc null | giữ, nếu không có thì `f16` |
 | `speculative` | enum hoặc null | giữ, nếu không có thì `none` |

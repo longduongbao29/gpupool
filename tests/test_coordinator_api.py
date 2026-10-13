@@ -514,6 +514,27 @@ async def test_put_model_scaling_fields_validation_and_keep(env):
     assert r.status_code == 422
 
 
+async def test_put_model_explicit_null_clears_autoscale_and_sets_fixed_count(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "min_replicas": 2, "max_replicas": 3,
+                                           "autoscale": {"target_busy": 0.5}})
+    assert r.status_code == 200
+    store.put_model(store.get_model("q").model_copy(update={"replicas": 2}))  # started
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "replicas": 1, "min_replicas": None,
+                                           "max_replicas": None, "autoscale": None, "idle_unload_s": None})
+    assert r.status_code == 200
+    j = r.json()
+    assert (j["replicas"], j["min_replicas"], j["max_replicas"], j["autoscale"]) == (1, None, None, None)
+
+
+async def test_put_model_replicas_ignored_while_stopped(env):
+    c, store, rec, _, clock, _ = env
+    register(store, clock, node("a"))
+    r = await c.put("/api/models/q", json={"file": "x.gguf", "replicas": 3})
+    assert r.status_code == 200 and r.json()["replicas"] == 0
+
+
 async def test_start_keeps_scaling_policy(env):
     c, store, *_ = env
     store.put_model(SPEC.model_copy(update={"min_replicas": 0, "max_replicas": 4, "idle_unload_s": 90}))

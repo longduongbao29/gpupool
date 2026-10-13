@@ -8,6 +8,15 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.6] - 2026-10-13
+
+### Đã sửa
+
+- Chuyển một model từ Autoscale (hoặc On demand) về Fixed rồi lưu giờ đã có tác dụng: khoảng min/max đã lưu được xoá thay vì
+  giữ lại, và model đang chạy chuyển sang số replica cố định trong form. Ở `PUT /api/models/{name}`, gửi `null` rõ ràng cho
+  `min_replicas`, `max_replicas`, `autoscale` hoặc `idle_unload_s` giờ sẽ xoá trường đó (bỏ trống vẫn giữ), và trường tuỳ
+  chọn mới `replicas` đặt số replica cố định của model đang chạy.
+
 ## [0.9.5] - 2026-10-12
 
 ### Thay đổi

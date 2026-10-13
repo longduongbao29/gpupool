@@ -8,6 +8,15 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-10-13
+
+### Fixed
+
+- Switching a model from Autoscale (or On demand) back to Fixed and saving now takes effect: the stored min/max range is
+  cleared instead of kept, and a started model moves to the fixed replica count from the form. In `PUT /api/models/{name}`
+  an explicit `null` for `min_replicas`, `max_replicas`, `autoscale` or `idle_unload_s` now clears the field (omitting it
+  still keeps it), and the new optional `replicas` field sets the fixed count of a started model.
+
 ## [0.9.5] - 2026-10-12
 
 ### Changed

@@ -573,6 +573,8 @@ def put_model(name: str, body: dict) -> dict:
                      preemptible=_bool(body.get("preemptible", True), "preemptible"),
                      spread=_choice(body.get("spread", "gpu"), ("gpu", "node", "none"), "spread"))
     m["spec"].update(_scaling_fields(body))
+    if body.get("replicas") and m["spec"].get("replicas"):  # fixed count of a started model
+        m["spec"]["replicas"] = _int_in(body["replicas"], 1, 64, "replicas")
     m["spec"].update(perf)
     return m["spec"]
 

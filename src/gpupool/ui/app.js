@@ -1730,7 +1730,8 @@ function app() {
       }
       var r = whole(f.replicas);
       if (r == null || r < 1) return { error: "Replicas must be at least 1" };
-      return { body: { min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
+      // explicit nulls clear a stored autoscale/on-demand range; replicas applies to a started model
+      return { body: { replicas: r, min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
     },
     // Performance fields (KV cache type, speculative decoding) of the request body, or { error } when invalid.
     perfBody: function (f) {
