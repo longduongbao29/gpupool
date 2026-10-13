@@ -174,9 +174,10 @@ model; a new model gets the default.
 | `pin_devices` | list of string | empty (always overwritten, duplicates removed); `"node_id/*"` is allowed, see section 2 |
 | `priority` | int 0..100 or null | keep, else 50 |
 | `spread` | `gpu`/`node`/`none` or null | keep, else `gpu` |
-| `min_replicas`, `max_replicas` | int or null | keep, else unset |
-| `autoscale` | object or null | keep, else unset |
-| `idle_unload_s` | float `> 0` or null | keep, else unset |
+| `min_replicas`, `max_replicas` | int or null | keep when omitted, else unset; an explicit `null` clears it (back to a fixed count) |
+| `autoscale` | object or null | keep when omitted, else unset; an explicit `null` clears it |
+| `idle_unload_s` | float `> 0` or null | keep when omitted, else unset; an explicit `null` clears it |
+| `replicas` | int `>= 1` or null | fixed count of a started model; keep, ignored while stopped (Start sets it) |
 | `preemptible` | bool or null | keep, else true |
 | `kv_cache_type` | enum or null | keep, else `f16` |
 | `speculative` | enum or null | keep, else `none` |

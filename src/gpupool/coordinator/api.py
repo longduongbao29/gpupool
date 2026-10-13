@@ -47,11 +47,13 @@ class ModelBody(BaseModel):
     pin_devices: list[str] = Field(default_factory=list)
     priority: int | None = Field(default=None, ge=0, le=100)  # None: keep the stored value, else 50
     spread: Spread | None = None  # None: keep the stored value, else "gpu"
-    # Autoscaling: None keeps the stored value (else unset = fixed count).
+    # Autoscaling: omitted keeps the stored value, an explicit null clears it (back to a fixed count).
     min_replicas: int | None = Field(default=None, ge=0)
     max_replicas: int | None = Field(default=None, ge=1)
     autoscale: AutoscalePolicy | None = None
     idle_unload_s: float | None = Field(default=None, gt=0)
+    # Fixed count for a started model; None keeps it. Ignored while stopped (Start sets it then).
+    replicas: int | None = Field(default=None, ge=1)
     preemptible: bool | None = None  # None: keep the stored value, else True
     # KV cache / speculative decoding: None keeps the stored value (else f16 / none / no draft / 4).
     kv_cache_type: KvCacheType | None = None
@@ -417,8 +419,12 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         def keep(new, field: str):
             return new if new is not None else getattr(existing, field) if existing else None
 
-        lo, hi = keep(body.min_replicas, "min_replicas"), keep(body.max_replicas, "max_replicas")
-        idle = keep(body.idle_unload_s, "idle_unload_s")
+        def scaling(field: str):
+            # an explicit null clears the field (Fixed mode); only an omitted one keeps it
+            return getattr(body, field) if field in body.model_fields_set else keep(None, field)
+
+        lo, hi = scaling("min_replicas"), scaling("max_replicas")
+        idle = scaling("idle_unload_s")
         if lo is not None and hi is not None and lo > hi:
             raise HTTPException(422, f"min_replicas ({lo}) must not exceed max_replicas ({hi})")
         if idle is not None and lo != 0:
@@ -439,10 +445,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             reasoning=keep(body.reasoning, "reasoning") or "auto",
             reasoning_effort=keep(body.reasoning_effort, "reasoning_effort") or "default",
             reasoning_budget=b if (b := keep(body.reasoning_budget, "reasoning_budget")) is not None else -1,
-            replicas=existing.replicas if existing else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
+            replicas=(body.replicas or existing.replicas) if existing and existing.replicas else 0, pin_devices=list(dict.fromkeys(body.pin_devices)),
             priority=body.priority if body.priority is not None else existing.priority if existing else 50,
             spread=body.spread if body.spread is not None else existing.spread if existing else "gpu",
-            min_replicas=lo, max_replicas=hi, autoscale=keep(body.autoscale, "autoscale"), idle_unload_s=idle,
+            min_replicas=lo, max_replicas=hi, autoscale=scaling("autoscale"), idle_unload_s=idle,
             preemptible=body.preemptible if body.preemptible is not None else existing.preemptible if existing else True)
         spec = with_batch_floor(spec)
         check_attention(spec)
