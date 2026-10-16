@@ -17,7 +17,9 @@ from pydantic import BaseModel, ValidationError
 from gpupool.common.auth import require_bearer
 from gpupool.common.config import CoordinatorConfig, detect_local_ip, load_or_create_secrets
 from gpupool.common.net import external_client
-from gpupool.common.models import ALL_REPLICA_STATES, ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint
+from gpupool.common.models import (
+    ALL_REPLICA_STATES, HF_PREFIX, ModelMeta, ModelSpec, NodeReport, ReplicaEndpoint, parse_hf_source,
+)
 from gpupool.converter import source as convert_source
 from gpupool.converter.jobs import ConvertManager
 from gpupool.converter.models import ClusterVram, InspectResult, SourceSpec
@@ -41,6 +43,7 @@ from gpupool.coordinator.store import ServerRecord, Store, gpu_key
 from gpupool.router.balancer import Balancer
 from gpupool.router.proxy import RouterMetrics, make_router, prom_label_escape
 from gpupool.scheduler.gguf_meta import read_meta, read_meta_parts
+from gpupool.scheduler.hf_meta import fetch_hf_meta
 from gpupool.scheduler.scoring import current_tps
 
 log = logging.getLogger("gpupool.coordinator")
@@ -72,14 +75,22 @@ class JoinBody(BaseModel):
     agent_url: str
 
 
-def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None
+def make_meta_provider(cfg: CoordinatorConfig, library: Library | None = None, hf=None
                        ) -> Callable[[ModelSpec], Awaitable[ModelMeta]]:
+    """`hf`: converter.source.HfClient, for hf:// sources (vllm / sglang models)."""
     cache: dict[str, ModelMeta] = {}
 
     async def meta_for(spec: ModelSpec) -> ModelMeta:
         source = spec.source
         if source in cache:
             return cache[source]
+        if source.startswith(HF_PREFIX):
+            if hf is None:
+                raise ValueError("hf:// sources need a Hugging Face client")
+            repo, rev = parse_hf_source(source)
+            meta = await fetch_hf_meta(hf, repo, rev)
+            cache[source] = meta
+            return meta
         if source.startswith("coordinator://"):
             name = source[len("coordinator://"):]
             paths = library.part_paths(name) if library is not None else None
@@ -147,7 +158,9 @@ def create_app(
     balancer = Balancer()
     metrics = RouterMetrics(balancer)
     notifier = Notifier(store, cfg.webhook_url)
-    reconciler = Reconciler(store, cfg, client, meta_for or make_meta_provider(cfg, library),
+    own_hf_http = external_client(timeout=httpx.Timeout(30.0, read=120.0), follow_redirects=True)
+    hf = convert_source.HfClient(own_hf_http, cfg.hf_token)
+    reconciler = Reconciler(store, cfg, client, meta_for or make_meta_provider(cfg, library, hf),
                             balancer.outstanding, notifier=notifier)
     poller = Poller(store, client, cfg.poll_s)
     autoscaler = autoscaler or Autoscaler(store, cfg, balancer.outstanding, notifier,
@@ -159,8 +172,6 @@ def create_app(
     # The conversion feature. A missing toolchain (convert_dir, tools) is not an error: the manager
     # reports it through available() and refuses jobs. A broken converter package is a bug and
     # must fail loudly, not silently disable the feature.
-    own_hf_http = external_client(timeout=httpx.Timeout(30.0, read=120.0), follow_redirects=True)
-    hf = convert_source.HfClient(own_hf_http, cfg.hf_token)
     toolchain = Toolchain(cfg.convert_dir, cfg.convert_python, cfg.llama_tools_dir)
     if convert_manager is None:
         convert_manager = ConvertManager(cfg.db_path, cfg.models_dir, toolchain, library, hf,
@@ -367,7 +378,7 @@ def create_app(
             ready.setdefault(r.model, []).append(
                 (r.replica_id, p.head_node, p.head_port,
                  (p.est_bw_s, p.est_hops, p.est_logits_s) if p.est_bw_s else None,
-                 p.est_decode_tps or 0.0))
+                 p.est_decode_tps or 0.0, p.engine))
         nodes = {n.report.node_id: n for n in store.list_nodes()}
         snap = cur = (v, names, ready, nodes)
         return cur
@@ -379,18 +390,18 @@ def create_app(
         # learns from measured speed). Not llama-server's measured rate itself: it covers the last
         # scrape interval only (its bucket resets on every /metrics read), 0 when idle and lower when
         # busy, and every change of a weight moves prefixes away from their KV cache.
-        rows = [(rid, head, port, current_tps(*parts) if parts else tps)
-                for rid, head, port, parts, tps in ready.get(model, ())]
-        known = [tps for *_, tps in rows if tps > 0]
+        rows = [(rid, head, port, current_tps(*parts) if parts else tps, engine)
+                for rid, head, port, parts, tps, engine in ready.get(model, ())]
+        known = [tps for *_, tps, _ in rows if tps > 0]
         default = sum(known) / len(known) if known else 1.0  # no estimate: an average replica
         out = []
-        for replica_id, head_node, head_port, tps in rows:
+        for replica_id, head_node, head_port, tps, engine in rows:
             n = nodes.get(head_node)
             if n is None or not reconciler.node_alive(n, now):
                 continue
             out.append(ReplicaEndpoint(
                 replica_id=replica_id, model=model, base_url=f"http://{n.report.host}:{head_port}",
-                weight=tps if tps > 0 else default))
+                weight=tps if tps > 0 else default, engine=engine))
         return out
 
     app.include_router(make_router(

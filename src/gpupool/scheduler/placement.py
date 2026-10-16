@@ -14,6 +14,7 @@ from itertools import combinations
 from typing import NamedTuple
 
 from gpupool.common.models import (
+    HF_ENGINES,
     Device,
     DeviceAssignment,
     ModelMeta,
@@ -442,14 +443,23 @@ def _n_rpc(c: _Cand) -> int:
     return len(rpc_groups(c.order, c.head_id))
 
 
-def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants) -> list[_Scored]:
+def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupants,
+               speed: Callable[[_Cand, float], tuple[float, tuple[float, int, float]]] | None = None,
+               split_word: str = "split over") -> list[_Scored]:
+    """speed(cand, cuda_bw) -> (tok/s, speed parts): another engine's speed model (tensor
+    parallelism); None = llama.cpp's layer split."""
     cuda_bw = default_cuda_bw(nodes)
-    parts = {id(c): _speed_parts(meta, c, cuda_bw) for c in cands}
-    tps_of = [
-        est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw,
-                       remote_last=c.order[-1].node.node_id != c.head_id)
-        for c in cands
-    ]
+    if speed is not None:
+        sp = [speed(c, cuda_bw) for c in cands]
+        tps_of = [t for t, _ in sp]
+        parts = {id(c): pt for c, (_, pt) in zip(cands, sp)}
+    else:
+        parts = {id(c): _speed_parts(meta, c, cuda_bw) for c in cands}
+        tps_of = [
+            est_decode_tps(meta, [(d.dev, k) for d, k in zip(c.order, c.counts)], _n_rpc(c), cuda_bw,
+                           remote_last=c.order[-1].node.node_id != c.head_id)
+            for c in cands
+        ]
     best_tps = max(tps_of, default=0.0) or 1.0
     biggest = max((d.dev.usable_mb for d in pool), default=1) or 1
     by_dev: dict[tuple[str, str], list[Occupant]] = {}
@@ -489,7 +499,7 @@ def _score_all(meta, spec, cands: list[_Cand], pool: list[_Dev], nodes, occupant
             speed = f"~{tps:.0f} tok/s ({perf:.0f}% of the fastest)"
         reasons = [speed] + list(dict.fromkeys(same_reasons)) + share_reasons
         if n_dev > 1:
-            reasons.append(f"split over {n_dev} GPUs")
+            reasons.append(f"{split_word} {n_dev} GPUs")
         if n_rpc:
             reasons.append(f"{n_rpc} network hop{'s' if n_rpc > 1 else ''} (RPC)")
         out.append(_Scored(score, tps, reasons[:4], c, parts[id(c)]))
@@ -605,6 +615,10 @@ def plan(
 `mem_factor` scales every estimated need (measured / estimated for this model).
     With spec.speculative == "draft" and `draft_meta`, the draft model is reserved on the
     head's first local CUDA device."""
+    if spec.engine in HF_ENGINES:
+        from gpupool.scheduler import tp_placement  # it imports this module
+        with _with_factor(mem_factor):
+            return tp_placement.plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants)
     with _with_factor(mem_factor, spec):
         return _plan(meta, spec, nodes, replica_id, port_alloc, exclude_nodes, occupants, draft_meta)
 
@@ -658,6 +672,10 @@ def rank(
     counts candidates only. A candidate equal to an extra is dropped. The caller must leave
     the extra's own replica out of `occupants`, or it would be penalised for sharing with itself.
     """
+    if spec.engine in HF_ENGINES:
+        from gpupool.scheduler import tp_placement
+        with _with_factor(mem_factor):
+            return tp_placement.rank(meta, spec, nodes, occupants, limit, extra)
     with _with_factor(mem_factor, spec):
         return _rank(meta, spec, nodes, occupants, limit, extra, draft_meta)
 

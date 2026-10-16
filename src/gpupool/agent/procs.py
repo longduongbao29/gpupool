@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import os
 import re
+import signal
 import socket
 import subprocess
 import threading
@@ -14,8 +15,11 @@ from pathlib import Path
 
 import psutil
 
+from gpupool.agent.engines import build_hf_command, engine_argv, hf_env
 from gpupool.agent.firewall import RpcFirewall, Rule
-from gpupool.common.models import DEFAULT_BATCH, DEFAULT_UBATCH, EngineSpec, EngineStatus
+from gpupool.common.models import (
+    DEFAULT_BATCH, DEFAULT_UBATCH, HF_ENGINES, EngineSpec, EngineStatus,
+)
 
 log = logging.getLogger(__name__)
 
@@ -196,6 +200,20 @@ def disable_core_dumps() -> None:
         log.warning("could not disable core dumps: %s", e)
 
 
+def _signal(proc: subprocess.Popen, sig: int | None, group: bool) -> None:
+    """SIGTERM / SIGKILL to the process, or to its whole process group. sig None: proc.kill()."""
+    if group:
+        try:
+            os.killpg(proc.pid, sig)  # the group id is the leader's pid (start_new_session)
+        except (ProcessLookupError, PermissionError):
+            pass
+        return
+    if sig is None:
+        proc.kill()
+    else:
+        proc.terminate()
+
+
 @dataclass
 class _Engine:
     spec: EngineSpec
@@ -213,8 +231,12 @@ LOG_MAX_AGE_S = 7 * 86400
 
 class ProcessManager:
     def __init__(self, llama_dir: Path, log_dir: Path, bind_host: str, rpc_firewall: bool = False,
-                 firewall: RpcFirewall | None = None, llama_cache: Path | None = None):
+                 firewall: RpcFirewall | None = None, llama_cache: Path | None = None,
+                 engine_commands: dict[str, str] | None = None, hf_home: Path | None = None):
         self.llama_dir = Path(llama_dir)
+        # vllm / sglang: base command per engine (agent/engines.py) and their download cache.
+        self.engine_commands = dict(engine_commands or {})
+        self.hf_home = Path(hf_home) if hf_home is not None else None
         self.log_dir = Path(log_dir)
         # LLAMA_CACHE for the engines: `ggml-rpc-server -c` keeps received weight tensors under
         # $LLAMA_CACHE/rpc so the next load of the same model skips the network transfer. Its
@@ -302,11 +324,17 @@ class ProcessManager:
                 if abs(proc.create_time() - float(created_s)) < 1.0:
                     log.warning("stopping orphan engine %s (pid %s) from a previous agent",
                                 engine_id, pid_s)
+                    children = proc.children(recursive=True)  # vLLM / SGLang workers
                     proc.terminate()
                     try:
                         proc.wait(timeout=10)
                     except psutil.TimeoutExpired:
                         proc.kill()
+                    for c in children:
+                        try:
+                            c.kill()
+                        except psutil.Error:
+                            pass
                     reaped.append(engine_id)
             except (ValueError, OSError, psutil.Error):
                 pass  # malformed file or process already gone
@@ -343,15 +371,21 @@ class ProcessManager:
         finally:
             s.close()
 
+    def _command(self, spec: EngineSpec, model_path: str | None, build: int | None) -> list[str]:
+        if spec.engine in HF_ENGINES:
+            return build_hf_command(spec, engine_argv(spec.engine, self.engine_commands), self.bind_host)
+        return build_command(spec, self._binaries(), self.bind_host, model_path, build)
+
     def start(self, spec: EngineSpec, model_path: str | None = None) -> EngineStatus:
-        build = self._llama_build()  # may run llama-server --version: outside the lock
+        # may run llama-server --version: outside the lock (not needed by other engines)
+        build = self._llama_build() if spec.engine not in HF_ENGINES else None
         with self._lock:
             old = self._engines.get(spec.engine_id)
             if old is not None and old.proc.poll() is None:
                 raise EngineExists(spec.engine_id)
             if not self._port_free(spec.port):
                 raise PortInUse(f"port {spec.port} not available on {self.bind_host}")
-            cmd = build_command(spec, self._binaries(), self.bind_host, model_path, build)
+            cmd = self._command(spec, model_path, build)
             self.log_dir.mkdir(parents=True, exist_ok=True)
             if old is not None:
                 self._drop_rules(old)  # crashed engine being replaced: its rules are stale
@@ -370,9 +404,15 @@ class ProcessManager:
             env = {**os.environ, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
             if self.llama_cache is not None and not env.get("LLAMA_CACHE"):
                 env["LLAMA_CACHE"] = str(self.llama_cache)
+            if spec.engine in HF_ENGINES:
+                env.update(hf_env(spec, self.hf_home))
             kwargs = {}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            elif spec.engine in HF_ENGINES:
+                # vLLM / SGLang fork one worker per GPU (and helpers): their own process group, so
+                # stop() can signal all of them and a kill never leaves workers holding VRAM.
+                kwargs["start_new_session"] = True
             # File, not PIPE: an unread pipe fills up and blocks llama.cpp mid-load.
             # The child inherits the handle; the parent's copy is closed on leaving `with`.
             try:
@@ -432,15 +472,19 @@ class ProcessManager:
             eng = self._engines.get(engine_id)
         if eng is None:
             return None
+        group = eng.spec.engine in HF_ENGINES and os.name != "nt"
         if eng.proc.poll() is None:
             eng.stopped = True
-            eng.proc.terminate()
+            _signal(eng.proc, signal.SIGTERM, group)
             try:
-                eng.proc.wait(timeout=timeout)
+                # a Python engine tears down its workers and CUDA contexts: give it longer
+                eng.proc.wait(timeout=timeout * 3 if group else timeout)
             except subprocess.TimeoutExpired:
                 log.warning("engine %s ignored terminate; killing", engine_id)
-                eng.proc.kill()
+                _signal(eng.proc, signal.SIGKILL if group else None, group)
                 eng.proc.wait()  # reap: no zombie
+        if group:
+            _signal(eng.proc, signal.SIGKILL, True)  # workers that outlived their parent
         self._clear_pid(engine_id)
         self._drop_rules(eng)
         final = self._status(eng)

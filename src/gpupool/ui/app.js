@@ -124,6 +124,19 @@ function perfForm(spec) {
   return f;
 }
 
+// Engine part of the deploy form: llama.cpp serves a library GGUF; vLLM / SGLang serve a Hugging Face repo.
+function engineForm(spec) {
+  // autoName: the name was filled in for the user, so typing a repo may replace it
+  var f = { engine: "llama.cpp", hfRepo: "", tp: "", trc: false, eargs: "", autoName: !spec };
+  if (!spec) return f;
+  if (spec.engine) f.engine = spec.engine;
+  if (/^hf:\/\//.test(spec.source || "")) f.hfRepo = spec.source.replace(/^hf:\/\//, "");
+  if (spec.tensor_parallel) f.tp = String(spec.tensor_parallel);
+  f.trc = !!spec.trust_remote_code;
+  f.eargs = (spec.engine_args || []).join(" ");
+  return f;
+}
+
 // Dry-run checks of the deploy form: results, busy flags, and which side-panel sections are open (all folded at first).
 // recKey / simKey hold the form inputs a result was computed for, so an open section re-runs only when they change.
 function checkState() {
@@ -236,7 +249,7 @@ function app() {
     convPollAt: 0,
     convPolling: false,
     // deploy (new / edit) modal
-    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null)),
+    form: Object.assign({ open: false, edit: false, name: "", file: "", ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null), engineForm(null)),
     rb: { busy: false, checked: false, moves: [] }, // "Placement health" panel: last check / rebalance result
     ask: null, // the open confirm dialog: { title, body, ok, cancel, danger, resolve }
     navY: null, // top of the active navigation item: the sliding highlight follows it
@@ -1763,11 +1776,12 @@ function app() {
       if (m) {
         this.form = Object.assign({ open: true, edit: true, name: m.spec.name, file: m.file || "", ctx: m.spec.ctx_size, parallel: m.spec.parallel,
           priority: m.spec.priority == null ? 50 : m.spec.priority, preemptible: m.spec.preemptible !== false, spread: m.spec.spread || "gpu",
-          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, }, checkState(), scalingForm(m.spec), perfForm(m.spec));
+          auto: !(m.spec.pin_devices || []).length, pins: (m.spec.pin_devices || []).slice(), busy: false, }, checkState(), scalingForm(m.spec), perfForm(m.spec), engineForm(m.spec));
       } else {
         var ready = this.readyLibrary();
         var f = file || (ready.length ? ready[0].name : "");
-        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null));
+        this.form = Object.assign({ open: true, edit: false, name: f ? f.replace(/\.gguf$/i, "") : "", file: f, ctx: 4096, parallel: 1, priority: 50, preemptible: true, spread: "gpu", auto: true, pins: [], busy: false, }, checkState(), scalingForm(null), perfForm(null), engineForm(null));
+        if (!f) this.form.engine = "vllm"; // nothing in the library: a Hugging Face repo is the way in
       }
     },
     // ----- allowed servers / GPUs: "<node>/*" = the whole server (also GPUs added later), "<node>/<device>" = one GPU -----
@@ -1844,6 +1858,23 @@ function app() {
       // explicit nulls clear a stored autoscale/on-demand range; replicas applies to a started model
       return { body: { replicas: r, min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
     },
+    isLlama: function (f) { return (f || this.form).engine === "llama.cpp"; },
+    // Model source and engine fields of the request body (with the llama.cpp performance fields), or { error }.
+    engineBody: function (f) {
+      if (this.isLlama(f)) {
+        if (!f.file) return { error: "Pick a file from the library" };
+        var pb = this.perfBody(f);
+        return pb.error ? pb : { body: Object.assign({ engine: "llama.cpp", file: f.file }, pb.body) };
+      }
+      var repo = String(f.hfRepo || "").trim().replace(/^https:\/\/huggingface\.co\//, "").replace(/^hf:\/\//, "");
+      if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(@[A-Za-z0-9._\/-]+)?$/.test(repo)) return { error: "Hugging Face repo must look like owner/name (optionally @revision)" };
+      var tp = String(f.tp || "").trim() === "" ? null : parseInt(f.tp, 10);
+      if (tp !== null && [1, 2, 4, 8].indexOf(tp) < 0) return { error: "Tensor parallel must be Auto, 1, 2, 4 or 8" };
+      var args = String(f.eargs || "").trim();
+      // the llama.cpp-only settings are reset so a model moved off llama.cpp does not carry them
+      return { body: { engine: f.engine, hf_repo: repo, tensor_parallel: tp, trust_remote_code: !!f.trc,
+                       engine_args: args ? args.split(/\s+/) : [], kv_cache_type: "f16", speculative: "none", draft_file: null } };
+    },
     // Performance fields (KV cache type, speculative decoding) of the request body, or { error } when invalid.
     perfBody: function (f) {
       var kv = f.kv || "f16", sp = f.spec || "none", fa = f.fa || "auto";
@@ -1873,6 +1904,7 @@ function app() {
     // Context each request gets: llama.cpp divides the context across the parallel slots.
     ctxPerSlot: function () {
       var c = parseInt(this.form.ctx, 10) || 0, p = parseInt(this.form.parallel, 10) || 1;
+      if (!this.isLlama()) return c; // paged KV cache: shared by the requests
       return this.form.kvu && p > 1 ? c : Math.floor(c / Math.max(1, p));
     },
     // GPU generation from the compute capability NVML reports ("8.6" -> "Ampere · cc 8.6").
@@ -1932,6 +1964,10 @@ function app() {
     // Model card chips for non-default performance options.
     specChips: function (m) {
       var sp = m.spec || {}, out = [];
+      if (sp.engine && sp.engine !== "llama.cpp") {
+        out.push(sp.engine === "vllm" ? "vLLM" : "SGLang");
+        if (sp.tensor_parallel) out.push("TP " + sp.tensor_parallel);
+      }
       if (sp.kv_cache_type && sp.kv_cache_type !== "f16") out.push("KV " + sp.kv_cache_type);
       if (sp.flash_attn && sp.flash_attn !== "auto") out.push("Flash attn " + sp.flash_attn);
       if (sp.ubatch && sp.ubatch !== 512) out.push("Micro-batch " + sp.ubatch);
@@ -1951,16 +1987,16 @@ function app() {
     },
     saveForm: async function () {
       var f = this.form;
-      if (!f.name.trim() || !f.file) { this.toast("Name and file are required", "error"); return false; }
+      if (!f.name.trim()) { this.toast("Name is required", "error"); return false; }
       var sb = this.scalingBody(f);
       if (sb.error) { this.toast(sb.error, "error"); return false; }
-      var pb = this.perfBody(f);
+      var pb = this.engineBody(f);
       if (pb.error) { this.toast(pb.error, "error"); return false; }
       if (!f.auto && !f.pins.length) { this.toast("Select at least one server or GPU, or use all servers and GPUs", "error"); return false; }
       f.busy = true;
       try {
         await this.api("PUT", "/api/models/" + encodeURIComponent(f.name.trim()), Object.assign({
-          file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+          ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu",
           pin_devices: f.auto ? [] : f.pins
         }, sb.body, pb.body));
@@ -2012,11 +2048,13 @@ function app() {
       f.simKey = this.checkKey();
       f.simErr = "";
       var bad = function (msg) { if (quiet) { f.sim = null; f.simErr = msg; } else self.toast(msg, "error"); };
-      if (!f.name.trim() || !f.file) { bad("Name and file are required"); return; }
+      if (!f.name.trim()) { bad("Name is required"); return; }
       var sb = this.scalingBody(f);
       if (sb.error) { bad(sb.error); return; }
-      var pb = this.perfBody(f);
+      var pb = this.engineBody(f);
       if (pb.error) { bad(pb.error); return; }
+      var src = { file: pb.body.file, engine: pb.body.engine, hf_repo: pb.body.hf_repo, tensor_parallel: pb.body.tensor_parallel };
+      ["file", "engine", "hf_repo", "tensor_parallel", "trust_remote_code", "engine_args"].forEach(function (k) { delete pb.body[k]; });
       var item = Object.assign({}, pb.body, {
         ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
         priority: this.priorityOf(f), preemptible: !!f.preemptible, spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins
@@ -2025,7 +2063,7 @@ function app() {
       else { item.min_replicas = sb.body.min_replicas; item.max_replicas = sb.body.max_replicas; }
       var body = {};
       if (f.edit) body.changes = [Object.assign({ model: f.name.trim() }, item)];
-      else body.add = [Object.assign({ name: f.name.trim(), file: f.file }, item)];
+      else body.add = [Object.assign({ name: f.name.trim() }, src, item)];
       var seq = ++checkSeq.sim;
       f.simBusy = true;
       f.sim = null;
@@ -2050,15 +2088,16 @@ function app() {
       f.recKey = this.checkKey();
       f.recErr = "";
       var bad = function (msg) { if (quiet) { f.rec = null; f.recErr = msg; } else self.toast(msg, "error"); };
-      if (!f.file) { bad("Pick a file first"); return; }
-      var pb = this.perfBody(f);
+      var pb = this.engineBody(f);
       if (pb.error) { bad(pb.error); return; }
+      delete pb.body.trust_remote_code;
+      delete pb.body.engine_args;
       var seq = ++checkSeq.rec;
       f.recBusy = true;
       f.rec = null;
       try {
         var r = await this.api("POST", "/api/recommend", Object.assign({
-          file: f.file, ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+          ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
           priority: this.priorityOf(f), spread: f.spread || "gpu", pin_devices: f.auto ? [] : f.pins, limit: 3
         }, pb.body));
         if (seq === checkSeq.rec) f.rec = r;
@@ -2071,7 +2110,7 @@ function app() {
     checkKey: function () {
       var f = this.form;
       return JSON.stringify([f.name, f.file, f.ctx, f.parallel, f.priority, f.preemptible, f.spread, f.auto, f.pins, f.mode, f.replicas,
-        f.minR, f.maxR, f.kv, f.spec, f.draftFile, f.draftN, f.fa, f.ubatch, f.batch, f.kvu]);
+        f.minR, f.maxR, f.kv, f.spec, f.draftFile, f.draftN, f.fa, f.ubatch, f.batch, f.kvu, f.engine, f.hfRepo, f.tp]);
     },
     secToggle: function (k) {
       this.form.sec[k] = !this.form.sec[k];

@@ -5,6 +5,7 @@ change: agent and coordinator of different versions must keep talking.
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,30 @@ FlashAttn = Literal["auto", "on", "off"]
 Reasoning = Literal["auto", "on", "off"]
 # llama-server --reasoning-effort, handed to the chat template ("default": the template's own).
 ReasoningEffort = Literal["default", "minimal", "low", "medium", "high", "xhigh", "max"]
+# The inference engine a model runs on. "llama.cpp" (GGUF, layer split across GPUs and servers over
+# RPC) is the default; "vllm" and "sglang" serve Hugging Face checkpoints (safetensors, AWQ/GPTQ/FP8,
+# vision-language models...) with tensor parallelism over the GPUs of ONE server.
+EngineName = Literal["llama.cpp", "vllm", "sglang"]
+DEFAULT_ENGINE: EngineName = "llama.cpp"
+# Engines that are not llama.cpp: no RPC, no GGUF, the engine itself downloads hf:// sources.
+HF_ENGINES: frozenset[str] = frozenset({"vllm", "sglang"})
+HF_PREFIX = "hf://"  # hf://owner/name or hf://owner/name@revision
+_HF_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+_HF_REV_RE = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
+
+
+def parse_hf_source(source: str) -> tuple[str, str | None]:
+    """"hf://owner/name[@revision]" -> (repo, revision or None). ValueError when malformed."""
+    if not source.startswith(HF_PREFIX):
+        raise ValueError(f"not a {HF_PREFIX} source: {source!r}")
+    repo, _, rev = source[len(HF_PREFIX):].partition("@")
+    if not _HF_REPO_RE.match(repo) or any(p in (".", "..") for p in repo.split("/")):
+        raise ValueError(f"invalid Hugging Face repo id {repo!r} (expected owner/name)")
+    if rev and (not _HF_REV_RE.match(rev) or ".." in rev):
+        raise ValueError(f"invalid revision {rev!r}")
+    return repo, rev or None
+
+
 # Logical (-b) and physical (-ub) batch sizes, llama.cpp defaults. A bigger micro-batch processes long
 # prompts faster on big GPUs at the cost of a bigger compute buffer on every device.
 DEFAULT_BATCH = 2048
@@ -115,6 +140,24 @@ class EngineSpec(BaseModel):
     # rpc engines: hosts allowed to connect (the replica's head). Empty = no restriction. Enforced
     # only by agents with rpc_firewall on; ggml-rpc-server itself has no authentication.
     allowed_peers: list[str] = Field(default_factory=list)
+    # Engines other than llama.cpp (optional since 0.10; an older agent ignores these fields and
+    # would start llama-server, so the coordinator only sends them to agents that report the
+    # "engine:<name>" feature). kind is "server", model_path stays None: the engine downloads
+    # `hf_repo` itself into the agent's Hugging Face cache.
+    engine: EngineName = DEFAULT_ENGINE
+    hf_repo: str | None = None  # "owner/name"
+    hf_revision: str | None = None  # branch, tag or commit; None = the repo's default
+    # NVML UUIDs of `devices`, same order: CUDA_VISIBLE_DEVICES for the engine (stable even when
+    # the agent itself sees a subset of the GPUs). Empty: the indices from "CUDA<i>" are used.
+    device_uuids: list[str] = Field(default_factory=list)
+    # Fraction of each GPU's TOTAL memory the engine may take (weights + KV + activations):
+    # vLLM --gpu-memory-utilization, SGLang --mem-fraction-static. The scheduler sizes it from the
+    # placement's estimate, so the engine never grabs memory that other users hold.
+    gpu_mem_fraction: float | None = Field(default=None, gt=0, le=1)
+    trust_remote_code: bool = False
+    # Flags appended to the engine command. Refused unless the agent opts in
+    # (GPUPOOL_ALLOW_ENGINE_ARGS=1): a cluster token must not become arbitrary flags by default.
+    engine_args: list[str] = Field(default_factory=list)
 
 
 class EngineStatus(BaseModel):
@@ -153,8 +196,15 @@ class NodeReport(BaseModel):
 
 class ModelSpec(BaseModel):
     name: str  # alias returned by /v1/models
-    # https://...gguf | absolute local path (on the coordinator) | coordinator://<file in models_dir>
+    # llama.cpp: https://...gguf | absolute local path (on the coordinator) | coordinator://<file>
+    # vllm / sglang: hf://owner/name[@revision]
     source: str
+    engine: EngineName = DEFAULT_ENGINE
+    # vllm / sglang: GPUs of one server the model is sharded over (tensor parallel). None = the
+    # scheduler picks the smallest power of two that fits.
+    tensor_parallel: int | None = Field(default=None, ge=1, le=8)
+    trust_remote_code: bool = False  # vllm / sglang: run the repo's own modelling code
+    engine_args: list[str] = Field(default_factory=list)  # vllm / sglang: extra flags, see EngineSpec
     ctx_size: int = 4096
     parallel: int = 1
     replicas: int = 1  # desired count; 0 = stopped
@@ -287,6 +337,11 @@ class Placement(BaseModel):
     # Calibrated memory factor every est_mb above was multiplied by. Calibration divides it back out:
     # a sample against already-scaled estimates would converge on sqrt(true ratio), not the ratio.
     mem_factor: float = 1.0
+    # The engine the placement was planned for (absent before 0.10: llama.cpp). vllm / sglang:
+    # every assignment is on head_node, sharded by tensor parallelism (layers = all of them).
+    engine: EngineName = DEFAULT_ENGINE
+    # vllm / sglang: EngineSpec.gpu_mem_fraction, sized with the estimate (None for llama.cpp).
+    gpu_mem_fraction: float | None = None
 
 
 class Occupant(BaseModel):
@@ -320,3 +375,4 @@ class ReplicaEndpoint(BaseModel):
     # Relative serving speed (the placement's estimated decode tok/s): a replica twice as fast gets
     # twice the share of new prefixes. Only ratios between replicas of one model matter.
     weight: float = 1.0
+    engine: EngineName = DEFAULT_ENGINE  # request rewriting is engine-specific (cache_prompt)

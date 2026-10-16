@@ -23,9 +23,11 @@
 
 Bạn có một RTX 4090 ở máy này và hai RTX 5090 ở máy khác, cùng một model 70B không card nào chứa nổi một mình.
 **gpupool** đo VRAM trống trên từng máy, quyết định mỗi model đặt ở đâu và chia các layer ra sao, khởi chạy và giám sát
-các engine, rồi đưa cho bạn **một URL tương thích OpenAI**. Engine là
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` và `ggml-rpc-server`, model GGUF); gpupool là lớp
-điều khiển nằm phía trên.
+các engine, rồi đưa cho bạn **một URL tương thích OpenAI**. Engine mặc định là
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` và `ggml-rpc-server`, model GGUF); model cũng có
+thể chạy trên [vLLM](https://github.com/vllm-project/vllm) hoặc [SGLang](https://github.com/sgl-project/sglang), lấy
+thẳng từ repo Hugging Face, cho model thị giác–ngôn ngữ và các checkpoint llama.cpp chưa phục vụ được
+([ENGINES.vi.md](docs/ENGINES.vi.md)). gpupool là lớp điều khiển nằm phía trên.
 
 ## Vì sao chọn gpupool
 
@@ -266,6 +268,7 @@ API quản trị (models, servers, recommend, capacity, simulate, convert, state
 | --- | --- | --- |
 | Bắt đầu nhanh và triển khai | [QUICKSTART.en.md](docs/QUICKSTART.en.md) | [QUICKSTART.vi.md](docs/QUICKSTART.vi.md) |
 | Tham chiếu HTTP API | [API.en.md](docs/API.en.md) | [API.vi.md](docs/API.vi.md) |
+| Engine: llama.cpp, vLLM, SGLang | [ENGINES.en.md](docs/ENGINES.en.md) | [ENGINES.vi.md](docs/ENGINES.vi.md) |
 | Thiết kế | [DESIGN.en.md](docs/DESIGN.en.md) | [DESIGN.vi.md](docs/DESIGN.vi.md) |
 | Thiết kế nền tảng (lập lịch nhiều model) | [PLATFORM_DESIGN.en.md](docs/PLATFORM_DESIGN.en.md) | [PLATFORM_DESIGN.vi.md](docs/PLATFORM_DESIGN.vi.md) |
 | Thiết kế UI | [UI_DESIGN.en.md](docs/UI_DESIGN.en.md) | [UI_DESIGN.vi.md](docs/UI_DESIGN.vi.md) |

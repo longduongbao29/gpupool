@@ -669,7 +669,7 @@
 
       <div :class="{folded: folded('deployments')}" class="panel mt">
         <div class="panel-head"><button type="button" class="fold" :class="{open: !folded('deployments')}" @click="toggleFold('deployments')" :aria-expanded="String(!folded('deployments'))" :title="folded('deployments') ? 'Expand' : 'Collapse'" aria-label="Collapse or expand Deployments" x-html="icon('chev')"></button><h2 class="fold-title" @click="toggleFold('deployments')">Deployments</h2><span class="muted small">Endpoint <code x-text="endpoint()"></code></span>
-          <button class="btn primary right" @click="openForm(null)" :disabled="readyLibrary().length === 0" :title="readyLibrary().length === 0 ? 'Add a model to the library first' : ''"><span x-html="icon('plus')"></span> New model</button></div>
+          <button class="btn primary right" @click="openForm(null)" :title="readyLibrary().length === 0 ? 'No GGUF in the library yet: serve a Hugging Face repo with vLLM or SGLang, or add a GGUF first' : ''"><span x-html="icon('plus')"></span> New model</button></div>
         <div class="empty" x-show="filteredModels().length === 0">No deployments. Pick a file from the library and press <b>Deploy</b>.</div>
         <div class="model-grid" x-show="filteredModels().length > 0">
           <template x-for="m in filteredModels()" :key="m.spec.name">
@@ -1274,20 +1274,41 @@
     <div class="modal-head"><h2 x-text="form.edit ? 'Edit model' : 'New model'"></h2><button class="btn ghost icon sm right" aria-label="Close" @click="form.open = false" x-html="icon('x')"></button></div>
     <div class="form-cols">
     <div class="modal-body form-main">
-      <label class="field"><span>File (from the library)</span>
+      <label class="field"><span>Engine</span>
+        <select x-model="form.engine" @change="form.plan = null; form.rec = null; form.sim = null" style="width:100%">
+          <option value="llama.cpp">llama.cpp &mdash; GGUF from the library, split across GPUs and servers</option>
+          <option value="vllm">vLLM &mdash; Hugging Face repo, GPUs of one server</option>
+          <option value="sglang">SGLang &mdash; Hugging Face repo, GPUs of one server</option></select></label>
+      <div x-show="!isLlama()">
+        <label class="field"><span>Hugging Face repo</span>
+          <input type="text" x-model="form.hfRepo" placeholder="Qwen/Qwen2.5-VL-7B-Instruct" spellcheck="false" autocomplete="off"
+                 @input="form.plan = null; form.rec = null; form.sim = null; if (!form.edit && (form.autoName || !form.name.trim())) form.name = form.hfRepo.split('@')[0].split('/').pop() || ''"></label>
+        <div class="row">
+          <label class="field grow"><span>Tensor parallel (GPUs)</span>
+            <select x-model="form.tp" @change="form.rec = null; form.sim = null" style="width:100%">
+              <option value="">Auto (fewest GPUs that fit)</option>
+              <template x-for="k in ['1', '2', '4', '8']" :key="k"><option :value="k" :selected="k === form.tp" x-text="k"></option></template></select></label>
+          <label class="field grow"><span>Extra engine flags</span>
+            <input type="text" x-model="form.eargs" placeholder="--kv-cache-dtype fp8" spellcheck="false" autocomplete="off" style="width:100%"></label>
+        </div>
+        <div class="opt-row" style="margin-bottom:var(--s-2)"><label class="switch"><input type="checkbox" x-model="form.trc" aria-label="Trust remote code"><span></span></label>
+          <div class="txt"><div>Trust remote code</div><div class="help">Runs the repo's own Python modelling code on the GPU server. Only for repos you trust.</div></div></div>
+        <div class="muted small" style="margin:-4px 0 var(--s-3)">The engine downloads the repo on the GPU server on first use (set <code>HF_TOKEN</code> on the agent for gated repos). Safetensors, AWQ, GPTQ, FP8 and vision-language models work as the engine supports them; images go in chat messages as <code>image_url</code>. Extra flags are refused unless the agent sets <code>GPUPOOL_ALLOW_ENGINE_ARGS=1</code>.</div>
+      </div>
+      <label class="field" x-show="isLlama()"><span>File (from the library)</span>
         <select x-model="form.file" @change="form.plan = null; form.rec = null; form.sim = null; if (form.draftFile === form.file) form.draftFile = ''">
           <template x-if="form.edit && !readyLibrary().some(function (l) { return l.name === form.file; })"><option :value="form.file" selected x-text="form.file"></option></template>
           <template x-for="l in readyLibrary()" :key="l.name"><option :value="l.name" :selected="l.name === form.file" x-text="l.name + '  (' + bytes(l.bytes) + ')'"></option></template>
         </select></label>
-      <label class="field"><span>Name (served as the model id)</span><input type="text" x-model="form.name" :disabled="form.edit"></label>
+      <label class="field"><span>Name (served as the model id)</span><input type="text" x-model="form.name" :disabled="form.edit" @input="form.autoName = false"></label>
       <div class="row">
         <label class="field grow"><span>Context size</span><input type="number" min="256" step="256" x-model="form.ctx" @input="form.rec = null" style="width:100%"></label>
         <label class="field grow"><span>Parallel slots</span><input type="number" min="1" max="64" x-model="form.parallel" @input="form.rec = null" style="width:100%"></label>
       </div>
-      <div class="opt-row" x-show="(parseInt(form.parallel, 10) || 1) > 1" style="margin-bottom:var(--s-2)"><label class="switch"><input type="checkbox" x-model="form.kvu" @change="form.rec = null; form.sim = null" aria-label="Share the context between slots"><span></span></label>
+      <div class="opt-row" x-show="isLlama() && (parseInt(form.parallel, 10) || 1) > 1" style="margin-bottom:var(--s-2)"><label class="switch"><input type="checkbox" x-model="form.kvu" @change="form.rec = null; form.sim = null" aria-label="Share the context between slots"><span></span></label>
         <div class="txt"><div>Share the context between slots</div><div class="help">Any one request may use the whole context while the others are short; same memory (llama.cpp <code>-kvu</code>).</div></div></div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)" :class="{warn: ctxPerSlot() < 2048}">
-        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context<span x-text="form.kvu && (parseInt(form.parallel, 10) || 1) > 1 ? ' at most, shared with the other slots' : ' (context ÷ slots)'"></span>.
+        Each request gets <b x-text="ctxPerSlot()"></b> tokens of context<span x-text="!isLlama() || (form.kvu && (parseInt(form.parallel, 10) || 1) > 1) ? ' at most, shared with the other slots' : ' (context ÷ slots)'"></span>.
         More slots serve more users at once (continuous batching): total tok/s grows, one request alone slows slightly.</div>
       <div class="row">
         <label class="field grow"><span>Priority (0-100)</span><input type="number" min="0" max="100" step="1" x-model="form.priority" @input="form.sim = null" style="width:100%"></label>
@@ -1297,6 +1318,7 @@
       </div>
       <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" x-model="form.preemptible" @change="form.sim = null"><span></span></label>
         <div><div>Can be preempted</div><div class="muted small">a higher-priority model may stop this model's replicas when GPUs are full</div></div></div>
+      <div x-show="isLlama()">
       <h3 class="sec" style="margin-top:4px">Performance</h3>
       <label class="field"><span>KV cache</span>
         <select x-model="form.kv" @change="form.rec = null; form.sim = null" style="width:100%">
@@ -1355,6 +1377,7 @@
           <input type="number" min="0" step="1" x-model="form.budget" :disabled="form.rea === 'off'" :placeholder="form.rea === 'off' ? 'Not used' : 'Unlimited'" style="width:100%"></label>
       </div>
       <div class="muted small" style="margin:-4px 0 var(--s-3)">For thinking models (Qwen3, DeepSeek-R1, gpt-oss, GLM...): the defaults for requests that do not set their own; a request still can (<code>reasoning_effort</code>, <code>"none"</code> turns thinking off). Effort is handed to the chat template: only templates that read it change anything (gpt-oss: low, medium, high). Budget 0 ends thinking at once. Needs the agent's llama.cpp b11413 or newer; applies from the next launch.</div>
+      </div>
       <h3 class="sec" style="margin-top:4px">Scaling</h3>
       <label class="field"><span>Mode</span>
         <select x-model="form.mode" style="width:100%">

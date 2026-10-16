@@ -73,8 +73,8 @@ def prefix_key(body: dict) -> str:
             return _digest(anchor)
         else:  # single turn: the system prompt, cut so long shared prompts still meet
             material = _canon(anchor)[:4096]
-    else:
-        material = _text(body.get("prompt", ""))[:512]
+    else:  # completions: prompt; embeddings / responses: input; rerank / score: query
+        material = _text(body.get("prompt", body.get("input", body.get("query", ""))))[:512]
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 

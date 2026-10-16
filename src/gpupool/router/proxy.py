@@ -14,7 +14,7 @@ from starlette.background import BackgroundTask
 
 from gpupool.common.auth import require_bearer
 from gpupool.common.net import internal_client
-from gpupool.common.models import ReplicaEndpoint
+from gpupool.common.models import DEFAULT_ENGINE, ReplicaEndpoint
 from gpupool.router.balancer import Balancer, prefix_key
 
 
@@ -72,6 +72,14 @@ REPLICA_HEADER = "x-gpupool-replica"
 
 class _Retryable(Exception):
     pass
+
+
+OPENAI_PATHS = (
+    "/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/responses",
+    # rerank / score: llama-server, vLLM and SGLang (Jina / Cohere style bodies)
+    "/v1/rerank", "/v1/score",
+)
+_CACHE_PROMPT_PATHS = frozenset({"/v1/chat/completions", "/v1/completions"})
 
 
 def _with_cache_prompt(raw: bytes, body: dict) -> bytes:
@@ -163,7 +171,9 @@ def make_router(
                           "invalid_request_error", "model_not_found")
         if on_request is not None:
             on_request(model)  # may start loading an unloaded model
-        payload = _with_cache_prompt(raw, body)
+        # cache_prompt is llama-server's: other engines cache prefixes on their own (and a strict
+        # one could refuse an unknown field), so it is added per replica, for generation only.
+        cached = _with_cache_prompt(raw, body) if path in _CACHE_PROMPT_PATHS else raw
         stream = body.get("stream") is True
         key = prefix_key(body)
 
@@ -213,7 +223,8 @@ def make_router(
             try:
                 try:
                     req = http.build_request(
-                        "POST", ep.base_url.rstrip("/") + path, content=payload,
+                        "POST", ep.base_url.rstrip("/") + path,
+                        content=cached if ep.engine == DEFAULT_ENGINE else raw,
                         headers={"content-type": "application/json"},
                     )
                     resp = await http.send(req, stream=True)
@@ -293,12 +304,15 @@ def make_router(
             return StreamingResponse(gen(), status_code=resp.status_code, media_type=ctype,
                                      headers={REPLICA_HEADER: rid}, background=BackgroundTask(cleanup))
 
-    @router.post("/v1/chat/completions")
-    async def chat(request: Request):
-        return await handle(request, "/v1/chat/completions")
+    def proxied(path: str):
+        async def endpoint(request: Request):
+            return await handle(request, path)
+        return endpoint
 
-    @router.post("/v1/completions")
-    async def completions(request: Request):
-        return await handle(request, "/v1/completions")
+    # JSON endpoints with a "model" field, routed like chat. Which ones a model answers depends on
+    # its engine and the model itself (an embedding model, a reranker...): the engine replies 404 /
+    # 400 for the others and the client gets that reply.
+    for path in OPENAI_PATHS:
+        router.add_api_route(path, proxied(path), methods=["POST"])
 
     return router
