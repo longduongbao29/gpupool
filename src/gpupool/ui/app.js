@@ -127,7 +127,8 @@ function perfForm(spec) {
 // Engine part of the deploy form: llama.cpp serves a library GGUF; vLLM / SGLang serve a Hugging Face repo.
 function engineForm(spec) {
   // autoName: the name was filled in for the user, so typing a repo may replace it
-  var f = { engine: "llama.cpp", hfRepo: "", tp: "", trc: false, eargs: "", autoName: !spec };
+  var f = { engine: "llama.cpp", hfRepo: "", tp: "", trc: false, eargs: "", autoName: !spec,
+            adv: { busy: false, res: null, err: "", key: "" } };
   if (!spec) return f;
   if (spec.engine) f.engine = spec.engine;
   if (/^hf:\/\//.test(spec.source || "")) f.hfRepo = spec.source.replace(/^hf:\/\//, "");
@@ -144,7 +145,8 @@ function checkState() {
            sec: { rec: false, sim: false, plan: false } };
 }
 var checkTimer = null; // debounce of the automatic checks while the user types
-var checkSeq = { rec: 0, sim: 0 }; // answers of superseded check requests are dropped
+var checkSeq = { rec: 0, sim: 0, adv: 0 }; // answers of superseded check requests are dropped
+var adviceTimer = null; // debounce of the engine advice while the user types a repo
 
 // "Browse server folders" state of the Add model modal (GET /api/library/browse).
 function emptyBrowse() {
@@ -1859,6 +1861,62 @@ function app() {
       return { body: { replicas: r, min_replicas: null, max_replicas: null, autoscale: null, idle_unload_s: null } };
     },
     isLlama: function (f) { return (f || this.form).engine === "llama.cpp"; },
+    // ----- engine advice (POST /api/engines/recommend): which engine suits the model being deployed -----
+    // The source is the field the engine shows: the library file for llama.cpp, the repo for vLLM / SGLang.
+    adviceBody: function () {
+      var f = this.form;
+      var body = { ctx_size: parseInt(f.ctx, 10) || 4096, parallel: parseInt(f.parallel, 10) || 1,
+                   priority: this.priorityOf(f), pin_devices: f.auto ? [] : f.pins };
+      if (this.isLlama()) {
+        if (!f.file) return null;
+        body.file = f.file;
+      } else {
+        var repo = String(f.hfRepo || "").trim().replace(/^https:\/\/huggingface\.co\//, "").replace(/^hf:\/\//, "");
+        if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(@[A-Za-z0-9._\/-]+)?$/.test(repo)) return null;
+        body.hf_repo = repo;
+      }
+      return body;
+    },
+    adviseSoon: function () {
+      var self = this, body = this.adviceBody(), a = this.form.adv;
+      var key = body ? JSON.stringify(body) : "";
+      if (key === a.key) return;
+      a.key = key;
+      clearTimeout(adviceTimer);
+      if (!body) { a.res = null; a.err = ""; a.busy = false; return; }
+      a.busy = true;
+      adviceTimer = setTimeout(function () { self.advise(body); }, 500);
+    },
+    advise: async function (body) {
+      var a = this.form.adv, seq = ++checkSeq.adv;
+      try {
+        var r = await this.api("POST", "/api/engines/recommend", body);
+        if (seq !== checkSeq.adv) return;
+        a.res = r; a.err = "";
+      } catch (e) {
+        if (seq !== checkSeq.adv) return;
+        if (e.status === 401) { this.fail(e); return; }
+        a.res = null; a.err = e.message;
+      }
+      a.busy = false;
+    },
+    adviceBest: function () {
+      var r = this.form.adv.res;
+      if (!r || !r.recommended) return null;
+      return r.options.filter(function (o) { return o.engine === r.recommended; })[0] || null;
+    },
+    // Switch the form to an advised engine; llama.cpp for a repo means converting it to GGUF first.
+    useEngine: function (o) {
+      var f = this.form;
+      if (o.needs_conversion) {
+        var repo = (this.adviceBody() || {}).hf_repo || "";
+        f.open = false;
+        this.openConvert({ repo: repo.split("@")[0] });
+        return;
+      }
+      f.engine = o.engine;
+      f.plan = null; f.rec = null; f.sim = null;
+    },
     // Model source and engine fields of the request body (with the llama.cpp performance fields), or { error }.
     engineBody: function (f) {
       if (this.isLlama(f)) {

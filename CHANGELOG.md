@@ -24,6 +24,13 @@ All notable changes to gpupool are documented here. The format follows
   `engine` / `hf_repo` on `/api/recommend` and `/api/simulate`. UI: an **Engine** choice in the model form; **New
   model** works with an empty library.
 - Router: `/v1/embeddings`, `/v1/responses`, `/v1/rerank` and `/v1/score` are proxied like chat completions.
+- **Engine advice.** The model form recommends an engine as you fill it in and leaves the choice to you: for each
+  engine, whether it supports the model (GGUF, vision, AWQ/GPTQ, embedding...), which servers run it and whether it
+  fits now; a text model that fits on no single server is pointed to llama.cpp after a GGUF conversion (**Convert to
+  GGUF** opens the converter). `POST /api/engines/recommend`.
+- **`gpupool-agent:<version>-all`**: one agent image with llama.cpp, vLLM 0.30.0 and SGLang 0.5.20 (two virtualenvs
+  under `/opt/engines`, shared files hardlinked), the engine commands preset. Built from `docker/agent.Dockerfile`
+  with `--build-arg WITH_ENGINES=1`; the engines need an NVIDIA driver >= 580. Published for releases only.
 
 ### Changed
 

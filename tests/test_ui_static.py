@@ -1179,3 +1179,16 @@ def test_mock_config_history_contract(client):
 def test_ui_has_config_history():
     js, html = (UI / "app.js").read_text(), (UI / "index.html").read_text()
     assert "/configs" in js and "/run" in js and "openHist(m)" in html and "histRun(c)" in html
+
+
+def test_mock_engine_advice_contract(client):
+    r = client.post("/api/engines/recommend", json={"hf_repo": "Qwen/Qwen2.5-72B-Instruct"}, headers=HEAD)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["recommended"] == "llama.cpp" and j["options"][0]["needs_conversion"]
+    for o in j["options"]:
+        assert set(o) == {"engine", "label", "supported", "score", "servers", "fits_now", "needs_conversion",
+                          "reasons", "warnings", "placement"}
+    assert client.post("/api/engines/recommend", json={"hf_repo": "Qwen/Qwen2.5-VL-7B-Instruct"},
+                       headers=HEAD).json()["recommended"] == "vllm"
+    assert client.post("/api/engines/recommend", json={}, headers=HEAD).status_code == 422

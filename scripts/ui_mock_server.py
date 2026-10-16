@@ -39,6 +39,8 @@ Conversion (Hugging Face / server folder -> GGUF): every route of the real API u
 HuggingFaceTB/SmolLM2-135M-Instruct (small, supported), Qwen/Qwen2.5-7B-Instruct (job ends in needs_review: one tokenizer mismatch),
 Qwen/Qwen2.5-72B-Instruct (recommendation depends on the live GPUs), Qwen/Qwen2.5-7B-Instruct-AWQ (pre-quantized, unsupported, base_model set),
 acme/NovelNet-7B (unsupported architecture), meta-llama/Llama-3.1-8B-Instruct (gated: the job fails at the download),
+POST /api/engines/recommend: a library file -> llama.cpp; a repo -> vLLM (server-1 runs it), SGLang (installed nowhere),
+llama.cpp after a conversion; "VL" in the name is a vision model, "AWQ" prequantized, "72B" fits on no single server.
 acme/Quirky-3B (ships remote code: the job fails unless allow_remote_code) and the server folders /models/hf/smollm2-135m and
 /models/hf/broken-model (fails while converting). Those repos have no .gguf files in GET /api/hf/files. Jobs walk queued -> downloading
 -> converting -> quantizing -> validating in about 20 s of wall-clock time. Three jobs are seeded at start: done (in the library),
@@ -1460,6 +1462,65 @@ def convert_delete(job_id: str) -> dict:
         raise HTTPException(409, f"Job {job_id} is {j['state']}: cancel it first")
     del JOBS[job_id]  # the library file of a finished job is never touched
     return {"ok": True}
+
+
+def _engine_opt(engine: str, supported: bool, score: int, servers: list[str], fits, reasons, warnings,
+                needs_conversion=False, devices=None, tps=None) -> dict:
+    label = {"llama.cpp": "llama.cpp", "vllm": "vLLM", "sglang": "SGLang"}[engine]
+    placement = None
+    if fits:
+        placement = {"tier": "single_gpu" if len(devices) == 1 else "single_node", "head_node": devices[0].split("/")[0],
+                     "est_total_mb": 18000 * len(devices), "est_decode_tps": tps, "devices": devices}
+    return {"engine": engine, "label": label, "supported": supported, "score": score, "servers": servers,
+            "fits_now": fits, "needs_conversion": needs_conversion, "reasons": reasons, "warnings": warnings,
+            "placement": placement}
+
+
+@app.post("/api/engines/recommend", dependencies=[api])
+def engines_recommend(body: dict) -> dict:
+    """Engine advice. A library file: llama.cpp only. A repo: "VL" in the name is a vision model (no llama.cpp),
+    "AWQ" a prequantized checkpoint, "72B" fits on no single server (llama.cpp after conversion wins); server-1
+    runs vLLM, no server runs SGLang."""
+    repo, file = body.get("hf_repo"), body.get("file")
+    if not repo and not file:
+        raise HTTPException(422, "file or hf_repo is required")
+    if file:
+        if file not in LIBRARY:
+            raise HTTPException(422, f"file {file!r} is not a ready library item")
+        opts = [_engine_opt("llama.cpp", True, 100, ["server-1", "server-2", "server-3"], True,
+                            ["fits now on 1 GPU(s) of server-1, ~48 tok/s",
+                             "GGUF file: llama.cpp serves it and can split it across GPUs and servers"], [],
+                            devices=["server-1/CUDA0"], tps=48.0)]
+        opts += [_engine_opt(e, False, 0, [], None, [], [f"{n} serves Hugging Face repos, not library GGUF files"])
+                 for e, n in (("sglang", "SGLang"), ("vllm", "vLLM"))]
+        return {"model": {"kind": "gguf", "task": "generate", "vision": False, "quant": None, "arch": None},
+                "recommended": "llama.cpp", "options": opts}
+    if "/" not in repo:
+        raise HTTPException(422, f"invalid Hugging Face repo id {repo!r} (expected owner/name)")
+    vision, quant, big = "VL" in repo, ("awq" if "AWQ" in repo.upper() else None), "72B" in repo
+    what = (["vision-language model: images in chat messages work"] if vision else []) + (
+        ["AWQ checkpoint served as it is"] if quant else [])
+    if big:
+        vllm = _engine_opt("vllm", True, 70, ["server-1"], False, what + ["the widest model coverage"],
+                           ["does not fit on one server in the GPU memory free right now"])
+    else:
+        vllm = _engine_opt("vllm", True, 100, ["server-1"], True,
+                           ["fits now on 1 GPU(s) of server-1, ~41 tok/s"] + what + ["the widest model coverage"], [],
+                           devices=["server-1/CUDA0"], tps=41.0)
+    sglang = _engine_opt("sglang", True, 45, [], None, what + ["fast prefix caching (RadixAttention)"],
+                         ["no server runs SGLang: use the gpupool-agent \"-all\" image or set GPUPOOL_SGLANG_CMD on a GPU server"])
+    if vision or quant:
+        llama = _engine_opt("llama.cpp", False, 0, ["server-1", "server-2", "server-3"], None, [],
+                            ["vision models need an mmproj file, which gpupool does not manage for llama.cpp yet"] if vision
+                            else ["the GGUF converter cannot read AWQ checkpoints"])
+    else:
+        llama = _engine_opt("llama.cpp", True, 90 if big else 80, ["server-1", "server-2", "server-3"], None,
+                            ["convert to GGUF first (Library, Convert); then it can pool GPUs of several servers"]
+                            + (["no single server fits it as is: llama.cpp splits a GGUF across servers"] if big else []),
+                            [], needs_conversion=True)
+    opts = sorted([vllm, sglang, llama], key=lambda o: (not o["supported"], -o["score"], o["engine"]))
+    return {"model": {"kind": "hf", "task": "generate", "vision": vision, "quant": quant, "arch": "MockForCausalLM"},
+            "recommended": next(o["engine"] for o in opts if o["supported"]), "options": opts}
 
 
 @app.post("/api/_mock/convert_available")

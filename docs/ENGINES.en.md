@@ -22,7 +22,39 @@ serving of a model that fits on one server. Keep llama.cpp to pool memory across
 
 ## Setting up a GPU server
 
-The agent does not install vLLM or SGLang: it runs a command when it resolves on that server, and reports the engine
+### One container with every engine
+
+The `gpupool-agent` image comes in two flavours:
+
+| Tag | Engines | Size |
+| --- | --- | --- |
+| `gpupool-agent:<version>` | llama.cpp | ~2 GB |
+| `gpupool-agent:<version>-all` | llama.cpp, vLLM, SGLang | tens of GB |
+
+The `-all` image installs vLLM and SGLang in two virtualenvs (`/opt/engines/vllm`, `/opt/engines/sglang`: they pin
+different versions of shared packages) and sets `GPUPOOL_VLLM_CMD` / `GPUPOOL_SGLANG_CMD` to them, so the agent offers
+all three engines with no setup. Run it like the plain image, plus `--ipc host` (tensor-parallel workers share memory
+through `/dev/shm`):
+
+```bash
+docker run -d --name gpupool-agent --gpus all --network host --pid host --ipc host -v gpupool-agent:/data \
+  -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster_token>" -e HF_TOKEN \
+  ghcr.io/longduongbao29/gpupool-agent:latest-all
+```
+
+The engines' wheels bring their own CUDA libraries: the pinned versions (vLLM 0.30.0, SGLang 0.5.20, PyTorch 2.13 for
+CUDA 13) need an **NVIDIA driver >= 580**; the llama.cpp part keeps working on older drivers. To build it yourself, or
+for other versions or an older CUDA:
+
+```bash
+docker build -f docker/agent.Dockerfile --build-arg WITH_ENGINES=1 \
+  --build-arg VLLM_VERSION=0.30.0 --build-arg SGLANG_VERSION=0.5.20 \
+  --build-arg VLLM_PIP_ARGS="--extra-index-url <a cu128 wheel index>" -t gpupool-agent:all .
+```
+
+### Engines installed by hand
+
+The agent does not install vLLM or SGLang itself: it runs a command when it resolves on that server, and reports the engine
 to the coordinator (`engine:vllm`, `engine:sglang` in the server's features). Models for that engine are only placed on
 servers that report it.
 
@@ -41,8 +73,22 @@ python3 -m venv /opt/vllm && /opt/vllm/bin/pip install vllm
 GPUPOOL_VLLM_CMD="/opt/vllm/bin/vllm serve" gpupool agent --llama-dir /opt/llama --join "http://coordinator:8080#<token>"
 ```
 
-The agent image ships llama.cpp only (vLLM and SGLang bring their own CUDA, PyTorch and several GB of wheels): install
-the engine in the agent's environment or point the command at a wrapper.
+With the plain image, install the engine in the agent's environment or point the command at a wrapper.
+
+## Choosing an engine
+
+The model form recommends an engine as you fill it in (`POST /api/engines/recommend`, see [API.en.md](API.en.md)), and
+the choice stays yours. For each engine it shows whether it supports the model, which servers run it and whether it
+fits in the GPU memory free right now, best first:
+
+- a GGUF from the library: llama.cpp (vLLM and SGLang serve Hugging Face repos);
+- a Hugging Face repo: vLLM, then SGLang, when a server runs them and the model fits on one server; a vision-language
+  model, an AWQ/GPTQ checkpoint or an embedding/reranking model is not offered for llama.cpp (gpupool does not convert
+  or serve those with it);
+- a text model that fits on no single server: llama.cpp after a conversion to GGUF (**Convert to GGUF** opens the
+  converter with the repo filled in), since only llama.cpp splits a model across servers.
+
+The advice reads `config.json` and the file list of the repo (no weights) and plans with the same scheduler as a launch.
 
 ## Adding a model
 

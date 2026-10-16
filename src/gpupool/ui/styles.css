@@ -1151,3 +1151,14 @@ body { background-image: radial-gradient(1100px 520px at -5% -10%, color-mix(in 
   .ov-feats { grid-template-columns: minmax(0, 1fr); }
   .pf-coord div span { display: none; }
 }
+
+/* Engine advice in the model form: one row per engine, unsupported ones dimmed. */
+.engine-advice .advice-list { list-style: none; margin: var(--s-2) 0 0; padding: 0; display: grid; gap: 4px; }
+.engine-advice .advice-list li { display: grid; grid-template-columns: 4.5rem auto 1fr auto; align-items: center; gap: var(--s-2); }
+.engine-advice .advice-list li.off { opacity: .65; }
+.engine-advice .adv-name { font-weight: 600; }
+.engine-advice .advice-list .btn { margin: 0; }
+@media (max-width: 600px) {
+  .engine-advice .advice-list li { grid-template-columns: auto 1fr; }
+  .engine-advice .advice-list li .muted { grid-column: 1 / -1; }
+}

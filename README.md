@@ -208,6 +208,7 @@ docker logs gpupool
 docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network host --pid host \
   -v gpupool-agent:/data -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" \
   ghcr.io/longduongbao29/gpupool-agent
+#    vLLM and SGLang too: add --ipc host and use ghcr.io/longduongbao29/gpupool-agent:latest-all (docs/ENGINES.en.md)
 
 # 3. In the UI: Models -> Add model (Hugging Face or path) -> New model -> Start. Then:
 curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \

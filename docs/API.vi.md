@@ -384,6 +384,7 @@ Tất cả nằm dưới `/api`, dùng admin key. Không route nào thay đổi 
 | --- | --- | --- |
 | GET | `/api/capacity` | bộ nhớ trống, băng thông, mức bận và các replica của từng GPU |
 | POST | `/api/recommend` | xếp hạng GPU/server cho một model trước khi deploy |
+| POST | `/api/engines/recommend` | nên phục vụ model bằng engine nào (hỗ trợ, server, có vừa không) |
 | POST | `/api/simulate` | reconciler sẽ làm gì với các thay đổi spec giả định |
 
 ### `GET /api/capacity`
@@ -398,6 +399,31 @@ Tất cả nằm dưới `/api`, dùng admin key. Không route nào thay đổi 
 
 `free_for_new_mb` bằng 0 với GPU bị tắt hoặc node chết; `reserved_mb = usable_mb - free_for_new_mb`.
 `summary` chỉ tính thiết bị CUDA.
+
+### `POST /api/engines/recommend`
+
+Nên phục vụ model bằng engine nào, trước khi triển khai. Không thay đổi gì. Body: `file` (GGUF đã `ready` trong thư
+viện) hoặc `hf_repo` (`owner/name[@revision]`), cùng `ctx_size` (4096), `parallel` (1), `priority` (50), `pin_devices`
+([]) dùng để kiểm tra có vừa không. 422 khi thiếu nguồn, file không phải mục thư viện đã `ready`, hoặc không đọc được
+`config.json` của repo (mỗi repo chỉ đọc một lần rồi lưu cache).
+
+```json
+{"model": {"kind": "hf", "task": "generate", "vision": true, "quant": null, "arch": "Qwen2_5_VLForConditionalGeneration"},
+ "recommended": "vllm",
+ "options": [
+  {"engine": "vllm", "label": "vLLM", "supported": true, "score": 100, "servers": ["gpu-1"], "fits_now": true,
+   "needs_conversion": false, "reasons": ["fits now on 1 GPU(s) of gpu-1, ~41 tok/s", "..."], "warnings": [],
+   "placement": {"tier": "single_gpu", "head_node": "gpu-1", "est_total_mb": 19235, "est_decode_tps": 41.0,
+                 "devices": ["gpu-1/CUDA0"]}},
+  {"engine": "sglang", "supported": true, "servers": [], "fits_now": null, "warnings": ["no server runs SGLang: ..."], "...": "..."},
+  {"engine": "llama.cpp", "supported": false, "warnings": ["vision models need an mmproj file, ..."], "...": "..."}]}
+```
+
+- `model.task`: `generate`, `embedding` hoặc `rerank`; `quant`: `quantization_config.quant_method` của repo.
+- `supported`: engine có phục vụ được model này không. `servers`: các server có agent chạy engine đó.
+- `fits_now`: câu trả lời của scheduler tại thời điểm hỏi (null: không kiểm tra, vì engine không hỗ trợ, không có
+  server nào cài, hoặc `needs_conversion`). `needs_conversion`: llama.cpp cho một repo, sau khi chuyển sang GGUF.
+- `options` xếp từ phù hợp nhất; `recommended` là phương án được hỗ trợ đầu tiên (null nếu không có).
 
 ### `POST /api/recommend`
 
@@ -673,7 +699,7 @@ file, `502` tải lỗi.
 
 ## 11. Chỉ mục route
 
-Cả 51 route, để kiểm tra đầy đủ:
+Cả 57 route, để kiểm tra đầy đủ:
 
 | # | Method | Đường dẫn | Mục |
 | --- | --- | --- | --- |
@@ -729,6 +755,11 @@ Cả 51 route, để kiểm tra đầy đủ:
 | 50 | POST | `/api/convert/{job_id}/accept` | 12 |
 | 51 | DELETE | `/api/convert/{job_id}` | 12 |
 | 52 | DELETE | `/api/events` | 8 |
+| 53 | POST | `/v1/embeddings` | 1 |
+| 54 | POST | `/v1/responses` | 1 |
+| 55 | POST | `/v1/rerank` | 1 |
+| 56 | POST | `/v1/score` | 1 |
+| 57 | POST | `/api/engines/recommend` | 6 |
 
 Số lượng khớp với các decorator route tìm thấy trong code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
 

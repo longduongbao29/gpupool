@@ -113,6 +113,26 @@ Tệp requirements có thể kéo thêm các gói gián tiếp (ví dụ hugging
 requests, tqdm); theo upstream chúng đều dùng giấy phép cho phép (Apache-2.0, MIT, BSD). Bản wheel PyTorch đóng gói
 các thành phần bên thứ ba kèm thông báo riêng; xem <https://github.com/pytorch/pytorch/blob/main/LICENSE> và `NOTICE`.
 
+## Engine suy luận (image agent `-all`, build với `WITH_ENGINES=1`)
+
+Image agent `-all` chứa hai virtualenv riêng, `/opt/engines/vllm` và `/opt/engines/sglang`, cài từ PyPI. Giấy phép ghi
+theo upstream (metadata trên PyPI); xem danh sách chính xác trong image bằng
+`docker run --rm --entrypoint /opt/engines/vllm/bin/python <image> -m pip list` (tương tự với `sglang`).
+
+| Gói | Phiên bản | Giấy phép (theo upstream) |
+| --- | --- | --- |
+| vllm | 0.30.0 | Apache-2.0 |
+| sglang | 0.5.20 | Apache-2.0 |
+| torch | 2.13.0 | BSD-3-Clause (kèm các thành phần đóng gói: Apache-2.0, BSD-2-Clause, BSL-1.0, MIT) |
+| flashinfer-python | 0.6.18 / 0.6.18.post1 | Apache-2.0 |
+| transformers | 5.20.0 (vLLM) / 5.12.1 (SGLang) | Apache-2.0 |
+| triton | 3.7.1 | MIT |
+
+Chúng kéo thêm vài trăm gói khác, theo upstream đều dùng giấy phép cho phép (Apache-2.0, MIT, BSD), cùng các wheel CUDA
+runtime của NVIDIA (`nvidia-*`: cuBLAS, cuDNN, NCCL...), dùng NVIDIA Software License Agreement / CUDA EULA chứ không phải
+giấy phép mã nguồn mở: chúng được phân phối lại nguyên như PyPI phát hành, không sửa đổi. Các model mà những engine này
+phục vụ không thuộc phạm vi nào ở đây (xem "Mô hình không thuộc phạm vi giấy phép này").
+
 ## Công cụ và image nền
 
 | Thành phần | Giấy phép | Ghi chú |

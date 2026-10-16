@@ -22,6 +22,38 @@ model vừa một server. Giữ llama.cpp khi cần gộp bộ nhớ nhiều ser
 
 ## Chuẩn bị GPU server
 
+### Một container chứa mọi engine
+
+Image `gpupool-agent` có hai bản:
+
+| Tag | Engine | Dung lượng |
+| --- | --- | --- |
+| `gpupool-agent:<version>` | llama.cpp | ~2 GB |
+| `gpupool-agent:<version>-all` | llama.cpp, vLLM, SGLang | vài chục GB |
+
+Bản `-all` cài vLLM và SGLang vào hai virtualenv (`/opt/engines/vllm`, `/opt/engines/sglang`: hai engine pin phiên bản
+khác nhau cho các package dùng chung) và đặt sẵn `GPUPOOL_VLLM_CMD` / `GPUPOOL_SGLANG_CMD`, nên agent đề xuất cả ba engine
+mà không cần cấu hình gì. Chạy giống image thường, thêm `--ipc host` (các worker tensor-parallel trao đổi dữ liệu qua
+`/dev/shm`):
+
+```bash
+docker run -d --name gpupool-agent --gpus all --network host --pid host --ipc host -v gpupool-agent:/data \
+  -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster_token>" -e HF_TOKEN \
+  ghcr.io/longduongbao29/gpupool-agent:latest-all
+```
+
+Wheel của các engine mang theo thư viện CUDA riêng: các phiên bản đã pin (vLLM 0.30.0, SGLang 0.5.20, PyTorch 2.13 cho
+CUDA 13) cần **driver NVIDIA >= 580**; phần llama.cpp vẫn chạy trên driver cũ hơn. Tự build, hoặc dùng phiên bản khác
+hay CUDA cũ hơn:
+
+```bash
+docker build -f docker/agent.Dockerfile --build-arg WITH_ENGINES=1 \
+  --build-arg VLLM_VERSION=0.30.0 --build-arg SGLANG_VERSION=0.5.20 \
+  --build-arg VLLM_PIP_ARGS="--extra-index-url <index wheel cu128>" -t gpupool-agent:all .
+```
+
+### Tự cài engine
+
 Agent không cài vLLM hay SGLang. Agent chạy một lệnh nếu lệnh đó có trên server, và báo engine cho coordinator
 (`engine:vllm`, `engine:sglang` trong features của server). Model của engine nào chỉ được đặt lên server báo engine đó.
 
@@ -40,8 +72,22 @@ python3 -m venv /opt/vllm && /opt/vllm/bin/pip install vllm
 GPUPOOL_VLLM_CMD="/opt/vllm/bin/vllm serve" gpupool agent --llama-dir /opt/llama --join "http://coordinator:8080#<token>"
 ```
 
-Image agent chỉ có llama.cpp (vLLM và SGLang kéo theo CUDA, PyTorch riêng và vài GB wheel): cài engine vào môi trường
-của agent, hoặc trỏ lệnh tới một wrapper.
+Với image thường, cài engine vào môi trường của agent, hoặc trỏ lệnh tới một wrapper.
+
+## Chọn engine
+
+Form model gợi ý engine ngay khi bạn điền (`POST /api/engines/recommend`, xem [API.vi.md](API.vi.md)), còn quyết định
+vẫn là của bạn. Với mỗi engine, form cho biết engine có hỗ trợ model không, server nào chạy engine đó, và model có vừa
+phần VRAM đang trống không, xếp theo mức phù hợp:
+
+- GGUF trong thư viện: llama.cpp (vLLM và SGLang phục vụ repo Hugging Face);
+- repo Hugging Face: vLLM, rồi SGLang, khi có server chạy chúng và model vừa một server; VLM, checkpoint AWQ/GPTQ hay
+  model embedding/rerank không được đề xuất cho llama.cpp (gpupool không chuyển đổi hay phục vụ chúng bằng llama.cpp);
+- model văn bản không vừa server nào: llama.cpp sau khi chuyển sang GGUF (nút **Convert to GGUF** mở trình chuyển đổi
+  với repo đã điền sẵn), vì chỉ llama.cpp chia được model qua nhiều server.
+
+Phần gợi ý đọc `config.json` và danh sách file của repo (không tải trọng số), và lập kế hoạch bằng chính scheduler dùng
+khi launch.
 
 ## Thêm model
 

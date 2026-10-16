@@ -388,6 +388,7 @@ All under `/api`, admin key. None of them changes the cluster.
 | --- | --- | --- |
 | GET | `/api/capacity` | per-GPU free memory, bandwidth, busyness and tenants |
 | POST | `/api/recommend` | rank GPUs/servers for a model before deploying it |
+| POST | `/api/engines/recommend` | which engine to serve a model with (support, servers, fit) |
 | POST | `/api/simulate` | what the reconciler would do under hypothetical spec changes |
 
 ### `GET /api/capacity`
@@ -402,6 +403,31 @@ All under `/api`, admin key. None of them changes the cluster.
 
 `free_for_new_mb` is 0 for a disabled GPU or a dead node; `reserved_mb = usable_mb - free_for_new_mb`.
 `summary` counts CUDA devices only.
+
+### `POST /api/engines/recommend`
+
+Which engine to serve a model with, before deploying it. Changes nothing. Body: `file` (a ready library GGUF) or
+`hf_repo` (`owner/name[@revision]`), plus `ctx_size` (4096), `parallel` (1), `priority` (50), `pin_devices` ([]) used
+to check the fit. 422 without a source, for a file that is not a ready library item, or when the repo's
+`config.json` cannot be read (read once per repo and cached).
+
+```json
+{"model": {"kind": "hf", "task": "generate", "vision": true, "quant": null, "arch": "Qwen2_5_VLForConditionalGeneration"},
+ "recommended": "vllm",
+ "options": [
+  {"engine": "vllm", "label": "vLLM", "supported": true, "score": 100, "servers": ["gpu-1"], "fits_now": true,
+   "needs_conversion": false, "reasons": ["fits now on 1 GPU(s) of gpu-1, ~41 tok/s", "..."], "warnings": [],
+   "placement": {"tier": "single_gpu", "head_node": "gpu-1", "est_total_mb": 19235, "est_decode_tps": 41.0,
+                 "devices": ["gpu-1/CUDA0"]}},
+  {"engine": "sglang", "supported": true, "servers": [], "fits_now": null, "warnings": ["no server runs SGLang: ..."], "...": "..."},
+  {"engine": "llama.cpp", "supported": false, "warnings": ["vision models need an mmproj file, ..."], "...": "..."}]}
+```
+
+- `model.task`: `generate`, `embedding` or `rerank`; `quant`: `quantization_config.quant_method` of the repo.
+- `supported`: whether the engine can serve this model at all. `servers`: servers whose agent runs the engine.
+- `fits_now`: the scheduler's answer right now (null: not checked, because the engine is unsupported, installed
+  nowhere, or `needs_conversion`). `needs_conversion`: llama.cpp for a repo, after converting it to GGUF.
+- `options` are best first; `recommended` is the first supported one (null when none is).
 
 ### `POST /api/recommend`
 
@@ -680,7 +706,7 @@ cache if missing; split GGUF parts are fetched together. Returns `{"path": "..."
 
 ## 11. Route index
 
-All 51 routes, for a completeness check:
+All 57 routes, for a completeness check:
 
 | # | Method | Path | Section |
 | --- | --- | --- | --- |
@@ -736,6 +762,11 @@ All 51 routes, for a completeness check:
 | 50 | POST | `/api/convert/{job_id}/accept` | 12 |
 | 51 | DELETE | `/api/convert/{job_id}` | 12 |
 | 52 | DELETE | `/api/events` | 8 |
+| 53 | POST | `/v1/embeddings` | 1 |
+| 54 | POST | `/v1/responses` | 1 |
+| 55 | POST | `/v1/rerank` | 1 |
+| 56 | POST | `/v1/score` | 1 |
+| 57 | POST | `/api/engines/recommend` | 6 |
 
 The count matches the route decorators found in the code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
 

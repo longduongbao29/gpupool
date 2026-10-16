@@ -24,6 +24,13 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
   `engine` / `hf_repo` trong `/api/recommend` và `/api/simulate`. UI: lựa chọn **Engine** trong form model; **New
   model** dùng được cả khi thư viện trống.
 - Router: `/v1/embeddings`, `/v1/responses`, `/v1/rerank` và `/v1/score` được chuyển tiếp như chat completions.
+- **Gợi ý engine.** Form model gợi ý engine khi bạn điền và để bạn tự chọn: với mỗi engine, cho biết có hỗ trợ model
+  không (GGUF, VLM, AWQ/GPTQ, embedding...), server nào chạy engine đó và model có vừa ngay lúc này không; model văn bản
+  không vừa server nào được gợi ý dùng llama.cpp sau khi chuyển sang GGUF (nút **Convert to GGUF** mở trình chuyển đổi).
+  `POST /api/engines/recommend`.
+- **`gpupool-agent:<version>-all`**: một image agent chứa llama.cpp, vLLM 0.30.0 và SGLang 0.5.20 (hai virtualenv trong
+  `/opt/engines`, file trùng được hardlink), lệnh của engine đã đặt sẵn. Build từ `docker/agent.Dockerfile` với
+  `--build-arg WITH_ENGINES=1`; các engine cần driver NVIDIA >= 580. Chỉ phát hành cùng các bản release.
 
 ### Thay đổi
 

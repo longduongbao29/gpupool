@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,10 +19,13 @@ from gpupool.common.models import (
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
+from gpupool.coordinator.engine_advice import ModelFacts, facts_from_config, supported_engines
+from gpupool.coordinator.engine_advice import recommend as advise
 from gpupool.coordinator.store import ServerRecord, config_key, gpu_key, planning_factor
 from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
+from gpupool.scheduler.tp_placement import has_engine
 from gpupool.scheduler.tp_placement import need_mb as tp_need_mb
 from gpupool.scheduler.scoring import speed_model
 
@@ -148,6 +152,17 @@ class SimulateBody(BaseModel):
     add: list[SimAdd] = Field(default_factory=list)
 
 
+class EngineAdviceBody(BaseModel):
+    """What to serve (a library GGUF or a Hugging Face repo) and how big: which engine fits it."""
+
+    file: str | None = None
+    hf_repo: str | None = None
+    ctx_size: int = Field(default=4096, ge=1)
+    parallel: int = Field(default=1, ge=1)
+    priority: int = Field(default=50, ge=0, le=100)
+    pin_devices: list[str] = Field(default_factory=list)
+
+
 class StartBody(BaseModel):
     replicas: int = Field(default=1, ge=1)
 
@@ -218,8 +233,10 @@ async def drain_and_delete_model(store, reconciler, name: str) -> None:
 
 
 def make_api_router(*, store, reconciler, poller, balancer, library, cfg: CoordinatorConfig,
-                    admin_dep, notifier=None, autoscaler=None) -> APIRouter:
-    """`admin_dep` may be a callable or an already-built Depends(...)."""
+                    admin_dep, notifier=None, autoscaler=None, hf=None,
+                    convert_ok: Callable[[], bool] | None = None) -> APIRouter:
+    """`admin_dep` may be a callable or an already-built Depends(...). `hf`: converter.source.HfClient
+    (engine advice reads a repo's config.json); `convert_ok`: the GGUF conversion toolchain is there."""
     dep = admin_dep if isinstance(admin_dep, params.Depends) else Depends(admin_dep)
     router = APIRouter(prefix="/api", dependencies=[dep])
     notifier = notifier or reconciler.notifier
@@ -867,6 +884,57 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "not_possible": not_possible,
             "tips": tips,
         }
+
+    # ------------------------------------------------------------------ engine advice
+    facts_cache: dict[str, ModelFacts] = {}
+
+    async def hf_facts(source: str) -> ModelFacts:
+        if source in facts_cache:
+            return facts_cache[source]
+        if hf is None:
+            raise HTTPException(503, "no Hugging Face client on this coordinator")
+        repo, rev = parse_hf_source(source)
+        try:
+            files = await hf.list_files(repo, rev or "main")
+            config = await hf.fetch_json(repo, rev or "main", "config.json")
+        except Exception as e:
+            msg = getattr(e, "message", None) or f"{type(e).__name__}: {e}"
+            raise HTTPException(422, f"cannot read {source}: {msg}") from e
+        facts = facts_cache[source] = facts_from_config(config, [f.name for f in files], repo)
+        return facts
+
+    @router.post("/engines/recommend")
+    async def recommend_engine(body: EngineAdviceBody) -> dict:
+        """Which engine to serve a model with: every engine with whether it supports the model, which
+        servers run it and whether it fits right now, best first. Changes nothing."""
+        if body.hf_repo:
+            source = hf_source(body.hf_repo)
+            facts = await hf_facts(source)
+        elif body.file:
+            item = library.get(body.file)
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {body.file!r} is not a ready library item")
+            source, facts = COORD_PREFIX + body.file, ModelFacts(kind="gguf")
+        else:
+            raise HTTPException(422, "file or hf_repo is required")
+        reports = reconciler.available_reports()
+        servers = {"llama.cpp": [r.node_id for r in reports]}
+        for e in HF_ENGINES:
+            servers[e] = [r.node_id for r in reports if has_engine(r, e)]
+        can_convert = bool(convert_ok()) if convert_ok is not None else False
+        fits: dict = {}
+        for engine, (ok, *_) in supported_engines(facts, can_convert).items():
+            if not ok or not servers.get(engine) or (facts.kind == "hf" and engine == DEFAULT_ENGINE):
+                continue  # unsupported, nowhere to run, or no GGUF to plan with yet
+            spec = ModelSpec(name="engine-advice", source=source, engine=engine, ctx_size=body.ctx_size,
+                             parallel=body.parallel, priority=body.priority, pin_devices=body.pin_devices)
+            try:
+                got = await reconciler.rank_for(spec, 1)
+            except Exception:
+                log.exception("engine advice: ranking %s on %s failed", source, engine)
+                got = []
+            fits[engine] = got[0] if got else None
+        return advise(facts, servers, fits, can_convert)
 
     # ------------------------------------------------------------------ events
     @router.get("/events")

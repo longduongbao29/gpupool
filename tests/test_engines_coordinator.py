@@ -283,3 +283,104 @@ async def test_router_forwards_more_openai_endpoints(path):
         r = await c.post(path, json={"model": "m", "input": "hello"})
     assert r.status_code == 200 and paths == [path]
     assert "cache_prompt" not in bodies[0]  # only generation requests get it
+
+
+# ---------------------------------------------------------------- engine advice
+from gpupool.converter.models import SourceFile  # noqa: E402
+from gpupool.coordinator.engine_advice import ModelFacts, facts_from_config  # noqa: E402
+from gpupool.coordinator.engine_advice import recommend as advise  # noqa: E402
+
+
+def test_facts_from_config():
+    vl = facts_from_config({**QWEN_VL, "architectures": ["Qwen2_5_VLForConditionalGeneration"]}, ["config.json"])
+    assert (vl.task, vl.vision, vl.quant) == ("generate", True, None)
+    awq = facts_from_config({"architectures": ["Qwen2ForCausalLM"], "quantization_config": {"quant_method": "AWQ"}}, [])
+    assert awq.quant == "awq" and awq.task == "generate"
+    emb = facts_from_config({"architectures": ["XLMRobertaModel"]}, ["modules.json"])
+    rr = facts_from_config({"architectures": ["XLMRobertaForSequenceClassification"]}, [], "BAAI/bge-reranker-v2-m3")
+    assert emb.task == "embedding" and rr.task == "rerank"
+
+
+def _placement():
+    return plan(VL_META, vspec(), [server("a", [gpu(0, 20000)])], "r1", lambda n: 9001)
+
+
+def test_advice_for_a_gguf_is_llama_cpp():
+    r = advise(ModelFacts(kind="gguf"), {"llama.cpp": ["a"], "vllm": ["a"]}, {"llama.cpp": None}, True)
+    assert r["recommended"] == "llama.cpp"
+    by = {o["engine"]: o for o in r["options"]}
+    assert not by["vllm"]["supported"] and not by["sglang"]["supported"]
+    assert by["llama.cpp"]["fits_now"] is False and "does not fit" in by["llama.cpp"]["warnings"][0]
+
+
+def test_advice_prefers_an_installed_engine_that_fits():
+    facts = ModelFacts(kind="hf")
+    r = advise(facts, {"llama.cpp": ["a"], "vllm": ["a"], "sglang": []}, {"vllm": _placement()}, True)
+    assert r["recommended"] == "vllm"
+    by = {o["engine"]: o for o in r["options"]}
+    assert by["vllm"]["fits_now"] and by["vllm"]["placement"]["devices"] == ["a/CUDA0"]
+    assert "-all" in by["sglang"]["warnings"][0] and by["llama.cpp"]["needs_conversion"]
+    # SGLang wins when it is the one that is installed and fits
+    r = advise(facts, {"llama.cpp": ["a"], "vllm": [], "sglang": ["a"]}, {"sglang": _placement()}, True)
+    assert r["recommended"] == "sglang"
+
+
+def test_advice_falls_back_to_conversion_when_no_server_fits():
+    r = advise(ModelFacts(kind="hf"), {"llama.cpp": ["a", "b"], "vllm": ["a"], "sglang": ["a"]},
+               {"vllm": None, "sglang": None}, True)
+    assert r["recommended"] == "llama.cpp" and r["options"][0]["needs_conversion"]
+    # ...but never for what gpupool cannot convert or llama.cpp cannot serve
+    for facts in (ModelFacts(kind="hf", vision=True), ModelFacts(kind="hf", quant="awq"),
+                  ModelFacts(kind="hf", task="embedding")):
+        r = advise(facts, {"llama.cpp": ["a"], "vllm": ["a"], "sglang": []}, {"vllm": None}, True)
+        assert r["recommended"] == "vllm", facts
+        assert not {o["engine"]: o for o in r["options"]}["llama.cpp"]["supported"]
+    r = advise(ModelFacts(kind="hf"), {"llama.cpp": ["a"], "vllm": [], "sglang": []}, {}, False)
+    assert {o["engine"]: o for o in r["options"]}["llama.cpp"]["supported"] is False  # no toolchain
+
+
+class FakeHf:
+    def __init__(self):
+        self.calls = 0
+
+    async def list_files(self, repo, rev):
+        self.calls += 1
+        if "missing" in repo:
+            raise RuntimeError("not found")
+        return [SourceFile(name="config.json", bytes=10), SourceFile(name="model.safetensors", bytes=16 * GB)]
+
+    async def fetch_json(self, repo, rev, file):
+        return {**QWEN_VL, "architectures": ["Qwen2_5_VLForConditionalGeneration"]}
+
+
+async def test_engine_recommend_api():
+    cfg = make_cfg(admin_key="adm", cluster_token="ctok")
+    rec, store, clock = make_reconciler(cfg=cfg, planner=plan)
+    rec.ranker = rank
+
+    async def meta_for(spec):
+        return VL_META
+
+    rec.meta_for = meta_for
+    hf = FakeHf()
+    app = FastAPI()
+    app.include_router(make_api_router(store=store, reconciler=rec, poller=FakePoller(), balancer=Balancer(),
+                                       library=FakeLibrary(item()), cfg=cfg, admin_dep=Depends(require_bearer("adm")),
+                                       hf=hf, convert_ok=lambda: True))
+    beat(store, clock, server("a", [gpu(0, 20000)], engines=("vllm",)), server("b", [gpu(0, 20000)], engines=()))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", headers=AD) as c:
+        r = await c.post("/api/engines/recommend", json={"hf_repo": "Qwen/Qwen2.5-VL-7B-Instruct", "ctx_size": 8192})
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["recommended"] == "vllm" and j["model"]["vision"] is True
+        by = {o["engine"]: o for o in j["options"]}
+        assert by["vllm"]["servers"] == ["a"] and by["vllm"]["fits_now"] is True
+        assert by["sglang"]["servers"] == [] and by["llama.cpp"]["supported"] is False
+        await c.post("/api/engines/recommend", json={"hf_repo": "Qwen/Qwen2.5-VL-7B-Instruct"})
+        assert hf.calls == 1  # config.json is read once per repo
+        r = await c.post("/api/engines/recommend", json={"file": "x.gguf"})
+        assert r.status_code == 200 and r.json()["recommended"] == "llama.cpp"
+        assert (await c.post("/api/engines/recommend", json={"hf_repo": "a/missing"})).status_code == 422
+        assert (await c.post("/api/engines/recommend", json={})).status_code == 422
+        assert (await c.post("/api/engines/recommend", json={"file": "nope.gguf"})).status_code == 422
+    await rec.shutdown()

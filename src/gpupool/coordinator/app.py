@@ -268,7 +268,8 @@ def create_app(
     app.include_router(make_api_router(store=store, reconciler=reconciler, poller=poller,
                                        balancer=balancer, library=library, cfg=cfg,
                                        admin_dep=admin_auth, notifier=notifier,
-                                       autoscaler=autoscaler))
+                                       autoscaler=autoscaler, hf=hf,
+                                       convert_ok=lambda: convert_manager.available() is None))
 
     # ---- conversion
     def cluster_vram() -> ClusterVram:
