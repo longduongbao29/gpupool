@@ -919,13 +919,13 @@ async def test_state_shows_the_speed_model(env):
     assert (await c.get("/api/state")).json()["speed_model"] == {"eta": 0.62, "hop_ms": 0.7}
 
 
-async def test_failure_newer_than_the_ready_replica_is_listed(env):
+async def test_failed_replicas_are_not_listed(env):
     c, store, rec, _, clock, _ = env
     store.put_model(SPEC.model_copy(update={"replicas": 2}))
     put_replica(store, "m-live", state="ready", now=1.0)
     put_replica(store, "m-bad", state="failed", now=2.0, head_port=9001)
     m = model_state((await c.get("/api/state")).json())
-    assert [r["replica_id"] for r in m["replicas"]] == ["m-live", "m-bad"]
+    assert [r["replica_id"] for r in m["replicas"]] == ["m-live"]
 
 
 async def test_delete_replica_only_removes_terminal_ones(env):
@@ -947,12 +947,11 @@ async def test_delete_replica_also_forgets_older_failures(env):
     put_replica(store, "m-new", state="failed", now=3.0)
     put_replica(store, "m-newer", state="failed", now=4.0)
     put_replica(store, "o-old", model="other", state="failed", now=1.0)
-    assert [r["replica_id"] for r in model_state((await c.get("/api/state")).json())["replicas"]] == ["m-newer"]
     assert (await c.delete("/api/models/m/replicas/m-new")).status_code == 200
     assert [r.replica_id for r in store.list_replicas(model="m")] == ["m-newer"]
     assert store.get_replica("o-old") is not None
     assert (await c.delete("/api/models/m/replicas/m-newer")).status_code == 200
-    assert model_state((await c.get("/api/state")).json())["replicas"] == []
+    assert store.list_replicas(model="m") == []
 
 
 async def test_config_history_lists_reruns_and_deletes(env):

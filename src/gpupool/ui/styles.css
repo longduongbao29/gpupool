@@ -545,7 +545,6 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .rep .chips { display: flex; order: 5; flex: 1 0 100%; gap: var(--s-1); flex-wrap: wrap; min-width: 0; padding-left: 16px; }
 .rep .tps { font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; margin-left: auto; order: 3; }
 .rep .mark { order: 2; }
-.rep .rep-del { order: 4; width: 24px; height: 24px; min-height: 0; padding: 0; }
 .rep .rep-stage { order: 6; flex: 1 0 100%; padding-left: 16px; margin-top: 0; overflow-wrap: anywhere; }
 .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
 .sdot.green { background: var(--success); }
@@ -621,6 +620,10 @@ h3.sec { font-size: var(--fs-sm); font-weight: 600; margin: var(--s-4) 0 var(--s
 .tip { display: flex; align-items: flex-start; gap: var(--s-2); }
 .tip .grow { min-width: 0; }
 .hist-list { display: flex; flex-direction: column; gap: var(--s-2); }
+.fail-title { color: var(--danger-text); font-weight: 600; font-size: var(--fs-sm); max-width: 100%; overflow-wrap: anywhere; }
+.fail-box { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; max-width: 100%; }
+.hist-list .opt { min-width: 0; overflow-wrap: anywhere; }
+.fail-box .errbox { align-self: stretch; max-height: 220px; overflow: auto; }
 .hist-sum { word-break: break-word; color: var(--text); }
 .opt .reasons { margin: 2px 0 0; padding-left: var(--s-5); font-size: var(--fs-xs); color: var(--text-muted); }
 .result.warn, .warn { background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent); color: var(--warning-text); }

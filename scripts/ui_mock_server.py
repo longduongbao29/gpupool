@@ -4,8 +4,8 @@
 
 Everything is in memory and driven by wall-clock time: GPU utilization fluctuates, a download
 progresses, models walk stopped -> starting -> running. About 30 s after start, server
-CTG-Server-2 "dies" (events node_offline, realloc_started, realloc_done) and at ~50 s one GPU of
-CTG-Server-1 vanishes (gpu_missing). POST /api/_mock/kill/{node_id} triggers the outage by hand.
+server-2 "dies" (events node_offline, realloc_started, realloc_done) and at ~50 s one GPU of
+server-1 vanishes (gpu_missing). POST /api/_mock/kill/{node_id} triggers the outage by hand.
 Setting ctx_size above 32768 makes /plan answer 409 (does not fit). POST /api/recommend answers with
 ranked options normally and with `not_possible` when the estimated need exceeds the biggest server
 (e.g. ctx_size 131072 on the 8B file, about 3 MB per context token). GET /api/capacity mirrors the live GPU numbers.
@@ -22,7 +22,7 @@ A `preempted` warning event is seeded.
 Playground: GET /v1/models and POST /v1/chat/completions (stream or not) answer like the real router, with
 x-gpupool-replica, llama-server's `timings` and a cold start for "chat-demand"; "/think" and "/long" in a message
 add a reasoning preamble / a longer reply.
-llama.cpp builds: CTG-Server-2 reports b11342, the others b11413 (a `llama_version_mismatch` warning is seeded).
+llama.cpp builds: server-2 reports b11342, the others b11413 (a `llama_version_mismatch` warning is seeded).
 Model files: GET /api/library/browse lists /models (host folder /srv/gguf) with an in-library file, a split part and a broken
 link; POST /api/library {path} accepts a listed file by its /models or /srv/gguf path and answers 400 with the long
 "No such file inside the coordinator ..." message for anything else.
@@ -31,7 +31,7 @@ draft_file (ready library file, required for "draft") and draft_n_max (1-16, def
 the model file, or a tokenizer mismatch (names starting with "llama" vs the others). Specs carry kv_cache_type, speculative, draft
 ("coordinator://<file>" or null) and draft_n_max; placements of draft models carry draft_est_mb. "chat-auto" is seeded with q8_0 + n-gram.
 POST /api/recommend and /api/simulate accept the same optional fields (q8_0 / q4_0 shrink the KV estimate).
-Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-auto" replica onto CTG-Server-1/CUDA0). With
+Rebalancing: POST /api/rebalance {dry_run} lists one qualifying move (a "chat-auto" replica onto server-1/CUDA0). With
 dry_run false it starts the move: a replacement replica appears (state starting), GET /api/state carries
 `rebalance.in_progress`, and ~20 s later the old replica is dropped (events rebalance_started, rebalanced). Afterwards the
 dry run answers with no moves ("all replicas are well placed"). `rebalance.next_run_ts` is 10 min after start.
@@ -124,15 +124,15 @@ def reset() -> None:
     MODELS.clear()
     CONFIGS.clear()
     LIBRARY.clear()
-    SERVERS["CTG-Server-1"] = _server("CTG-Server-1", "10.0.0.5", [
+    SERVERS["server-1"] = _server("server-1", "10.0.0.5", [
         _gpu(0, "NVIDIA H100 80GB", 81920, 0.0), _gpu(1, "NVIDIA H100 80GB", 81920, 1.3),
         _gpu(2, "NVIDIA H100 80GB", 81920, 2.1), _gpu(3, "NVIDIA H100 80GB", 81920, 3.4)], True, 262144)
-    SERVERS["CTG-Server-2"] = _server("CTG-Server-2", "10.0.0.6", [
+    SERVERS["server-2"] = _server("server-2", "10.0.0.6", [
         _gpu(0, "NVIDIA RTX 4090", 24576, 0.7, "550.54", "12.4"), _gpu(1, "NVIDIA RTX 4090", 24576, 2.5, "550.54", "12.4"),
         _gpu(2, "NVIDIA RTX 4090", 24576, 4.0, "550.54", "12.4")], True, 131072)
-    off = _server("CTG-Server-3", "10.0.0.7", [_gpu(0, "NVIDIA A100 40GB", 40960, 1.0)], False, 65536)
+    off = _server("server-3", "10.0.0.7", [_gpu(0, "NVIDIA A100 40GB", 40960, 1.0)], False, 65536)
     off["last_seen"] = T0 - 600
-    SERVERS["CTG-Server-3"] = off
+    SERVERS["server-3"] = off
     LIBRARY["qwen2.5-3b-q4.gguf"] = {"name": "qwen2.5-3b-q4.gguf", "path": "/data/models/qwen2.5-3b-q4.gguf", "source": "hf",
         "hf_repo": "Qwen/Qwen2.5-3B-Instruct-GGUF", "hf_file": "qwen2.5-3b-q4.gguf", "bytes": 2_000_000_000,
         "downloaded": 2_000_000_000, "status": "ready", "error": None, "created_at": T0 - 1000}
@@ -171,12 +171,12 @@ def reset() -> None:
     add_event("info", "scaled_up", "chat-auto scaled up to 2 replicas (busy 0.82 above target 0.70 for 30 s)", None, "chat-auto")
     add_event("warning", "preempted", "chat-batch-1a2b3c stopped to make room for chat-auto (priority 20 < 70)", None, "chat-batch")
     add_event("warning", "llama_version_mismatch",
-              "Servers run different llama.cpp builds (b11342: CTG-Server-2; b11413: CTG-Server-1, CTG-Server-3). "
+              "Servers run different llama.cpp builds (b11342: server-2; b11413: server-1, server-3). "
               "A model split over servers needs the same RPC protocol on all of them; builds of one gpupool release "
               "always match. If launches of split models fail, upgrade every agent to the same image.")
     add_event("warning", "rebalance_failed", "Rebalance of chat-batch aborted: replacement replica did not become ready in time", None, "chat-batch")
-    SCHEDULED.append((T0 + 30, lambda: kill("CTG-Server-2")))
-    SCHEDULED.append((T0 + 50, lambda: vanish_gpu("CTG-Server-1", "CUDA3")))
+    SCHEDULED.append((T0 + 30, lambda: kill("server-2")))
+    SCHEDULED.append((T0 + 50, lambda: vanish_gpu("server-1", "CUDA3")))
     if "seed_conversions" in globals():  # defined further down; at import time the first reset() runs before it exists
         seed_conversions()
 
@@ -252,7 +252,7 @@ def _place(m: dict, replicas: int = 1) -> None:
              if s["gpu_enabled"].get(g["device_id"], True) and _pinned(pins, s["node_id"], g["device_id"])]
     if not cands:
         raise HTTPException(409, "No enabled GPU is available")
-    cands.sort(key=lambda c: c[0] != "CTG-Server-2")  # prefer Server-2 so the outage demo has something to move
+    cands.sort(key=lambda c: c[0] != "server-2")  # prefer Server-2 so the outage demo has something to move
     chosen = cands[:2]
     m["replicas"] = [{"replica_id": f"{m['spec']['name']}-{i}a2b3c", "model": m["spec"]["name"], "state": "ready",
         "error": None, "outstanding": 0, "created_at": time.time(), "updated_at": time.time(),
@@ -286,7 +286,7 @@ def _draft_mb(draft: str | None) -> int | None:
 
 
 def _rebalance_moves() -> list[dict]:
-    """The one qualifying move of the mock: a chat-auto replica that would run better on CTG-Server-1/CUDA0."""
+    """The one qualifying move of the mock: a chat-auto replica that would run better on server-1/CUDA0."""
     m = MODELS.get("chat-auto")
     if REBAL["done"] or REBAL["in_progress"] or not m:
         return []
@@ -295,7 +295,7 @@ def _rebalance_moves() -> list[dict]:
         return []
     r = ready[-1]
     frm = [{"node_id": a["node_id"], "device_id": a["device_id"]} for a in r["placement"]["assignments"]]
-    to = [{"node_id": "CTG-Server-1", "device_id": "CUDA0"}]
+    to = [{"node_id": "server-1", "device_id": "CUDA0"}]
     if frm == to:
         return []
     return [{"replica_id": r["replica_id"], "model": m["spec"]["name"], "from": frm, "to": to, "current_score": 48.0,
@@ -356,8 +356,8 @@ def _server_json(s: dict) -> dict:
                     "free_mb": s["ram_total_mb"] - s["ram_used_mb"], "usable_mb": 0, "util_pct": None, "temp_c": None,
                     "power_w": None, "processes": [], "driver": None, "cuda": None})
     report = {"node_id": s["node_id"], "agent_url": s["agent_url"], "host": s["host"], "devices": devices, "engines": [],
-              # CTG-Server-2 runs an older build: the server list flags it (llama_version_mismatch)
-              "llama_version": "b11342" if s["node_id"] == "CTG-Server-2" else "b11413",
+              # server-2 runs an older build: the server list flags it (llama_version_mismatch)
+              "llama_version": "b11342" if s["node_id"] == "server-2" else "b11413",
               "features": ["rpc_multi_device", "spec_mtp", "kv_unified"],
               "models": [], "ts": s["last_seen"], "cpu_pct": s["cpu_pct"],
               "ram_used_mb": s["ram_used_mb"], "ram_total_mb": s["ram_total_mb"]}
@@ -510,8 +510,8 @@ def set_gpu(node_id: str, device_id: str, body: dict) -> dict:
     s = SERVERS.get(node_id)
     if not s or not any(g["device_id"] == device_id for g in s["gpus"]):
         raise HTTPException(404, "unknown GPU")
-    if device_id == "CUDA2" and node_id == "CTG-Server-1" and not body.get("enabled"):
-        raise HTTPException(409, "Mock: CUDA2 on CTG-Server-1 cannot be disabled (tests the optimistic revert)")
+    if device_id == "CUDA2" and node_id == "server-1" and not body.get("enabled"):
+        raise HTTPException(409, "Mock: CUDA2 on server-1 cannot be disabled (tests the optimistic revert)")
     s["gpu_enabled"][device_id] = bool(body.get("enabled"))
     return {"enabled": s["gpu_enabled"][device_id]}
 
@@ -747,7 +747,7 @@ def plan_model(name: str) -> dict:
     if m["spec"]["ctx_size"] > 32768:
         raise HTTPException(409, "Not enough free VRAM: needs 41.0 GB, pool has 120.5 GB usable but no single placement fits")
     pins = m["spec"]["pin_devices"]
-    chosen = _pin_devices(pins)[:3] or [("CTG-Server-1", "CUDA0"), ("CTG-Server-2", "CUDA0")]
+    chosen = _pin_devices(pins)[:3] or [("server-1", "CUDA0"), ("server-2", "CUDA0")]
     return _placement(name, chosen)
 
 

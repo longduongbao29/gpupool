@@ -244,13 +244,9 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             state = "stopped"
         if error is None and newest_failed is not None and state == "starting":
             error = newest_failed.error
-        # The newest failure is shown only while it is news: once a replica launched after it
-        # is serving, the failed attempt is history and listing it beside the live one only
-        # looked like a second copy of the model.
-        last_ready = max((r.created_at for r in reps if r.state == "ready"), default=None)
-        show_failed = newest_failed is not None and (last_ready is None or newest_failed.created_at > last_ready)
-        listed = active + ([newest_failed] if show_failed else [])
-        listed.sort(key=lambda r: (r.created_at, r.replica_id))
+        # Only live replicas are listed: failed attempts are history, kept in the config history
+        # (GET /models/{name}/configs) and surfaced here only as the model's state and error.
+        listed = sorted(active, key=lambda r: (r.created_at, r.replica_id))
         file = spec.source[len(COORD_PREFIX):] if spec.source.startswith(COORD_PREFIX) else None
         lo, hi = bounds(spec)
         avg_busy = autoscaler.view(spec.name).get("avg_busy") if autoscaler is not None else None
