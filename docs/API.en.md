@@ -535,7 +535,7 @@ Everything the web UI shows, in one call (admin key).
 | `error` | reason for `failed`, or the newest replica error while `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | the **VRAM self-calibration** block, `{"factor": 1.04, "samples": 3}`, or `null` until a replica of the model was measured. See below |
-| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: its config history entry) plus `outstanding` (requests in flight) and `stage` (`{text, since}` while a launch is under way: checking or downloading the model file with progress, starting RPC servers, loading with llama-server's latest log line; null otherwise). Lists live replicas and the newest failed one |
+| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: its config history entry) plus `outstanding` (requests in flight) and `stage` (`{text, since}` while a launch is under way: checking or downloading the model file with progress, starting RPC servers, loading with llama-server's latest log line; null otherwise). Lists live replicas only: failed attempts show in the config history, and the newest failure as the model's `state`/`error` |
 
 **`calibration`.** After a replica becomes ready, the coordinator asks the head's agent for what
 llama.cpp really allocated (`GET /engines/{engine_id}/memory`, section 10), compares it with the estimate

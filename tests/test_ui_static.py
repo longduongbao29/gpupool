@@ -208,7 +208,7 @@ def test_markdown_is_sanitized_before_it_reaches_the_page():
 
 
 def test_mock_events_contract(client, mock):
-    mock.kill("CTG-Server-2")
+    mock.kill("server-2")
     evs = client.get("/api/events?limit=10", headers=HEAD).json()
     assert evs and {"id", "ts", "level", "kind", "message", "node_id", "model", "read"} <= evs[0].keys()
     st = client.get("/api/state", headers=HEAD).json()
@@ -536,8 +536,8 @@ def test_mock_recommendation_follows_the_live_gpus(client, mock):
         return client.post("/api/convert/inspect", json={"hf_repo": "Qwen/Qwen2.5-72B-Instruct"}, headers=HEAD).json()["recommended"]
 
     before = rec()
-    for g in mock.SERVERS["CTG-Server-1"]["gpus"]:  # take the four 80 GB cards out of the pool: only the 24 GB cards remain
-        mock.SERVERS["CTG-Server-1"]["gpu_enabled"][g["device_id"]] = False
+    for g in mock.SERVERS["server-1"]["gpus"]:  # take the four 80 GB cards out of the pool: only the 24 GB cards remain
+        mock.SERVERS["server-1"]["gpu_enabled"][g["device_id"]] = False
     assert rec() != before
 
 

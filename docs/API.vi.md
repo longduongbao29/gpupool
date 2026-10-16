@@ -531,7 +531,7 @@ Mục trong `models[]`:
 | `error` | lý do của `failed`, hoặc lỗi của replica mới nhất khi đang `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | khối **tự hiệu chỉnh VRAM**, `{"factor": 1.04, "samples": 3}`, hoặc `null` cho tới khi một replica của model được đo. Xem bên dưới |
-| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: mục lịch sử config của nó) cộng `outstanding` (số request đang chạy) và `stage` (`{text, since}` khi đang launch: kiểm tra hoặc tải file model kèm tiến độ, khởi động RPC server, nạp model kèm dòng log mới nhất của llama-server; null khi không launch). Liệt kê replica còn sống và replica lỗi mới nhất |
+| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: mục lịch sử config của nó) cộng `outstanding` (số request đang chạy) và `stage` (`{text, since}` khi đang launch: kiểm tra hoặc tải file model kèm tiến độ, khởi động RPC server, nạp model kèm dòng log mới nhất của llama-server; null khi không launch). Chỉ liệt kê replica còn sống: các lần lỗi nằm trong lịch sử config, lần lỗi mới nhất thể hiện qua `state`/`error` của model |
 
 **`calibration`.** Khi một replica chuyển sang ready, coordinator hỏi agent của head xem llama.cpp thực sự
 đã cấp phát bao nhiêu (`GET /engines/{engine_id}/memory`, mục 10), so với ước lượng (trừ phần context

@@ -46,13 +46,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: rel
+        # Only the newest release gets `latest`: tag runs finish in any order, so an older tag
+        # pushed alongside a newer one must not move `latest` back to itself.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          newest=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' | grep -v -- - | sort -V | tail -1)
+          echo "latest=$([ "$newest" = "$GITHUB_REF_NAME" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/gpupool-coordinator
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ steps.rel.outputs.latest == 'true' }}
             type=sha
       - uses: docker/build-push-action@v6
         with:
@@ -97,13 +105,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: rel
+        # Only the newest release gets `latest`: tag runs finish in any order, so an older tag
+        # pushed alongside a newer one must not move `latest` back to itself.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          newest=$(git ls-remote --tags --refs origin 'v*' | sed 's#.*refs/tags/##' | grep -v -- - | sort -V | tail -1)
+          echo "latest=$([ "$newest" = "$GITHUB_REF_NAME" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/gpupool-agent
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ steps.rel.outputs.latest == 'true' }}
             type=sha
       - uses: docker/build-push-action@v6
         with:

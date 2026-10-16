@@ -210,7 +210,6 @@ function app() {
     toasts: [],
     toastSeq: 0,
     rep: {}, // model name -> replicas input for Start
-    openErr: {}, // model name -> error text expanded
     // events
     evOpen: false,
     evLast: null, // highest event id seen in this session (null until the first poll)
@@ -1330,6 +1329,44 @@ function app() {
       if (!d) return "No scaling decision yet";
       return d.action + " \u2014 " + (d.reason || "") + " (" + this.ago(d.ts) + ")";
     },
+    // A failure in plain words: { title, hint } from the raw error (an exception plus llama-server's
+    // last log lines). The raw text stays available as details (errDetails).
+    ERR_KINDS: [
+      [/cudaMalloc failed|out of memory|failed to allocate|\bOOM\b/i, "Out of GPU memory",
+        "The model, its context or its KV cache did not fit in VRAM. Lower the context size or parallel slots, use a smaller KV cache type (q8_0), or allow more GPUs."],
+      [/^NoFit|does not fit|cannot place|not enough (free )?(vram|memory|gpu)/im, "Not enough free GPU memory to place it",
+        "Stop another model to free a GPU, lower the context size, or allow more servers and GPUs."],
+      [/unknown model architecture|unsupported (model )?architecture/i, "Model architecture not supported",
+        "This llama.cpp build cannot run this model. Update the agents to a newer image."],
+      [/failed to load model|error loading model|invalid magic|gguf_init/i, "The model file could not be loaded",
+        "The GGUF file may be damaged or incomplete. Remove it from the library and download it again."],
+      [/no space left/i, "A server ran out of disk space", "Free disk space on the server named in the details."],
+      [/rpc.*(version|protocol)/i, "llama.cpp versions differ between servers", "Update every agent to the same image."],
+      [/not healthy after|not running after|timed? ?out/i, "The model did not become ready in time",
+        "Loading took longer than the launch timeout (a large model, or weights sent over the network). Check the log, or raise the launch timeout."],
+      [/node\(s\) dead|node \S+ unknown|ConnectError|connection refused|cannot reach/i, "A server went offline or could not be reached",
+        "Check that the agent on that server is running and reachable."],
+      [/coordinator restarted during launch/i, "The coordinator restarted during the launch", "It is retried automatically."],
+      [/launch cancelled/i, "The launch was cancelled", "It was stopped or replaced before it became ready."],
+      [/no free port|address already in use/i, "No free port on the server", "Another program holds the ports gpupool uses on that server."],
+      [/exited|exit=\d+|\bfailed\b/i, "llama-server stopped while starting", "The log in the details says why."],
+    ],
+    explainError: function (text) {
+      text = String(text || "");
+      var gaveUp = /^Stopped retrying/.test(text);
+      if (gaveUp) text = text.split("\n\n").slice(1).join("\n\n");  // classify the cause, not the notice
+      var hit = this.ERR_KINDS.find(function (k) { return k[0].test(text); });
+      var raw = (text.split("\n").filter(Boolean).pop() || "").split(" | ")[0];
+      var out = hit ? { title: hit[1], hint: hit[2] } : { title: raw.length > 90 ? raw.slice(0, 90) + "…" : raw, hint: "" };
+      if (gaveUp) out.hint = (out.hint ? out.hint + " " : "") + "gpupool stopped retrying: press Start or change the settings to try again.";
+      return out;
+    },
+    // The raw error laid out for reading: llama-server's log lines one per line.
+    errDetails: function (text) {
+      return String(text || "").split(" | head log: ").map(function (part, i) {
+        return i ? "llama-server log:\n" + part.split(" / ").join("\n") : part;
+      }).join("\n\n");
+    },
     modelError: function (m) {
       if (m.error) return m.error;
       var errs = (m.replicas || []).map(function (r) { return r.error; }).filter(Boolean);
@@ -1636,13 +1673,6 @@ function app() {
         await this.refresh();
       } catch (e) { this.fail(e); }
     },
-    // Forget a failed / stopped replica record: it holds no engine, only its row in the card.
-    deleteReplica: async function (m, rid) {
-      try {
-        await this.api("DELETE", "/api/models/" + encodeURIComponent(m.spec.name) + "/replicas/" + encodeURIComponent(rid));
-        await this.refresh();
-      } catch (e) { this.fail(e); }
-    },
     deleteModel: async function (m) {
       if (!(await this.confirmBox("Delete the deployment \"" + m.spec.name + "\"?\n\nIts replicas are stopped and its settings removed. The model file stays in the library.", { ok: "Stop and delete", danger: true }))) return;
       try {
@@ -1666,6 +1696,14 @@ function app() {
     histModel: function () {
       var n = this.hist.name;
       return ((this.st && this.st.models) || []).find(function (m) { return m.spec.name === n; }) || null;
+    },
+    // The deployment's current problem when no history entry explains it (e.g. it never fit, so
+    // nothing was launched): shown at the top of the dialog.
+    histProblem: function () {
+      var m = this.histModel();
+      if (!m || m.state !== "failed" || !this.modelError(m)) return "";
+      var cur = this.hist.items.find(function (c) { return c.current; });
+      return cur && cur.last_result === "failed" ? "" : this.modelError(m);
     },
     histVal: function (k, v) {
       if (v == null || v === "") return this.dash;

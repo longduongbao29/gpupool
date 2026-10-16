@@ -2293,14 +2293,16 @@ async def test_port_held_by_another_process_is_skipped_on_the_next_launch(mock_h
     store.put_model(SPEC)
     await rec.tick()
     await settle(rec)
-    first = store.list_replicas()[0]
-    assert first.state == "failed" and "not available" in first.error
+    assert store.list_replicas() == []  # not kept as a failed attempt
     await rec.tick()  # no backoff: relaunched right away, on another port
     await settle(rec)
-    second = [r for r in store.list_replicas() if r.replica_id != first.replica_id][0]
+    [second] = store.list_replicas()
     assert second.state == "ready"
     assert second.placement.head_port != client.busy
-    assert any(e.kind == "port_busy" for e in store.list_events())
+    events = store.list_events()
+    assert [e.level for e in events if e.kind == "port_busy"] == ["info"]  # no toast
+    assert not any(e.kind == "launch_failed" for e in events)
+    assert all(c.failed == 0 for c in store.list_configs("m"))
     await rec.shutdown()
 
 

@@ -8,6 +8,23 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-10-16
+
+### Changed
+
+- Model cards no longer list failed replicas. A failed deployment shows a short reason ("Out of GPU memory") and a
+  **Why it failed** link that opens its config history, where each failure is explained in plain words with a hint
+  on how to fix it, and the raw error and llama-server log lines are one click away (**Show details**).
+- A port held by another process is no longer reported as a launch failure: gpupool already skips it and relaunches
+  on another port at once. The attempt leaves no failed replica, no `launch_failed` error and no failure in the
+  config history; `port_busy` is now an info event (no toast), reported once per server and port.
+
+### Fixed
+
+- The `latest` Docker image tag now always points to the newest release. Release builds finish in any order, so
+  pushing an older tag together with a newer one (v0.9.7 and v0.9.8) moved `latest` back to the older version; a
+  release build now tags `latest` only when its tag is the highest `v*` tag.
+
 ## [0.9.8] - 2026-10-16
 
 ### Added

@@ -230,6 +230,7 @@ class Reconciler:
         # The coordinator only knows the ports it handed out, so without this it would pick the
         # same busy port on every retry and the model would never start.
         self._busy_ports: dict[str, dict[int, float]] = {}
+        self._busy_noticed: set[tuple[str, int]] = set()  # (node, port) already reported once
         # (event kind, model) -> (what failed, when last notified, retries not notified since)
         self._repeats: dict[tuple[str, str], tuple[str, float, int]] = {}
         self._suspect: set[str] = set()
@@ -1441,6 +1442,13 @@ class Reconciler:
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", "launch cancelled", now=self.clock())
             raise
+        except _PortTaken as e:
+            # Not a failure: the port is now skipped and the next tick relaunches on another one.
+            # The record goes, so it never shows as a failed attempt.
+            log.info("launch of %s retried on another port: %s", rid, e)
+            await asyncio.shield(self._rollback(created))
+            self.store.delete_replica(rid, {"launching"})
+            self.wake()
         except Exception as e:  # not BaseException: KeyboardInterrupt/SystemExit must propagate
             err = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             if head_url:
@@ -1452,11 +1460,9 @@ class Reconciler:
                     pass
             log.warning("launch of %s failed: %s", rid, err)
             now = self.clock()
-            retry = ""
-            if not isinstance(e, _PortTaken):  # a busy port is now skipped: retry at once on another
-                n, delay = self._bump_backoff(spec.name, now)
-                retry = (f"; retrying in {delay:.0f} s (attempt {n + 1})" if n < self.MAX_LAUNCH_FAILURES
-                         else "; not retried again until it is started or its settings change")
+            n, delay = self._bump_backoff(spec.name, now)
+            retry = (f"; retrying in {delay:.0f} s (attempt {n + 1})" if n < self.MAX_LAUNCH_FAILURES
+                     else "; not retried again until it is started or its settings change")
             # what failed, without the replica id or the head log's timestamps: the same failure on
             # the next attempt must compare equal
             sig = _failure_sig(f"{type(e).__name__}: {e}", rid)
@@ -1467,8 +1473,7 @@ class Reconciler:
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
-                if not isinstance(e, _PortTaken):  # a busy port says nothing about the config
-                    self.store.note_config_result(cur.config_id, False, err[:2000])
+                self.store.note_config_result(cur.config_id, False, err[:2000])
         finally:
             try:
                 if became_ready:
@@ -1485,10 +1490,14 @@ class Reconciler:
         except AgentError as e:
             if e.status == 422 and "not available" in e.body:
                 self._busy_ports.setdefault(node_id, {})[spec.port] = self.clock() + self.BUSY_PORT_S
-                self._emit("warning", "port_busy",
-                           f"Port {spec.port} on {node_id} is held by another process; gpupool skips it "
-                           f"for {self.BUSY_PORT_S / 60:.0f} min (free it or change GPUPOOL_PORT_RANGE)",
-                           node_id=node_id)
+                # gpupool picks another port by itself, so this is information, not a warning, and
+                # it is reported once per port (the skip is re-checked every BUSY_PORT_S).
+                if (node_id, spec.port) not in self._busy_noticed:
+                    self._busy_noticed.add((node_id, spec.port))
+                    self._emit("info", "port_busy",
+                               f"Port {spec.port} on {node_id} is held by another process; gpupool uses "
+                               "other ports (free it or change GPUPOOL_PORT_RANGE to stop this check)",
+                               node_id=node_id)
                 raise _PortTaken(str(e)) from e
             raise
 

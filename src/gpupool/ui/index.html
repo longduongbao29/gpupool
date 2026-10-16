@@ -743,9 +743,9 @@
               </div>
 
               <div class="errbox" x-show="m.state==='failed' && reallocError(m)" x-text="reallocError(m)"></div>
-              <div x-show="m.state==='failed' && modelError(m)">
-                <button type="button" class="link-btn" @click="openErr[m.spec.name] = !openErr[m.spec.name]" x-text="openErr[m.spec.name] ? 'Hide error' : 'Show error'"></button>
-                <div class="errbox" x-show="openErr[m.spec.name]" x-text="modelError(m)" style="margin-top:6px"></div>
+              <div class="row wrap" style="gap:6px" x-show="m.state==='failed' && modelError(m)">
+                <span class="fail-title" x-text="explainError(modelError(m)).title"></span>
+                <button type="button" class="link-btn" @click="openHist(m)">Why it failed</button>
               </div>
 
               <div class="reps" x-show="placementLines(m).length">
@@ -768,7 +768,6 @@
                     <span class="mark" :class="p.mark === 'replacement' ? 'new' : ''" x-show="p.mark" x-text="p.mark"></span>
                     <span class="chip" x-show="p.draft" :title="p.draft" x-text="p.draft"></span>
                     <span class="tps" :title="p.note" x-text="p.tps"></span>
-                    <button type="button" class="btn ghost danger icon rep-del" x-show="p.state==='failed' || p.state==='stopped'" @click="deleteReplica(m, p.id)" title="Remove this failed replica from the list" aria-label="Remove replica" x-html="icon('trash')"></button>
                     <div class="rnote rep-stage" x-show="p.stage" x-text="p.stage" :title="p.stage"></div>
                   </div>
                 </template>
@@ -1237,6 +1236,12 @@
       <p class="muted small" style="margin-top:0">Every configuration this deployment was launched with, most recent first. Run one to make it the deployment's settings again.</p>
       <div class="muted small" x-show="hist.loading">Loading…</div>
       <div class="errbox" x-show="hist.err" x-text="hist.err"></div>
+      <div class="fail-box" x-show="histProblem()">
+        <div class="fail-title" x-text="'Now: ' + explainError(histProblem()).title"></div>
+        <div class="small muted" x-show="explainError(histProblem()).hint" x-text="explainError(histProblem()).hint"></div>
+        <button type="button" class="link-btn" @click="hist.show.now = !hist.show.now" x-text="hist.show.now ? 'Hide details' : 'Show details'"></button>
+        <div class="errbox" x-show="hist.show.now" x-text="errDetails(histProblem())"></div>
+      </div>
       <div class="muted small" x-show="!hist.loading && !hist.err && !hist.items.length">Nothing recorded yet. A configuration is recorded when a replica launches with it.</div>
       <template x-for="c in hist.items" :key="c.id">
         <div class="opt">
@@ -1251,9 +1256,11 @@
           </div>
           <div class="small mono hist-sum" x-text="histSummary(c)"></div>
           <div class="small" x-show="!c.current && histDiff(c).length"><span class="muted">Differs from current:</span> <span x-text="histDiff(c).join(' · ')"></span></div>
-          <div x-show="c.last_error">
-            <button type="button" class="link-btn" @click="hist.show[c.id] = !hist.show[c.id]" x-text="hist.show[c.id] ? 'Hide last error' : 'Show last error'"></button>
-            <div class="errbox" x-show="hist.show[c.id]" x-text="c.last_error" style="margin-top:6px"></div>
+          <div class="fail-box" x-show="c.last_error">
+            <div class="fail-title" x-text="(c.last_result === 'failed' ? 'Failed: ' : 'Earlier failure: ') + explainError(c.last_error).title"></div>
+            <div class="small muted" x-show="explainError(c.last_error).hint" x-text="explainError(c.last_error).hint"></div>
+            <button type="button" class="link-btn" @click="hist.show[c.id] = !hist.show[c.id]" x-text="hist.show[c.id] ? 'Hide details' : 'Show details'"></button>
+            <div class="errbox" x-show="hist.show[c.id]" x-text="errDetails(c.last_error)"></div>
           </div>
         </div>
       </template>

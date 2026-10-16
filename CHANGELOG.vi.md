@@ -8,6 +8,23 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.9] - 2026-10-16
+
+### Thay đổi
+
+- Card model không còn liệt kê các replica lỗi. Deployment bị lỗi hiển thị lý do ngắn ("Out of GPU memory") và link
+  **Why it failed** mở lịch sử config, nơi mỗi lỗi được giải thích bằng lời dễ hiểu kèm gợi ý cách sửa, còn lỗi gốc
+  và các dòng log của llama-server nằm sau nút **Show details**.
+- Port bị tiến trình khác chiếm không còn bị báo là lỗi launch: gpupool đã tự bỏ qua port đó và launch lại ngay trên
+  port khác. Lần thử đó không để lại replica lỗi, không có lỗi `launch_failed` và không tính là lỗi trong lịch sử
+  config; `port_busy` giờ là event mức info (không hiện toast), mỗi server và port chỉ báo một lần.
+
+### Sửa lỗi
+
+- Tag Docker image `latest` giờ luôn trỏ tới bản phát hành mới nhất. Các bản build phát hành kết thúc theo thứ tự bất
+  kỳ, nên push một tag cũ cùng lúc với tag mới (v0.9.7 và v0.9.8) đã đưa `latest` về bản cũ; giờ bản build chỉ gắn
+  `latest` khi tag của nó là tag `v*` cao nhất.
+
 ## [0.9.8] - 2026-10-16
 
 ### Thêm mới
