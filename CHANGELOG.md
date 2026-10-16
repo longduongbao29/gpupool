@@ -8,6 +8,8 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-10-16
+
 ### Fixed
 
 - Removing a failed replica from a model card now takes one click. The card lists only the newest failure, so deleting it
