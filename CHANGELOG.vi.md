@@ -8,6 +8,12 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.10] - 2026-10-16
+
+Phát hành lại 0.9.9. Tag `v0.9.9` bị đặt trên commit của 0.9.8, nên image 0.9.9 đã phát hành chứa code 0.9.8 (card vẫn
+liệt kê replica lỗi, port bận vẫn bị báo là lỗi launch). 0.9.10 có đủ mọi thay đổi của 0.9.9 bên dưới; hãy dùng bản này
+thay cho 0.9.9.
+
 ## [0.9.9] - 2026-10-16
 
 ### Thay đổi
