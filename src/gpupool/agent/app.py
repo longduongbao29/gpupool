@@ -13,6 +13,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from gpupool.agent.engines import available_engines, engine_feature
 from gpupool.agent.gpu import probe_devices
 from gpupool.agent.rpc_cache import prune as prune_rpc_cache
 from gpupool.agent.rpc_cache import rpc_cache_dir
@@ -24,7 +25,7 @@ from gpupool.agent.procs import (
 )
 from gpupool.common.auth import bearer_headers, require_bearer
 from gpupool.common.config import AgentConfig
-from gpupool.common.models import EngineSpec, EngineStatus, NodeReport
+from gpupool.common.models import HF_ENGINES, EngineSpec, EngineStatus, NodeReport
 from gpupool.common.net import internal_client
 
 log = logging.getLogger(__name__)
@@ -102,8 +103,11 @@ RPC_CACHE_PRUNE_S = 600.0  # how often the rpc weight cache is trimmed to rpc_ca
 
 def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_devices,
                start_heartbeat: bool | None = None, start_join: bool | None = None) -> FastAPI:
+    engine_commands = {"vllm": cfg.vllm_cmd, "sglang": cfg.sglang_cmd}
     pm = pm or ProcessManager(cfg.llama_dir, cfg.log_dir, cfg.host, rpc_firewall=cfg.rpc_firewall,
-                              llama_cache=Path(cfg.cache_dir) / "llama.cpp")
+                              llama_cache=Path(cfg.cache_dir) / "llama.cpp",
+                              engine_commands=engine_commands,
+                              hf_home=cfg.hf_home or Path(cfg.cache_dir) / "hf")
     version_cache: dict = {}  # llama version and CUDA archs: fixed for the agent's lifetime
     # Paths /models/ensure handed out (the absolute-local-file source lives outside the cache).
     ensured: set[str] = set()
@@ -128,9 +132,15 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             version_cache["v"] = llama_version(cfg.llama_dir)
         return version_cache["v"]
 
+    def engines() -> list[str]:
+        if "engines" not in version_cache:
+            version_cache["engines"] = available_engines(engine_commands)
+        return version_cache["engines"]
+
     def features() -> list[str]:
         if "features" not in version_cache:
-            version_cache["features"] = features_of(version())
+            version_cache["features"] = sorted(
+                features_of(version()) + [engine_feature(e) for e in engines()])
         return version_cache["features"]
 
     def archs() -> list[str] | None:
@@ -231,7 +241,20 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
         # the coordinator never sends extra_args and always ensures the model first.
         if spec.extra_args:
             raise HTTPException(422, "extra_args is not accepted by this agent")
-        if spec.kind == "server":
+        if spec.engine in HF_ENGINES:
+            if spec.kind != "server" or not spec.hf_repo:
+                raise HTTPException(422, f"{spec.engine} engine must be a server with hf_repo")
+            if spec.engine not in engines():
+                raise HTTPException(422, f"{spec.engine} is not installed on this agent "
+                                         f"(set GPUPOOL_{spec.engine.upper()}_CMD)")
+            if spec.engine_args and not cfg.allow_engine_args:
+                raise HTTPException(422, "engine_args is refused by this agent "
+                                         "(GPUPOOL_ALLOW_ENGINE_ARGS=1 accepts them)")
+            if not spec.devices or len(set(spec.devices)) != len(spec.devices):
+                raise HTTPException(422, f"{spec.engine} engine needs one or more distinct devices")
+        elif spec.engine_args:
+            raise HTTPException(422, "engine_args is only accepted for vllm / sglang engines")
+        elif spec.kind == "server":
             if not spec.model_path:
                 raise HTTPException(422, "server engine requires model_path")
             if not model_path_allowed(spec.model_path):
@@ -257,6 +280,8 @@ def create_app(cfg: AgentConfig, pm: ProcessManager | None = None, probe=probe_d
             raise HTTPException(422, str(e))
         except FileNotFoundError as e:
             raise HTTPException(500, str(e))
+        except ValueError as e:  # e.g. a vLLM engine asked to run on a CPU device
+            raise HTTPException(422, str(e))
 
     @app.get("/engines/{engine_id}", response_model=EngineStatus, dependencies=[auth])
     def get_engine(engine_id: str):

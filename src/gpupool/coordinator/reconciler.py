@@ -17,6 +17,7 @@ import httpx
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
     ACTIVE_STATES,
+    HF_ENGINES,
     LIVE_STATES,
     Device,
     DeviceAssignment,
@@ -27,6 +28,7 @@ from gpupool.common.models import (
     Occupant,
     Placement,
     ReplicaRecord,
+    parse_hf_source,
 )
 from gpupool.common.net import internal_client
 from gpupool.coordinator import preemption
@@ -1351,74 +1353,79 @@ class Reconciler:
                 raise LaunchError(f"head node {p.head_node} unknown")
             head_url = agent(p.head_node)
 
-            extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
-                           "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch,
-                           "kv_unified": spec.kv_unified}
-            thinking = {"reasoning": spec.reasoning, "reasoning_effort": spec.reasoning_effort,
-                        "reasoning_budget": spec.reasoning_budget}
-            if (spec.reasoning, spec.reasoning_effort, spec.reasoning_budget) != ("auto", "default", -1):
-                if "reasoning" in nodes[p.head_node].report.features:
-                    extra.update(thinking)
-                else:
-                    # an older llama.cpp would refuse the flags and the model would not start at all
-                    self._emit("warning", "reasoning_unavailable",
-                               f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
-                               "-rea / --reasoning-effort; serving with the chat template's defaults. "
-                               "Upgrade the agent to apply the reasoning settings.",
-                               node_id=p.head_node, model=spec.name)
-            if spec.speculative == "draft":
-                if not spec.draft:
-                    raise LaunchError("speculative 'draft' without a draft model")
-                # The draft runs inside the head's llama-server: an RPC or remote device cannot host it.
-                if _draft_device(p) is None:
-                    raise LaunchError("the draft model needs a local CUDA device on the head node, but the "
-                                      "placement has none")
+            if p.engine in HF_ENGINES:
+                head_id = f"{rid}-head"
+                await self._start_hf_head(rid, p, spec, head_url, created)
+            else:
+                extra: dict = {"cache_type": spec.kv_cache_type, "spec_type": spec.speculative,
+                               "flash_attn": spec.flash_attn, "batch": spec.batch, "ubatch": spec.ubatch,
+                               "kv_unified": spec.kv_unified}
+                thinking = {"reasoning": spec.reasoning, "reasoning_effort": spec.reasoning_effort,
+                            "reasoning_budget": spec.reasoning_budget}
+                if (spec.reasoning, spec.reasoning_effort, spec.reasoning_budget) != ("auto", "default", -1):
+                    if "reasoning" in nodes[p.head_node].report.features:
+                        extra.update(thinking)
+                    else:
+                        # an older llama.cpp would refuse the flags and the model would not start at all
+                        self._emit("warning", "reasoning_unavailable",
+                                   f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
+                                   "-rea / --reasoning-effort; serving with the chat template's defaults. "
+                                   "Upgrade the agent to apply the reasoning settings.",
+                                   node_id=p.head_node, model=spec.name)
+                if spec.speculative == "draft":
+                    if not spec.draft:
+                        raise LaunchError("speculative 'draft' without a draft model")
+                    # The draft runs inside the head's llama-server: an RPC or remote device cannot host it.
+                    if _draft_device(p) is None:
+                        raise LaunchError("the draft model needs a local CUDA device on the head node, but the "
+                                          "placement has none")
 
-            # The head's model files are fetched while the RPC engines start: on a cold start the
-            # download, not the engines, is the long pole, and the two do not depend on each other.
-            rpcs = rpc_servers(p)
-            self._set_stage(rid, f"checking the model file on {p.head_node}" + (
-                f", starting RPC servers on {', '.join(dict.fromkeys(d[0].node_id for _, d in rpcs))}"
-                if rpcs else ""))
-            names = [self._model_source(spec)[0]]
-            if spec.speculative == "draft" and spec.draft:
-                names.append(self._model_source(spec, spec.draft)[0])
-            models = asyncio.create_task(self._ensure_head_models(spec, head_url))
-            watch = asyncio.create_task(self._watch_download(rid, head_url, p.head_node, names))
-            try:
-                await self._start_rpc_engines(rid, p, agent, head_host, created)
-                path, draft_path = await models
-            finally:  # always reap: a download that failed meanwhile must not go unretrieved
-                for t in (models, watch):
-                    if not t.done():
-                        t.cancel()
-                await asyncio.gather(models, watch, return_exceptions=True)
-            if draft_path is not None:
-                extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
-                             draft_n_max=spec.draft_n_max)
-            elif spec.speculative == "mtp":
-                if "spec_mtp" in nodes[p.head_node].report.features:
-                    extra.update(draft_n_max=spec.draft_n_max)
-                else:
-                    # The head's llama.cpp cannot draft with MTP layers (older build or agent): serve
-                    # without speculation rather than fail the launch over an optimisation.
-                    extra["spec_type"] = "none"
-                    self._emit("warning", "mtp_unavailable",
-                               f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
-                               "--spec-type draft-mtp; serving without speculative decoding. Upgrade "
-                               "the agent to enable it.", node_id=p.head_node, model=spec.name)
+                # The head's model files are fetched while the RPC engines start: on a cold start the
+                # download, not the engines, is the long pole, and the two do not depend on each other.
+                rpcs = rpc_servers(p)
+                self._set_stage(rid, f"checking the model file on {p.head_node}" + (
+                    f", starting RPC servers on {', '.join(dict.fromkeys(d[0].node_id for _, d in rpcs))}"
+                    if rpcs else ""))
+                names = [self._model_source(spec)[0]]
+                if spec.speculative == "draft" and spec.draft:
+                    names.append(self._model_source(spec, spec.draft)[0])
+                models = asyncio.create_task(self._ensure_head_models(spec, head_url))
+                watch = asyncio.create_task(self._watch_download(rid, head_url, p.head_node, names))
+                try:
+                    await self._start_rpc_engines(rid, p, agent, head_host, created)
+                    path, draft_path = await models
+                finally:  # always reap: a download that failed meanwhile must not go unretrieved
+                    for t in (models, watch):
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(models, watch, return_exceptions=True)
+                if draft_path is not None:
+                    extra.update(draft_model_path=draft_path, draft_device=_draft_device(p).llama_device,
+                                 draft_n_max=spec.draft_n_max)
+                elif spec.speculative == "mtp":
+                    if "spec_mtp" in nodes[p.head_node].report.features:
+                        extra.update(draft_n_max=spec.draft_n_max)
+                    else:
+                        # The head's llama.cpp cannot draft with MTP layers (older build or agent): serve
+                        # without speculation rather than fail the launch over an optimisation.
+                        extra["spec_type"] = "none"
+                        self._emit("warning", "mtp_unavailable",
+                                   f"{spec.name}: the head {p.head_node} runs a llama.cpp build without "
+                                   "--spec-type draft-mtp; serving without speculative decoding. Upgrade "
+                                   "the agent to enable it.", node_id=p.head_node, model=spec.name)
 
-            head_id = f"{rid}-head"
-            created.append((head_url, head_id))
-            await self._start_engine(head_url, p.head_node, EngineSpec(
-                engine_id=head_id, kind="server", port=p.head_port,
-                devices=[a.llama_device for a in p.assignments],
-                rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
-                tensor_split=p.tensor_split, model=spec.name, model_path=path,
-                ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
-            self._set_stage(rid, f"loading the model on {p.head_node}" + (
-                " (weights for remote GPUs go over the network)" if rpcs else ""))
-            await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health", rid)
+                head_id = f"{rid}-head"
+                created.append((head_url, head_id))
+                await self._start_engine(head_url, p.head_node, EngineSpec(
+                    engine_id=head_id, kind="server", port=p.head_port,
+                    devices=[a.llama_device for a in p.assignments],
+                    rpc_endpoints=[ep for ep, _ in rpc_servers(p)],
+                    tensor_split=p.tensor_split, model=spec.name, model_path=path,
+                    ctx_size=spec.ctx_size, parallel=spec.parallel, **extra))
+                self._set_stage(rid, f"loading the model on {p.head_node}" + (
+                    " (weights for remote GPUs go over the network)" if rpcs else ""))
+            await self._wait_health(head_url, head_id, f"http://{head_host}:{p.head_port}/health", rid,
+                                    active_log=p.engine in HF_ENGINES)
 
             cur = self.store.get_replica(rid)
             if cur is None or cur.state != "launching":
@@ -1483,6 +1490,25 @@ class Reconciler:
             finally:
                 self._launches.pop(rid, None)
                 self._stages.pop(rid, None)
+
+    async def _start_hf_head(self, rid: str, p: Placement, spec: ModelSpec, head_url: str,
+                             created: list[tuple[str, str]]) -> None:
+        """Start a vLLM / SGLang server: one process on the head node for every GPU of the
+        placement (tensor parallel). The engine downloads the checkpoint itself, so the download
+        is part of its start-up (shown through its log)."""
+        repo, rev = parse_hf_source(spec.source)
+        head_id = f"{rid}-head"
+        self._set_stage(rid, f"starting {p.engine} on {p.head_node} (it downloads {repo} on first use)")
+        uuids = [a.device_uuid for a in p.assignments]
+        created.append((head_url, head_id))
+        await self._start_engine(head_url, p.head_node, EngineSpec(
+            engine_id=head_id, kind="server", port=p.head_port, engine=p.engine,
+            devices=[a.device_id for a in p.assignments],
+            device_uuids=[u for u in uuids if u] if all(uuids) else [],
+            model=spec.name, hf_repo=repo, hf_revision=rev, ctx_size=spec.ctx_size,
+            parallel=spec.parallel, gpu_mem_fraction=p.gpu_mem_fraction,
+            trust_remote_code=spec.trust_remote_code, engine_args=list(spec.engine_args)))
+        self._set_stage(rid, f"{p.engine} is loading {repo} on {p.head_node}")
 
     async def _start_engine(self, url: str, node_id: str, spec: EngineSpec) -> None:
         try:
@@ -1553,6 +1579,8 @@ class Reconciler:
             measured = self.autoscaler.measured_tps(rec.replica_id)
             if spec is None or not measured or spec.parallel != 1 or spec.speculative != "none":
                 continue
+            if rec.placement.engine in HF_ENGINES:
+                continue  # the speed model is llama.cpp's (eta, RPC hops)
             p = rec.placement
             devs = []
             for a in p.assignments:
@@ -1617,6 +1645,8 @@ class Reconciler:
     async def _calibrate(self, rec: ReplicaRecord, spec: ModelSpec, head_url: str) -> None:
         """Compare what the head engine really loaded with the estimate and fold it into the model's
         memory factor. Never fails the launch: this is bookkeeping about a replica already serving."""
+        if rec.placement.engine in HF_ENGINES:
+            return  # the memory log parser reads llama.cpp's buffer lines only
         try:
             memory = await self.client.engine_memory(head_url, f"{rec.replica_id}-head")
             sample = self.calibration_sample(rec.placement, memory) if memory else None
@@ -1658,10 +1688,14 @@ class Reconciler:
                 raise LaunchError(f"engine {eid} not running after {self.cfg.launch_timeout_s}s")
             await asyncio.sleep(self.poll_s)
 
-    async def _wait_health(self, agent_url: str, head_id: str, health_url: str, rid: str | None = None) -> None:
+    async def _wait_health(self, agent_url: str, head_id: str, health_url: str, rid: str | None = None,
+                           active_log: bool = False) -> None:
+        """active_log: a new last log line also counts as progress (vLLM / SGLang print download
+        bars, shard loading and CUDA graph capture, but no llama.cpp dots)."""
         deadline = time.monotonic() + self.cfg.launch_timeout_s
         stage = self._stages.get(rid, ("", 0.0))[0] if rid else ""
         best_pct = -1
+        prev_last = None
         while True:
             try:
                 r = await self._http_client().get(health_url)
@@ -1680,6 +1714,11 @@ class Reconciler:
                     # it from scratch. The timeout counts from the last progress instead.
                     best_pct = pct
                     deadline = max(deadline, time.monotonic() + self.cfg.launch_timeout_s)
+                if active_log and last and last != prev_last:
+                    if prev_last is not None:
+                        best_pct = max(best_pct, 0)  # "without loading progress" no longer holds
+                        deadline = max(deadline, time.monotonic() + self.cfg.launch_timeout_s)
+                    prev_last = last
                 if rid and stage:
                     detail = ", ".join(x for x in (f"{pct}%" if pct is not None else "", last[:160]) if x)
                     self._set_stage(rid, f"{stage}: {detail}" if detail else stage)

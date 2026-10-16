@@ -113,6 +113,26 @@ PyYAML, requests, tqdm); they are permissive licenses (Apache-2.0, MIT, BSD) per
 third-party components with their own notices; see <https://github.com/pytorch/pytorch/blob/main/LICENSE> and
 `NOTICE`.
 
+## Inference engines (agent image `-all`, built with `WITH_ENGINES=1`)
+
+The `-all` agent image contains two separate virtual environments, `/opt/engines/vllm` and `/opt/engines/sglang`,
+installed from PyPI. Their licenses are given per upstream (PyPI metadata); list the exact set inside the image with
+`docker run --rm --entrypoint /opt/engines/vllm/bin/python <image> -m pip list` (same for `sglang`).
+
+| Package | Version | License (per upstream) |
+| --- | --- | --- |
+| vllm | 0.30.0 | Apache-2.0 |
+| sglang | 0.5.20 | Apache-2.0 |
+| torch | 2.13.0 | BSD-3-Clause (with bundled components: Apache-2.0, BSD-2-Clause, BSL-1.0, MIT) |
+| flashinfer-python | 0.6.18 / 0.6.18.post1 | Apache-2.0 |
+| transformers | 5.20.0 (vLLM) / 5.12.1 (SGLang) | Apache-2.0 |
+| triton | 3.7.1 | MIT |
+
+They pull a few hundred further packages, permissive (Apache-2.0, MIT, BSD) per upstream, plus NVIDIA's CUDA runtime
+wheels (`nvidia-*`: cuBLAS, cuDNN, NCCL, ...), which are under the NVIDIA Software License Agreement / CUDA EULA, not
+an open-source license: they are redistributed as PyPI publishes them, unmodified. Models served by these engines are
+not covered by any of this (see "Models are not covered").
+
 ## Tools and base images
 
 | Component | License | Notes |

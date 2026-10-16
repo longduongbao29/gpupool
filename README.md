@@ -23,9 +23,11 @@
 
 You have an RTX 4090 in one box and two RTX 5090s in others, and a 70B model that fits on none of them alone.
 **gpupool** measures the free VRAM on every machine, decides where each model goes and how its layers are split,
-launches and supervises the engines, and gives you **one OpenAI-compatible URL**. The engine is
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` and `ggml-rpc-server`, GGUF models); gpupool is the
-control plane on top of it.
+launches and supervises the engines, and gives you **one OpenAI-compatible URL**. The default engine is
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` and `ggml-rpc-server`, GGUF models); a model can
+also run on [vLLM](https://github.com/vllm-project/vllm) or [SGLang](https://github.com/sgl-project/sglang), straight
+from a Hugging Face repo, for vision-language models and other checkpoints llama.cpp does not serve
+([ENGINES.en.md](docs/ENGINES.en.md)). gpupool is the control plane on top of them.
 
 ## Why gpupool
 
@@ -206,6 +208,7 @@ docker logs gpupool
 docker run -d --name gpupool-agent --restart unless-stopped --gpus all --network host --pid host \
   -v gpupool-agent:/data -e GPUPOOL_JOIN="http://10.0.0.1:8080#<cluster-token>" \
   ghcr.io/longduongbao29/gpupool-agent
+#    vLLM and SGLang too: add --ipc host and use ghcr.io/longduongbao29/gpupool-agent:latest-all (docs/ENGINES.en.md)
 
 # 3. In the UI: Models -> Add model (Hugging Face or path) -> New model -> Start. Then:
 curl http://10.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
@@ -266,6 +269,7 @@ The management API (models, servers, recommend, capacity, simulate, convert, sta
 | --- | --- | --- |
 | Quick start and deployment | [QUICKSTART.en.md](docs/QUICKSTART.en.md) | [QUICKSTART.vi.md](docs/QUICKSTART.vi.md) |
 | HTTP API reference | [API.en.md](docs/API.en.md) | [API.vi.md](docs/API.vi.md) |
+| Engines: llama.cpp, vLLM, SGLang | [ENGINES.en.md](docs/ENGINES.en.md) | [ENGINES.vi.md](docs/ENGINES.vi.md) |
 | Design | [DESIGN.en.md](docs/DESIGN.en.md) | [DESIGN.vi.md](docs/DESIGN.vi.md) |
 | Platform design (multi-model scheduling) | [PLATFORM_DESIGN.en.md](docs/PLATFORM_DESIGN.en.md) | [PLATFORM_DESIGN.vi.md](docs/PLATFORM_DESIGN.vi.md) |
 | UI design | [UI_DESIGN.en.md](docs/UI_DESIGN.en.md) | [UI_DESIGN.vi.md](docs/UI_DESIGN.vi.md) |

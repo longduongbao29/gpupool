@@ -8,6 +8,34 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+### Thêm mới
+
+- **Engine ngoài llama.cpp: vLLM và SGLang.** Mỗi model giờ có `engine`. vLLM và SGLang phục vụ thẳng repo Hugging Face
+  (`hf://owner/name[@revision]`: safetensors, AWQ, GPTQ, FP8, model thị giác–ngôn ngữ, model embedding và rerank), do
+  engine tự tải trên GPU server, với tensor parallel trên các GPU của một server (`tensor_parallel` 1/2/4/8, hoặc ít
+  GPU nhất mà vừa). Scheduler ước lượng bộ nhớ từ `config.json` và kích thước file của repo, rồi tính
+  `--gpu-memory-utilization` / `--mem-fraction-static` từ đó, nên engine không chiếm phần bộ nhớ người khác đang dùng.
+  Priority, preemption, autoscale (từ `/metrics` của chính engine), scale-to-zero, rebalance và giới hạn GPU hoạt động
+  như với llama.cpp. Xem [docs/ENGINES.vi.md](docs/ENGINES.vi.md).
+- Agent: `GPUPOOL_VLLM_CMD` / `GPUPOOL_SGLANG_CMD` (engine được đề xuất khi lệnh của nó có trên máy),
+  `GPUPOOL_HF_HOME`, `GPUPOOL_ALLOW_ENGINE_ARGS` (flag engine theo model, mặc định tắt). vLLM / SGLang chạy trong process
+  group riêng: dừng engine thì các worker tensor-parallel cũng dừng.
+- API: `engine`, `hf_repo`, `tensor_parallel`, `trust_remote_code` và `engine_args` trong `PUT /api/models/{name}`;
+  `engine` / `hf_repo` trong `/api/recommend` và `/api/simulate`. UI: lựa chọn **Engine** trong form model; **New
+  model** dùng được cả khi thư viện trống.
+- Router: `/v1/embeddings`, `/v1/responses`, `/v1/rerank` và `/v1/score` được chuyển tiếp như chat completions.
+- **Gợi ý engine.** Form model gợi ý engine khi bạn điền và để bạn tự chọn: với mỗi engine, cho biết có hỗ trợ model
+  không (GGUF, VLM, AWQ/GPTQ, embedding...), server nào chạy engine đó và model có vừa ngay lúc này không; model văn bản
+  không vừa server nào được gợi ý dùng llama.cpp sau khi chuyển sang GGUF (nút **Convert to GGUF** mở trình chuyển đổi).
+  `POST /api/engines/recommend`.
+- **`gpupool-agent:<version>-all`**: một image agent chứa llama.cpp, vLLM 0.30.0 và SGLang 0.5.20 (hai virtualenv trong
+  `/opt/engines`, file trùng được hardlink), lệnh của engine đã đặt sẵn. Build từ `docker/agent.Dockerfile` với
+  `--build-arg WITH_ENGINES=1`; các engine cần driver NVIDIA >= 580. Chỉ phát hành cùng các bản release.
+
+### Thay đổi
+
+- Router chỉ thêm `cache_prompt` cho replica llama.cpp, và chỉ trên `/v1/chat/completions` và `/v1/completions`.
+
 ## [0.9.10] - 2026-10-16
 
 Phát hành lại 0.9.9. Tag `v0.9.9` bị đặt trên commit của 0.9.8, nên image 0.9.9 đã phát hành chứa code 0.9.8 (card vẫn

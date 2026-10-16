@@ -28,7 +28,9 @@ def cfg(tmp_path, monkeypatch):
     monkeypatch.setattr(appmod, "llama_version", lambda d: "b1")
     return AgentConfig(node_id="n1", port=7071, host="127.0.0.1", llama_dir=tmp_path, cluster_token="secret",
                        cache_dir=tmp_path / "cache", log_dir=tmp_path / "logs",
-                       coordinator_url="http://coord:8080", heartbeat_s=0.05)
+                       coordinator_url="http://coord:8080", heartbeat_s=0.05,
+                       # whatever this machine has installed: no vLLM / SGLang in these tests
+                       vllm_cmd=str(tmp_path / "no-vllm"), sglang_cmd=str(tmp_path / "no-python"))
 
 
 def client(app):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -12,15 +13,20 @@ from pydantic import BaseModel, Field, ValidationError
 
 from gpupool.common.config import CoordinatorConfig
 from gpupool.common.models import (
-    ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_UBATCH, LIVE_STATES, TERMINAL_STATES, AutoscalePolicy, FlashAttn, KvCacheType,
-    ModelSpec, Reasoning, ReasoningEffort, SpecMode, Spread,
+    ACTIVE_STATES, DEFAULT_BATCH, DEFAULT_ENGINE, DEFAULT_UBATCH, HF_ENGINES, HF_PREFIX, LIVE_STATES, TERMINAL_STATES,
+    AutoscalePolicy, EngineName, FlashAttn, KvCacheType, ModelSpec, Reasoning, ReasoningEffort, SpecMode, Spread,
+    parse_hf_source,
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
+from gpupool.coordinator.engine_advice import ModelFacts, facts_from_config, supported_engines
+from gpupool.coordinator.engine_advice import recommend as advise
 from gpupool.coordinator.store import ServerRecord, config_key, gpu_key, planning_factor
 from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
+from gpupool.scheduler.tp_placement import has_engine
+from gpupool.scheduler.tp_placement import need_mb as tp_need_mb
 from gpupool.scheduler.scoring import speed_model
 
 log = logging.getLogger("gpupool.api")
@@ -41,7 +47,15 @@ class GpuBody(BaseModel):
 
 
 class ModelBody(BaseModel):
-    file: str
+    # llama.cpp: a ready library file. vllm / sglang: hf_repo instead.
+    file: str | None = None
+    # None keeps the stored engine (llama.cpp for a new model).
+    engine: EngineName | None = None
+    hf_repo: str | None = None  # "owner/name[@revision]" (or hf://...); None keeps the stored one
+    # vllm / sglang. tensor_parallel: an explicit null clears it (the scheduler picks); omitted keeps.
+    tensor_parallel: int | None = Field(default=None, ge=1, le=8)
+    trust_remote_code: bool | None = None
+    engine_args: list[str] | None = None
     ctx_size: int = Field(default=4096, ge=1)
     parallel: int = Field(default=1, ge=1)
     pin_devices: list[str] = Field(default_factory=list)
@@ -72,7 +86,10 @@ class ModelBody(BaseModel):
 
 
 class RecommendBody(BaseModel):
-    file: str
+    file: str | None = None  # llama.cpp
+    engine: EngineName = DEFAULT_ENGINE
+    hf_repo: str | None = None  # vllm / sglang
+    tensor_parallel: int | None = Field(default=None, ge=1, le=8)
     ctx_size: int = Field(default=4096, ge=1)
     parallel: int = Field(default=1, ge=1)
     priority: int = Field(default=50, ge=0, le=100)
@@ -124,12 +141,26 @@ class SimChange(SimFields):
 
 class SimAdd(SimFields):
     name: str
-    file: str
+    file: str | None = None  # llama.cpp
+    engine: EngineName = DEFAULT_ENGINE
+    hf_repo: str | None = None  # vllm / sglang
+    tensor_parallel: int | None = Field(default=None, ge=1, le=8)
 
 
 class SimulateBody(BaseModel):
     changes: list[SimChange] = Field(default_factory=list)
     add: list[SimAdd] = Field(default_factory=list)
+
+
+class EngineAdviceBody(BaseModel):
+    """What to serve (a library GGUF or a Hugging Face repo) and how big: which engine fits it."""
+
+    file: str | None = None
+    hf_repo: str | None = None
+    ctx_size: int = Field(default=4096, ge=1)
+    parallel: int = Field(default=1, ge=1)
+    priority: int = Field(default=50, ge=0, le=100)
+    pin_devices: list[str] = Field(default_factory=list)
 
 
 class StartBody(BaseModel):
@@ -150,6 +181,21 @@ def normalize_agent_url(raw: str) -> str:
     if u.scheme not in ("http", "https") or not u.netloc:
         raise HTTPException(400, "agent_url must look like http://host:port")
     return url
+
+
+class _NoTips(Exception):
+    pass
+
+
+def hf_source(raw: str) -> str:
+    """"owner/name[@rev]" or "hf://owner/name[@rev]" -> the hf:// source, 422 when malformed."""
+    raw = raw.strip()
+    src = raw if raw.startswith(HF_PREFIX) else HF_PREFIX + raw
+    try:
+        parse_hf_source(src)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    return src
 
 
 def check_attention(spec: ModelSpec) -> None:
@@ -187,8 +233,10 @@ async def drain_and_delete_model(store, reconciler, name: str) -> None:
 
 
 def make_api_router(*, store, reconciler, poller, balancer, library, cfg: CoordinatorConfig,
-                    admin_dep, notifier=None, autoscaler=None) -> APIRouter:
-    """`admin_dep` may be a callable or an already-built Depends(...)."""
+                    admin_dep, notifier=None, autoscaler=None, hf=None,
+                    convert_ok: Callable[[], bool] | None = None) -> APIRouter:
+    """`admin_dep` may be a callable or an already-built Depends(...). `hf`: converter.source.HfClient
+    (engine advice reads a repo's config.json); `convert_ok`: the GGUF conversion toolchain is there."""
     dep = admin_dep if isinstance(admin_dep, params.Depends) else Depends(admin_dep)
     router = APIRouter(prefix="/api", dependencies=[dep])
     notifier = notifier or reconciler.notifier
@@ -356,6 +404,32 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         return {"node_id": node_id, "device_id": device_id, "enabled": body.enabled}
 
     # ------------------------------------------------------------------ models
+    async def check_engine(spec: ModelSpec, label: str = "") -> None:
+        """422 unless a vllm / sglang spec is servable: an hf:// source whose config.json the
+        coordinator can read, and none of the llama.cpp-only settings."""
+        pre = f"{label}: " if label else ""
+        if spec.engine not in HF_ENGINES:
+            if spec.source.startswith(HF_PREFIX):
+                raise HTTPException(422, f"{pre}llama.cpp serves GGUF files; use engine vllm or sglang "
+                                         "for a Hugging Face repo")
+            return
+        if not spec.source.startswith(HF_PREFIX):
+            raise HTTPException(422, f"{pre}{spec.engine} serves Hugging Face repos: set hf_repo")
+        if spec.speculative != "none":
+            raise HTTPException(422, f"{pre}speculative decoding is a llama.cpp setting; for {spec.engine} "
+                                     "pass its own flags in engine_args")
+        if spec.kv_cache_type != "f16":
+            raise HTTPException(422, f"{pre}kv_cache_type is a llama.cpp setting; for {spec.engine} pass "
+                                     "--kv-cache-dtype fp8 in engine_args")
+        try:
+            meta = await reconciler.meta_for(spec)
+        except Exception as e:
+            msg = getattr(e, "message", None) or f"{type(e).__name__}: {e}"
+            raise HTTPException(422, f"{pre}cannot read {spec.source}: {msg}") from e
+        if spec.tensor_parallel and meta.n_head % spec.tensor_parallel:
+            raise HTTPException(422, f"{pre}tensor_parallel {spec.tensor_parallel} must divide the model's "
+                                     f"{meta.n_head} attention heads")
+
     async def check_draft(spec: ModelSpec, label: str = "") -> None:
         """422 unless the draft model of a speculative "draft" spec is usable with its target, or
         the model of an "mtp" spec has multi-token-prediction blocks."""
@@ -409,11 +483,23 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     @router.put("/models/{name}")
     async def put_model(name: str, body: ModelBody) -> dict:
         check_name(name)
-        item = library.get(body.file)
-        if item is None or item.status != "ready":
-            raise HTTPException(422, f"file {body.file!r} is not a ready library item")
-        check_pins(body.pin_devices)
         existing = store.get_model(name)
+        engine = body.engine or (existing.engine if existing else DEFAULT_ENGINE)
+        if engine in HF_ENGINES:
+            if body.hf_repo:
+                source = hf_source(body.hf_repo)
+            elif existing is not None and existing.source.startswith(HF_PREFIX):
+                source = existing.source
+            else:
+                raise HTTPException(422, f"engine {engine} needs hf_repo (owner/name on Hugging Face)")
+        else:
+            if not body.file:
+                raise HTTPException(422, "file is required (a ready library item)")
+            item = library.get(body.file)
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {body.file!r} is not a ready library item")
+            source = COORD_PREFIX + body.file
+        check_pins(body.pin_devices)
 
         def keep(new, field: str):
             return new if new is not None else getattr(existing, field) if existing else None
@@ -432,8 +518,12 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         draft = COORD_PREFIX + body.draft_file if body.draft_file is not None else existing.draft if existing else None
         if speculative != "draft":
             draft = None  # a draft only means something to speculative "draft"
+        hf = engine in HF_ENGINES
         spec = ModelSpec(
-            name=name, source=COORD_PREFIX + body.file, ctx_size=body.ctx_size, parallel=body.parallel,
+            name=name, source=source, ctx_size=body.ctx_size, parallel=body.parallel, engine=engine,
+            tensor_parallel=scaling("tensor_parallel") if hf else None,
+            trust_remote_code=bool(keep(body.trust_remote_code, "trust_remote_code")) if hf else False,
+            engine_args=list(keep(body.engine_args, "engine_args") or []) if hf else [],
             kv_cache_type=body.kv_cache_type or (existing.kv_cache_type if existing else "f16"),
             speculative=speculative, draft=draft,
             draft_n_max=body.draft_n_max or (existing.draft_n_max if existing else 4),
@@ -451,6 +541,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             preemptible=body.preemptible if body.preemptible is not None else existing.preemptible if existing else True)
         spec = with_batch_floor(spec)
         check_attention(spec)
+        await check_engine(spec)
         await check_draft(spec)
         store.put_model(spec)
         reconciler.retry_now(name)  # new settings deserve a fresh attempt
@@ -500,6 +591,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 raise HTTPException(422, f"file {file!r} of this config is no longer a ready library item")
         check_pins(spec.pin_devices)
         check_attention(spec)
+        await check_engine(spec)
         await check_draft(spec)
         store.put_model(spec)
         # Settings apply at launch: replicas running another config are drained (requests in
@@ -625,6 +717,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             spec = spec.model_copy(update={"draft": None})
         spec = with_batch_floor(spec)
         check_attention(spec)
+        await check_engine(spec, spec.name)
         await check_draft(spec, spec.name)
         return spec
 
@@ -647,10 +740,16 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             check_name(add.name)
             if add.name in specs:
                 raise HTTPException(422, f"model {add.name!r} already exists")
-            item = library.get(add.file)
-            if item is None or item.status != "ready":
-                raise HTTPException(422, f"file {add.file!r} is not a ready library item")
-            base = ModelSpec(name=add.name, source=COORD_PREFIX + add.file)
+            if add.engine in HF_ENGINES:
+                if not add.hf_repo:
+                    raise HTTPException(422, f"engine {add.engine} needs hf_repo")
+                base = ModelSpec(name=add.name, source=hf_source(add.hf_repo), engine=add.engine,
+                                 tensor_parallel=add.tensor_parallel)
+            else:
+                item = library.get(add.file) if add.file else None
+                if item is None or item.status != "ready":
+                    raise HTTPException(422, f"file {add.file!r} is not a ready library item")
+                base = ModelSpec(name=add.name, source=COORD_PREFIX + add.file)
             specs[add.name] = await checked_spec(base.model_copy(update=add.fields()))
         try:
             return await reconciler.simulate(list(specs.values()))
@@ -679,14 +778,22 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
     # ------------------------------------------------------------------ recommend
     @router.post("/recommend")
     async def recommend(body: RecommendBody) -> dict:
-        item = library.get(body.file)
-        if item is None or item.status != "ready":
-            raise HTTPException(422, f"file {body.file!r} is not a ready library item")
-        stem = re.sub(r"[^A-Za-z0-9._-]", "-", body.file.rsplit("/", 1)[-1].rsplit(".", 1)[0])[:64]
+        if body.engine in HF_ENGINES:
+            if not body.hf_repo:
+                raise HTTPException(422, f"engine {body.engine} needs hf_repo")
+            source = hf_source(body.hf_repo)
+            label = parse_hf_source(source)[0].rsplit("/", 1)[-1]
+        else:
+            item = library.get(body.file) if body.file else None
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {body.file!r} is not a ready library item")
+            source, label = COORD_PREFIX + body.file, body.file.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        stem = re.sub(r"[^A-Za-z0-9._-]", "-", label)[:64]
 
         def spec_for(ctx: int) -> ModelSpec:
             return ModelSpec(
-                name=stem or "recommend", source=COORD_PREFIX + body.file, ctx_size=ctx, parallel=body.parallel,
+                name=stem or "recommend", source=source, ctx_size=ctx, parallel=body.parallel,
+                engine=body.engine, tensor_parallel=body.tensor_parallel if body.engine in HF_ENGINES else None,
                 replicas=1, pin_devices=body.pin_devices, priority=body.priority, spread=body.spread,
                 kv_cache_type=body.kv_cache_type, speculative=body.speculative,
                 draft=COORD_PREFIX + body.draft_file if body.speculative == "draft" and body.draft_file else None,
@@ -694,6 +801,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
                 ubatch=body.ubatch, batch=max(body.batch, body.ubatch), kv_unified=body.kv_unified)
 
         check_attention(spec_for(body.ctx_size))
+        await check_engine(spec_for(body.ctx_size))
         await check_draft(spec_for(body.ctx_size))
         try:
             meta = await reconciler.meta_for(spec_for(body.ctx_size))
@@ -714,7 +822,10 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
         ckw = {"ubatch": body.ubatch, "flash_attn": body.flash_attn, "parallel": body.parallel,
                "kv_unified": body.kv_unified}
-        need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, mtp=body.speculative == "mtp", **ckw)
+        if body.engine in HF_ENGINES:  # on one GPU, as the engine sizes it (tensor parallel 1)
+            need = tp_need_mb(meta, spec_for(body.ctx_size), 1)
+        else:
+            need = total_need_mb(meta, body.ctx_size, body.kv_cache_type, mtp=body.speculative == "mtp", **ckw)
         if dmeta is not None:
             need += total_need_mb(dmeta, body.ctx_size, body.kv_cache_type, **ckw)
         try:
@@ -755,10 +866,14 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             return await reconciler.meta_for(ModelSpec(name="tuning", source=COORD_PREFIX + file))
 
         try:
+            if body.engine in HF_ENGINES:
+                raise _NoTips  # the tips tune llama.cpp settings
             tips = await suggest(spec_for(body.ctx_size), meta, ranked[0] if ranked else None, rank=top,
                                  meta_of=lib_meta, library=library.list(), max_ctx_single_gpu=max_single,
                                  devices={(r.node_id, d.device_id): d
                                           for r in reconciler.available_reports() for d in r.devices})
+        except _NoTips:
+            tips = []
         except Exception:  # suggestions are advice: never fail the placement answer over them
             log.exception("tuning suggestions failed")
             tips = []
@@ -769,6 +884,57 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             "not_possible": not_possible,
             "tips": tips,
         }
+
+    # ------------------------------------------------------------------ engine advice
+    facts_cache: dict[str, ModelFacts] = {}
+
+    async def hf_facts(source: str) -> ModelFacts:
+        if source in facts_cache:
+            return facts_cache[source]
+        if hf is None:
+            raise HTTPException(503, "no Hugging Face client on this coordinator")
+        repo, rev = parse_hf_source(source)
+        try:
+            files = await hf.list_files(repo, rev or "main")
+            config = await hf.fetch_json(repo, rev or "main", "config.json")
+        except Exception as e:
+            msg = getattr(e, "message", None) or f"{type(e).__name__}: {e}"
+            raise HTTPException(422, f"cannot read {source}: {msg}") from e
+        facts = facts_cache[source] = facts_from_config(config, [f.name for f in files], repo)
+        return facts
+
+    @router.post("/engines/recommend")
+    async def recommend_engine(body: EngineAdviceBody) -> dict:
+        """Which engine to serve a model with: every engine with whether it supports the model, which
+        servers run it and whether it fits right now, best first. Changes nothing."""
+        if body.hf_repo:
+            source = hf_source(body.hf_repo)
+            facts = await hf_facts(source)
+        elif body.file:
+            item = library.get(body.file)
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {body.file!r} is not a ready library item")
+            source, facts = COORD_PREFIX + body.file, ModelFacts(kind="gguf")
+        else:
+            raise HTTPException(422, "file or hf_repo is required")
+        reports = reconciler.available_reports()
+        servers = {"llama.cpp": [r.node_id for r in reports]}
+        for e in HF_ENGINES:
+            servers[e] = [r.node_id for r in reports if has_engine(r, e)]
+        can_convert = bool(convert_ok()) if convert_ok is not None else False
+        fits: dict = {}
+        for engine, (ok, *_) in supported_engines(facts, can_convert).items():
+            if not ok or not servers.get(engine) or (facts.kind == "hf" and engine == DEFAULT_ENGINE):
+                continue  # unsupported, nowhere to run, or no GGUF to plan with yet
+            spec = ModelSpec(name="engine-advice", source=source, engine=engine, ctx_size=body.ctx_size,
+                             parallel=body.parallel, priority=body.priority, pin_devices=body.pin_devices)
+            try:
+                got = await reconciler.rank_for(spec, 1)
+            except Exception:
+                log.exception("engine advice: ranking %s on %s failed", source, engine)
+                got = []
+            fits[engine] = got[0] if got else None
+        return advise(facts, servers, fits, can_convert)
 
     # ------------------------------------------------------------------ events
     @router.get("/events")

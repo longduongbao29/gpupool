@@ -251,7 +251,9 @@ async def test_put_model_create_update_validation(env):
     register(store, clock, node("a"))
     r = await c.put("/api/models/qwen", json={"file": "x.gguf"})
     assert r.status_code == 200
-    assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "ctx_size": 4096,
+    assert r.json() == {"name": "qwen", "source": "coordinator://x.gguf", "engine": "llama.cpp",
+                        "tensor_parallel": None, "trust_remote_code": False, "engine_args": [],
+                        "ctx_size": 4096,
                         "parallel": 1, "replicas": 0, "pin_devices": [], "priority": 50, "spread": "gpu",
                         "min_replicas": None, "max_replicas": None, "autoscale": None, "idle_unload_s": None,
                         "preemptible": True, "kv_cache_type": "f16", "speculative": "none",

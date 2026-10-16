@@ -33,6 +33,11 @@ _PROCESSING = "llamacpp:requests_processing"
 _DEFERRED = "llamacpp:requests_deferred"
 _TPS = "llamacpp:predicted_tokens_seconds"
 _WANTED = {_PROCESSING, _DEFERRED, _TPS}
+# The same gauges in vLLM and SGLang (no tokens/s gauge: their throughput is a counter).
+_ALIASES = {
+    "vllm:num_requests_running": _PROCESSING, "vllm:num_requests_waiting": _DEFERRED,
+    "sglang:num_running_reqs": _PROCESSING, "sglang:num_queue_reqs": _DEFERRED,
+}
 
 
 def bounds(spec: ModelSpec) -> tuple[int, int]:
@@ -43,20 +48,25 @@ def bounds(spec: ModelSpec) -> tuple[int, int]:
 
 
 def parse_metrics(text: str) -> dict[str, float]:
-    """Pick the llama.cpp gauges we use out of Prometheus text; junk lines are skipped."""
+    """Pick the gauges we use (llama.cpp's, or vLLM's / SGLang's under llama.cpp's names) out of
+    Prometheus text; junk lines are skipped. Series of one gauge are summed: vLLM and SGLang label
+    theirs per model or engine core."""
     out: dict[str, float] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        parts = line.split()
-        if len(parts) < 2:
+        if "{" in line:  # label values may hold spaces: the value follows the closing brace
+            name, rest = line[:line.index("{")], line[line.rfind("}") + 1:].split()
+        else:
+            name, *rest = line.split()
+        if not rest:
             continue
-        name = parts[0].split("{", 1)[0]
+        name = _ALIASES.get(name, name)
         if name not in _WANTED:
             continue
         try:
-            out[name] = float(parts[1])
+            out[name] = out.get(name, 0.0) + float(rest[0])
         except ValueError:
             continue
     return out

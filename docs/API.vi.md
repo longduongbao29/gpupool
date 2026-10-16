@@ -63,12 +63,14 @@ Do router của coordinator phục vụ. Xác thực: API key hoặc admin key (
 | GET | `/v1/models` | liệt kê tên model (mọi model đã đăng ký, đang chạy hay không) |
 | POST | `/v1/chat/completions` | chat completion, chuyển tiếp tới một replica sẵn sàng |
 | POST | `/v1/completions` | text completion, chuyển tiếp tới một replica sẵn sàng |
+| POST | `/v1/embeddings`, `/v1/responses`, `/v1/rerank`, `/v1/score` | chuyển tiếp theo cùng cách; model có trả lời được hay không tùy engine và model (xem [ENGINES.vi.md](ENGINES.vi.md)) |
 
 **`GET /v1/models`** trả `{"object": "list", "data": [{"id": "<name>", "object": "model", "owned_by":
 "gpupool"}]}`.
 
 **`POST /v1/chat/completions` và `POST /v1/completions`**: body là request của llama-server (OpenAI), được
-chuyển tiếp nguyên vẹn, chỉ có `cache_prompt` mặc định là `true`. Các quy tắc router thêm vào:
+chuyển tiếp nguyên vẹn, chỉ có `cache_prompt` mặc định là `true` với replica llama.cpp (replica vLLM và SGLang nhận
+đúng body đã gửi). Các quy tắc router thêm vào:
 
 - Body phải là một JSON object có `model` là chuỗi, trỏ tới một model đã đăng ký.
 - Kích thước body bị giới hạn bởi `max_request_mb` (mặc định 32 MB), kể cả khi upload dạng chunked.
@@ -111,7 +113,11 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 | Trường | Kiểu, mặc định | Giá trị hợp lệ và ý nghĩa |
 | --- | --- | --- |
 | `name` | string, bắt buộc | alias phục vụ ở `/v1/models`. Qua `/api/models/{name}`: `[A-Za-z0-9._-]{1,64}` |
-| `source` | string, bắt buộc | `https://...gguf`, đường dẫn tuyệt đối trên coordinator, hoặc `coordinator://<file trong thư viện>`. `/api` luôn ghi `coordinator://<file>` |
+| `source` | string, bắt buộc | llama.cpp: `https://...gguf`, đường dẫn tuyệt đối trên coordinator, hoặc `coordinator://<file trong thư viện>` (`/api` ghi `coordinator://<file>`). vLLM / SGLang: `hf://owner/name[@revision]` |
+| `engine` | `"llama.cpp"` / `"vllm"` / `"sglang"`, `"llama.cpp"` | engine phục vụ model, xem [ENGINES.vi.md](ENGINES.vi.md). Replica vLLM / SGLang chạy trên các GPU của một server có agent báo `engine:<tên>` |
+| `tensor_parallel` | int 1..8 hoặc null, null | vLLM / SGLang: số GPU chia model (phải chia hết số attention head); null = số nhỏ nhất trong 1, 2, 4, 8 mà vừa |
+| `trust_remote_code` | bool, false | vLLM / SGLang: `--trust-remote-code` |
+| `engine_args` | list string, rỗng | vLLM / SGLang: flag nối vào lệnh engine; agent từ chối trừ khi `GPUPOOL_ALLOW_ENGINE_ARGS=1` |
 | `ctx_size` | int, 4096 | tổng context (token), chia đều cho `parallel` slot (llama.cpp `-c`); qua `/api` phải `>= 1` |
 | `parallel` | int, 1 | số slot chạy đồng thời (llama.cpp `-np`); qua `/api` phải `>= 1`. Mức bận của autoscale là `processing / parallel` |
 | `replicas` | int, 1 | số lượng mong muốn; **`0` = dừng**. Đây là công tắc bật/tắt: khi autoscale thì giữ `> 0` và `min/max` giới hạn số lượng |
@@ -138,6 +144,9 @@ curl -s $COORD/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-T
 Đây là giá trị mặc định: mỗi request vẫn tự đặt được (`reasoning_effort`, trong đó `"none"` tắt suy nghĩ, và `chat_template_kwargs`); router chuyển cả hai cho llama-server.
 
 Kiểm tra do `PUT /api/models/{name}` và `/api/simulate` áp dụng (giống nhau):
+
+- vLLM / SGLang: `source` phải là `hf://...` (còn của llama.cpp thì không được), `speculative` phải là `none` và
+  `kv_cache_type` là `f16` (dùng flag riêng của engine), và phải đọc được `config.json`;
 
 - `min_replicas <= max_replicas` (422).
 - `idle_unload_s` cần `min_replicas == 0` (422).
@@ -170,7 +179,12 @@ mới lấy giá trị mặc định.
 
 | Trường | Kiểu | Mặc định / giữ |
 | --- | --- | --- |
-| `file` | string, bắt buộc | tên mục thư viện; phải `ready` (nếu không là 422). Lưu thành `source = coordinator://<file>` |
+| `engine` | `llama.cpp` / `vllm` / `sglang` hoặc null | giữ, nếu không thì `llama.cpp` |
+| `file` | string | llama.cpp, bắt buộc: tên mục thư viện; phải `ready` (nếu không là 422). Lưu thành `source = coordinator://<file>` |
+| `hf_repo` | string hoặc null | vLLM / SGLang: `owner/name[@revision]` (hoặc `hf://...`); giữ. Bắt buộc với model mới. Coordinator đọc `config.json` của repo (422 nếu không đọc được: sai tên, repo gated mà thiếu `HF_TOKEN`) |
+| `tensor_parallel` | int 1..8 hoặc null | vLLM / SGLang: bỏ trống thì giữ; `null` tường minh thì xóa (scheduler tự chọn). 422 nếu không chia hết số attention head |
+| `trust_remote_code` | bool hoặc null | vLLM / SGLang: giữ, nếu không thì false |
+| `engine_args` | list string hoặc null | vLLM / SGLang: giữ, nếu không thì rỗng |
 | `ctx_size` | int `>= 1` | 4096 (luôn ghi đè) |
 | `parallel` | int `>= 1` | 1 (luôn ghi đè) |
 | `pin_devices` | danh sách string | rỗng (luôn ghi đè, bỏ trùng); cho phép `"node_id/*"`, xem mục 2 |
@@ -370,6 +384,7 @@ Tất cả nằm dưới `/api`, dùng admin key. Không route nào thay đổi 
 | --- | --- | --- |
 | GET | `/api/capacity` | bộ nhớ trống, băng thông, mức bận và các replica của từng GPU |
 | POST | `/api/recommend` | xếp hạng GPU/server cho một model trước khi deploy |
+| POST | `/api/engines/recommend` | nên phục vụ model bằng engine nào (hỗ trợ, server, có vừa không) |
 | POST | `/api/simulate` | reconciler sẽ làm gì với các thay đổi spec giả định |
 
 ### `GET /api/capacity`
@@ -385,13 +400,40 @@ Tất cả nằm dưới `/api`, dùng admin key. Không route nào thay đổi 
 `free_for_new_mb` bằng 0 với GPU bị tắt hoặc node chết; `reserved_mb = usable_mb - free_for_new_mb`.
 `summary` chỉ tính thiết bị CUDA.
 
+### `POST /api/engines/recommend`
+
+Nên phục vụ model bằng engine nào, trước khi triển khai. Không thay đổi gì. Body: `file` (GGUF đã `ready` trong thư
+viện) hoặc `hf_repo` (`owner/name[@revision]`), cùng `ctx_size` (4096), `parallel` (1), `priority` (50), `pin_devices`
+([]) dùng để kiểm tra có vừa không. 422 khi thiếu nguồn, file không phải mục thư viện đã `ready`, hoặc không đọc được
+`config.json` của repo (mỗi repo chỉ đọc một lần rồi lưu cache).
+
+```json
+{"model": {"kind": "hf", "task": "generate", "vision": true, "quant": null, "arch": "Qwen2_5_VLForConditionalGeneration"},
+ "recommended": "vllm",
+ "options": [
+  {"engine": "vllm", "label": "vLLM", "supported": true, "score": 100, "servers": ["gpu-1"], "fits_now": true,
+   "needs_conversion": false, "reasons": ["fits now on 1 GPU(s) of gpu-1, ~41 tok/s", "..."], "warnings": [],
+   "placement": {"tier": "single_gpu", "head_node": "gpu-1", "est_total_mb": 19235, "est_decode_tps": 41.0,
+                 "devices": ["gpu-1/CUDA0"]}},
+  {"engine": "sglang", "supported": true, "servers": [], "fits_now": null, "warnings": ["no server runs SGLang: ..."], "...": "..."},
+  {"engine": "llama.cpp", "supported": false, "warnings": ["vision models need an mmproj file, ..."], "...": "..."}]}
+```
+
+- `model.task`: `generate`, `embedding` hoặc `rerank`; `quant`: `quantization_config.quant_method` của repo.
+- `supported`: engine có phục vụ được model này không. `servers`: các server có agent chạy engine đó.
+- `fits_now`: câu trả lời của scheduler tại thời điểm hỏi (null: không kiểm tra, vì engine không hỗ trợ, không có
+  server nào cài, hoặc `needs_conversion`). `needs_conversion`: llama.cpp cho một repo, sau khi chuyển sang GGUF.
+- `options` xếp từ phù hợp nhất; `recommended` là phương án được hỗ trợ đầu tiên (null nếu không có).
+
 ### `POST /api/recommend`
 
 Body `RecommendBody`:
 
 | Trường | Kiểu, mặc định | Ý nghĩa |
 | --- | --- | --- |
-| `file` | string, bắt buộc | mục thư viện (phải `ready`, nếu không là 422) |
+| `file` | string | llama.cpp: mục thư viện (phải `ready`, nếu không là 422) |
+| `engine` | enum, `llama.cpp` | |
+| `hf_repo`, `tensor_parallel` | như ở `PUT /api/models` | vLLM / SGLang; khi đó `need_mb` là nhu cầu trên một GPU và `tips` rỗng |
 | `ctx_size` | int `>= 1`, 4096 | |
 | `parallel` | int `>= 1`, 1 | |
 | `priority` | int 0..100, 50 | dùng để xác định replica nào có thể bị giành chỗ |
@@ -657,7 +699,7 @@ file, `502` tải lỗi.
 
 ## 11. Chỉ mục route
 
-Cả 51 route, để kiểm tra đầy đủ:
+Cả 57 route, để kiểm tra đầy đủ:
 
 | # | Method | Đường dẫn | Mục |
 | --- | --- | --- | --- |
@@ -713,6 +755,11 @@ Cả 51 route, để kiểm tra đầy đủ:
 | 50 | POST | `/api/convert/{job_id}/accept` | 12 |
 | 51 | DELETE | `/api/convert/{job_id}` | 12 |
 | 52 | DELETE | `/api/events` | 8 |
+| 53 | POST | `/v1/embeddings` | 1 |
+| 54 | POST | `/v1/responses` | 1 |
+| 55 | POST | `/v1/rerank` | 1 |
+| 56 | POST | `/v1/score` | 1 |
+| 57 | POST | `/api/engines/recommend` | 6 |
 
 Số lượng khớp với các decorator route tìm thấy trong code: 16 + 6 + 10 + 9 + 3 + 7 = 51.
 

@@ -1,5 +1,12 @@
 # gpupool agent: CUDA runtime + llama.cpp (CUDA + RPC) + the gpupool agent.
 #
+# With --build-arg WITH_ENGINES=1 (published as the "-all" tag) the image also carries vLLM and SGLang,
+# each in its own virtualenv under /opt/engines, so one container serves every engine gpupool knows
+# (docs/ENGINES.en.md). Their PyPI wheels bring their own CUDA libraries: the pinned versions need an
+# NVIDIA driver >= 580 (CUDA 13). For an older driver build with wheels for an older CUDA through
+# VLLM_PIP_ARGS / SGLANG_PIP_ARGS (e.g. an --index-url of a cu128 wheel index). Run it with
+# --ipc host (or a large --shm-size): tensor-parallel workers exchange data through /dev/shm.
+#
 # Run on each GPU server (needs the NVIDIA Container Toolkit):
 #   docker run -d --name gpupool-agent --gpus all --network host --pid host -v gpupool-agent:/data \
 #     -e GPUPOOL_JOIN=http://10.0.0.1:8080#<cluster_token> ghcr.io/longduongbao29/gpupool-agent
@@ -148,6 +155,36 @@ COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md .python-ver
 RUN --mount=type=bind,source=vendor,target=/vendor \
     [ -n "${UV_PYTHON_INSTALL_MIRROR:-}" ] || unset UV_PYTHON_INSTALL_MIRROR; \
     uv sync --frozen --no-dev --no-install-project
+
+# vLLM and SGLang (WITH_ENGINES=1). Two virtualenvs: they pin different versions of shared packages
+# (transformers, flashinfer), so one environment cannot hold both. Both are filled in ONE layer from
+# one uv cache with hardlinks, so the multi-GB files they share (torch, the CUDA libraries) are stored
+# once. Before `COPY src`: a code change does not reinstall them. gcc / libc6-dev: Triton compiles
+# small launcher stubs on first use. SGLang needs two pre-releases (named explicitly, so uv takes no
+# other pre-release).
+ARG WITH_ENGINES=0
+ARG VLLM_VERSION=0.30.0
+ARG SGLANG_VERSION=0.5.20
+ARG SGLANG_PRERELEASES="cuda-tile==1.6.0rc5 flash-attn-4==4.0.0b35"
+ARG VLLM_PIP_ARGS=
+ARG SGLANG_PIP_ARGS=
+RUN --mount=type=bind,source=vendor,target=/vendor \
+    set -eu; \
+    if [ "$WITH_ENGINES" != 1 ]; then exit 0; fi; \
+    [ -n "${UV_PYTHON_INSTALL_MIRROR:-}" ] || unset UV_PYTHON_INSTALL_MIRROR; \
+    apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*; \
+    export UV_CACHE_DIR=/tmp/uv-cache UV_LINK_MODE=hardlink UV_COMPILE_BYTECODE=0; \
+    uv venv --python 3.12 /opt/engines/vllm; \
+    uv pip install --python /opt/engines/vllm/bin/python $VLLM_PIP_ARGS "vllm==${VLLM_VERSION}"; \
+    uv venv --python 3.12 /opt/engines/sglang; \
+    uv pip install --python /opt/engines/sglang/bin/python $SGLANG_PIP_ARGS "sglang==${SGLANG_VERSION}" $SGLANG_PRERELEASES; \
+    rm -rf /tmp/uv-cache; \
+    /opt/engines/vllm/bin/python -c "import importlib.metadata as m; print('vllm', m.version('vllm'))"; \
+    /opt/engines/sglang/bin/python -c "import importlib.metadata as m; print('sglang', m.version('sglang'))"
+# The agent offers an engine only when its command resolves, so these are harmless without the engines.
+ENV GPUPOOL_VLLM_CMD="/opt/engines/vllm/bin/vllm serve" \
+    GPUPOOL_SGLANG_CMD="/opt/engines/sglang/bin/python -m sglang.launch_server"
+
 COPY src ./src
 RUN --mount=type=bind,source=vendor,target=/vendor \
     [ -n "${UV_PYTHON_INSTALL_MIRROR:-}" ] || unset UV_PYTHON_INSTALL_MIRROR; \

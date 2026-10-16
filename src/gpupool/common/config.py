@@ -47,6 +47,14 @@ class AgentConfig(BaseModel):
     # Cap on ggml-rpc-server's weight cache ($LLAMA_CACHE/rpc), in GB; least recently used tensor
     # files are deleted above it. 0 = no cap (llama.cpp itself never deletes them).
     rpc_cache_gb: float = Field(default=100.0, ge=0)
+    # Engines besides llama.cpp (agent/engines.py). Each is offered to the coordinator when its
+    # command resolves on PATH. Any wrapper works: "/opt/vllm/bin/vllm serve", "uvx vllm serve"...
+    vllm_cmd: str = "vllm serve"
+    sglang_cmd: str = "python3 -m sglang.launch_server"
+    # Accept per-model engine flags from the coordinator (EngineSpec.engine_args). Off: a cluster
+    # token alone must not be able to pass arbitrary flags to an engine.
+    allow_engine_args: bool = False
+    hf_home: Path | None = None  # vLLM / SGLang download cache; None = <cache_dir>/hf
 
 
 class CoordinatorConfig(BaseModel):
