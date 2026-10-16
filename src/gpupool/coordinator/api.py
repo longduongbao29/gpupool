@@ -17,7 +17,7 @@ from gpupool.common.models import (
 )
 from gpupool.coordinator.agent_client import AgentError
 from gpupool.coordinator.autoscaler import bounds
-from gpupool.coordinator.store import ServerRecord, gpu_key, planning_factor
+from gpupool.coordinator.store import ServerRecord, config_key, gpu_key, planning_factor
 from gpupool.coordinator.tuning import suggest
 from gpupool.scheduler.estimate import total_need_mb
 from gpupool.scheduler.placement import NoFit
@@ -398,6 +398,14 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
             raise HTTPException(422, f"{pre}draft vocabulary size {dmeta.vocab_size} is too different from "
                                      f"the model's {meta.vocab_size} (at most {MAX_VOCAB_DIFF} apart)")
 
+    def check_pins(pins: list[str]) -> None:
+        registered = {s.node_id for s in store.list_servers()}
+        for pin in pins:
+            if not PIN_RE.match(pin):
+                raise HTTPException(422, f"pin_devices entry {pin!r} must look like node/device")
+            if pin.split("/", 1)[0] not in registered:
+                raise HTTPException(422, f"pin_devices entry {pin!r} names an unregistered server")
+
     def check_name(name: str) -> None:
         if not NAME_RE.match(name):
             raise HTTPException(422, "model name must match [A-Za-z0-9._-]{1,64}")
@@ -408,12 +416,7 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         item = library.get(body.file)
         if item is None or item.status != "ready":
             raise HTTPException(422, f"file {body.file!r} is not a ready library item")
-        registered = {s.node_id for s in store.list_servers()}
-        for pin in body.pin_devices:
-            if not PIN_RE.match(pin):
-                raise HTTPException(422, f"pin_devices entry {pin!r} must look like node/device")
-            if pin.split("/", 1)[0] not in registered:
-                raise HTTPException(422, f"pin_devices entry {pin!r} names an unregistered server")
+        check_pins(body.pin_devices)
         existing = store.get_model(name)
 
         def keep(new, field: str):
@@ -467,6 +470,59 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
         reconciler.retry_now(name)  # Start after a failure is a retry: no backoff wait
         reconciler.wake()  # not tick(): that waits on the tick lock and agent HTTP calls
         return spec.model_dump(mode="json")
+
+    # ------------------------------------------------------------------ config history
+    def config_entry(c, current_key: str) -> dict:
+        file = c.spec.source[len(COORD_PREFIX):] if c.spec.source.startswith(COORD_PREFIX) else None
+        return {**c.model_dump(mode="json", exclude={"model"}), "file": file,
+                "current": config_key(c.spec) == current_key}
+
+    def config_or_404(name: str, config_id: int):
+        c = store.get_config(name, config_id)
+        if c is None:
+            raise HTTPException(404, f"no config {config_id} in the history of model {name}")
+        return c
+
+    @router.get("/models/{name}/configs")
+    async def list_model_configs(name: str) -> list[dict]:
+        """The configurations the model was launched with, newest run first."""
+        key = config_key(spec_or_404(store, name))
+        return [config_entry(c, key) for c in store.list_configs(name)]
+
+    @router.post("/models/{name}/configs/{config_id}/run")
+    async def run_model_config(name: str, config_id: int, body: StartBody | None = Body(default=None)) -> dict:
+        """Make an earlier configuration the model's settings again and start it. The replica count
+        comes from the body, else the running count, else 1."""
+        current = spec_or_404(store, name)
+        c = config_or_404(name, config_id)
+        n = body.replicas if body is not None else (current.replicas or 1)
+        spec = c.spec.model_copy(update={"name": name, "replicas": n})
+        file = spec.source[len(COORD_PREFIX):] if spec.source.startswith(COORD_PREFIX) else None
+        if file is not None:
+            item = library.get(file)
+            if item is None or item.status != "ready":
+                raise HTTPException(422, f"file {file!r} of this config is no longer a ready library item")
+        check_pins(spec.pin_devices)
+        check_attention(spec)
+        await check_draft(spec)
+        store.put_model(spec)
+        # Settings apply at launch: replicas running another config are drained (requests in
+        # flight finish first) and the reconciler relaunches them with this one.
+        for r in store.list_replicas(model=name, states=set(ACTIVE_STATES)):
+            if r.config_id != c.id:
+                await reconciler.drain(r.replica_id)
+        emit("info", "model_started", f"Model {name} started with an earlier configuration "
+                                      f"({spec.replicas} replica(s) requested)", model=name)
+        reconciler.retry_now(name)  # other settings deserve a fresh attempt
+        reconciler.wake()
+        return spec.model_dump(mode="json")
+
+    @router.delete("/models/{name}/configs/{config_id}")
+    async def delete_model_config(name: str, config_id: int) -> dict:
+        spec_or_404(store, name)
+        config_or_404(name, config_id)
+        store.delete_config(name, config_id)
+        return {"ok": True}
 
     @router.get("/models/{name}/scaling")
     async def model_scaling(name: str) -> dict:

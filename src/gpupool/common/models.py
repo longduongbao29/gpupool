@@ -308,6 +308,7 @@ class ReplicaRecord(BaseModel):
     created_at: float
     updated_at: float
     error: str | None = None
+    config_id: int | None = None  # the model_configs row (config history) it was launched with
 
 
 class ReplicaEndpoint(BaseModel):

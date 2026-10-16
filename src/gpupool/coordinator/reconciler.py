@@ -1068,6 +1068,8 @@ class Reconciler:
         """`model_fault`: the model/engine caused it (not a dead node or missing GPU), so a
         replica that dies soon after becoming ready backs the model off instead of reloading every tick."""
         log.warning("replica %s failed: %s", rec.replica_id, reason)
+        if model_fault:
+            self.store.note_config_result(rec.config_id, False, reason)
         if model_fault and rec.state == "ready" and now - rec.updated_at < self.STABLE_S:
             n, delay = self._bump_backoff(rec.model, now)
             if 2 <= n < self.MAX_LAUNCH_FAILURES:  # at the limit launch_gave_up says it instead
@@ -1304,7 +1306,8 @@ class Reconciler:
     def _spawn_launch(self, spec: ModelSpec, placement: Placement, now: float) -> ReplicaRecord:
         """Record `placement` as a launching replica and start its launch task."""
         rec = ReplicaRecord(replica_id=placement.replica_id, model=spec.name, placement=placement,
-                            state="launching", created_at=now, updated_at=now)
+                            state="launching", created_at=now, updated_at=now,
+                            config_id=self.store.record_config_run(spec, now))
         self.store.put_replica(rec)
         self._launches[rec.replica_id] = asyncio.create_task(self._launch(rec, spec), name=f"launch-{rec.replica_id}")
         return rec
@@ -1420,6 +1423,7 @@ class Reconciler:
             if cur is None or cur.state != "launching":
                 raise _Superseded
             self.store.set_replica_state(rid, "ready", None, now=self.clock())
+            self.store.note_config_result(cur.config_id, True)
             became_ready = True
             log.info("replica %s ready", rid)
             for key in [k for k in self._repeats if k[1] == spec.name]:
@@ -1463,6 +1467,8 @@ class Reconciler:
             cur = self.store.get_replica(rid)
             if cur is not None and cur.state == "launching":
                 self.store.set_replica_state(rid, "failed", err[:2000], now=self.clock())
+                if not isinstance(e, _PortTaken):  # a busy port says nothing about the config
+                    self.store.note_config_result(cur.config_id, False, err[:2000])
         finally:
             try:
                 if became_ready:

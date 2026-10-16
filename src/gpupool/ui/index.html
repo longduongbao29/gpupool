@@ -794,6 +794,7 @@
                 <button class="btn" x-show="m.state==='running' || m.state==='starting' || m.state==='idle'" @click="stopModel(m)"><span x-html="icon('stop')"></span> Stop</button>
                 <button class="btn" x-show="m.state==='running' || m.state==='idle'" @click="pgOpen(m.spec.name)" title="Chat with this model in the Playground"><span x-html="icon('chat')"></span> Chat</button>
                 <div class="row right" style="gap:var(--s-1)">
+                  <button class="btn" @click="openHist(m)" title="Configurations this deployment ran with; run one again"><span x-html="icon('list')"></span> History</button>
                   <button class="btn" @click="openForm(m)"><span x-html="icon('edit')"></span> Edit</button>
                   <button class="btn ghost danger icon" @click="deleteModel(m)" title="Delete" aria-label="Delete" x-html="icon('trash')"></button>
                 </div>
@@ -1226,6 +1227,38 @@
         <button class="btn primary" @click="convStart()" :disabled="!!convStartBlock()" :title="convStartBlock()"><span class="spin" x-show="conv.busy"></span><span x-show="!conv.busy" x-html="icon('play')"></span> Start conversion</button>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="overlay" x-show="authed && hist.open" x-cloak @click.self="hist.open = false" @keydown.escape.window="hist.open = false" x-transition:enter="tr-enter" x-transition:enter-start="tr-fade-from" x-transition:enter-end="tr-fade-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-fade-to" x-transition:leave-end="tr-fade-from">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="hist-title" x-show="hist.open" x-transition:enter="tr-enter" x-transition:enter-start="tr-pop-from" x-transition:enter-end="tr-pop-to" x-transition:leave="tr-leave" x-transition:leave-start="tr-pop-to" x-transition:leave-end="tr-pop-from">
+    <div class="modal-head"><h2 id="hist-title" class="ellipsis" x-text="'Config history: ' + hist.name"></h2><button class="btn ghost icon sm right" aria-label="Close" @click="hist.open = false" x-html="icon('x')"></button></div>
+    <div class="modal-body hist-list">
+      <p class="muted small" style="margin-top:0">Every configuration this deployment was launched with, most recent first. Run one to make it the deployment's settings again.</p>
+      <div class="muted small" x-show="hist.loading">Loading…</div>
+      <div class="errbox" x-show="hist.err" x-text="hist.err"></div>
+      <div class="muted small" x-show="!hist.loading && !hist.err && !hist.items.length">Nothing recorded yet. A configuration is recorded when a replica launches with it.</div>
+      <template x-for="c in hist.items" :key="c.id">
+        <div class="opt">
+          <div class="row wrap">
+            <span class="pill lead" :class="c.last_result === 'ready' ? 'green' : (c.last_result === 'failed' ? 'red' : 'blue')" x-text="c.last_result === 'ready' ? 'ran' : (c.last_result === 'failed' ? 'failed' : 'launching')"></span>
+            <span class="pill accent" x-show="c.current">current</span>
+            <span class="muted small" x-text="histWhen(c)"></span>
+            <div class="row right" style="gap:var(--s-1)">
+              <button class="btn sm primary" x-show="!c.current" :disabled="hist.busy" @click="histRun(c)"><span x-html="icon('play')"></span> Run this config</button>
+              <button class="btn ghost danger icon sm" :disabled="hist.busy" @click="histDelete(c)" title="Remove from the history" aria-label="Remove from the history" x-html="icon('trash')"></button>
+            </div>
+          </div>
+          <div class="small mono hist-sum" x-text="histSummary(c)"></div>
+          <div class="small" x-show="!c.current && histDiff(c).length"><span class="muted">Differs from current:</span> <span x-text="histDiff(c).join(' · ')"></span></div>
+          <div x-show="c.last_error">
+            <button type="button" class="link-btn" @click="hist.show[c.id] = !hist.show[c.id]" x-text="hist.show[c.id] ? 'Hide last error' : 'Show last error'"></button>
+            <div class="errbox" x-show="hist.show[c.id]" x-text="c.last_error" style="margin-top:6px"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+    <div class="modal-foot"><button class="btn" @click="hist.open = false">Close</button></div>
   </div>
 </div>
 

@@ -8,6 +8,17 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.8] - 2026-10-16
+
+### Thêm mới
+
+- **Lịch sử config** cho mỗi deployment. Mọi cấu hình mà model từng được launch đều được ghi lại (toàn bộ thiết lập
+  trừ số replica), kèm kết quả các lần launch: bao nhiêu lên ready, bao nhiêu lỗi và lỗi gần nhất. Nút **History**
+  mới trên card model liệt kê 20 cấu hình chạy gần nhất, chỉ ra khác gì so với cấu hình hiện tại, và **Run this config**
+  đặt lại một cấu hình cũ làm cấu hình của deployment rồi start nó (replica đang chạy với cấu hình khác được drain và
+  launch lại). Route mới: `GET /api/models/{name}/configs`, `POST /api/models/{name}/configs/{id}/run`,
+  `DELETE /api/models/{name}/configs/{id}`.
+
 ## [0.9.7] - 2026-10-16
 
 ### Sửa lỗi

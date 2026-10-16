@@ -33,11 +33,38 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL, node_id TEXT, model TEXT, read INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS control_state (
     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL);
+CREATE TABLE IF NOT EXISTS model_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL, key TEXT NOT NULL, spec TEXT NOT NULL,
+    first_run REAL NOT NULL, last_run REAL NOT NULL, runs INTEGER NOT NULL DEFAULT 0,
+    ready INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, last_result TEXT,
+    last_error TEXT, UNIQUE(model, key));
 CREATE TABLE IF NOT EXISTS model_calibration (
     model TEXT PRIMARY KEY, factor REAL NOT NULL, samples INTEGER NOT NULL, updated_at REAL);
 """
 
 EVENTS_KEEP = 1000
+CONFIGS_KEEP = 20  # config history rows kept per model (least recently run go first)
+
+
+def config_key(spec: ModelSpec) -> str:
+    """Identity of a model's configuration in the history: every setting except the replica count,
+    which is the on/off switch and not part of how the model runs."""
+    return json.dumps(spec.model_dump(mode="json", exclude={"replicas"}), sort_keys=True)
+
+
+class ConfigRecord(BaseModel):
+    """One configuration a model was launched with, and how its launches went."""
+
+    id: int
+    model: str
+    spec: ModelSpec
+    first_run: float
+    last_run: float
+    runs: int  # replicas launched with it
+    ready: int  # of those, how many became ready
+    failed: int  # how many failed (launch error or a crash of the model)
+    last_result: str | None = None  # "ready" / "failed", the newest outcome
+    last_error: str | None = None
 # The measured/estimated memory ratio is clamped before planning uses it: a lucky measurement must
 # never shrink the safety margin below 0.9, and a wild one must not make a model unplaceable.
 CAL_MIN, CAL_MAX = 0.9, 2.0
@@ -252,7 +279,63 @@ class Store:
             self._conn.execute("DELETE FROM models WHERE name=?", (name,))
             self._conn.execute("DELETE FROM control_state WHERE key=?", (f"autoscaler:{name}",))
             self._conn.execute("DELETE FROM model_calibration WHERE model=?", (name,))
+            self._conn.execute("DELETE FROM model_configs WHERE model=?", (name,))
             self._version += 1
+
+    # config history: the configurations each model was launched with. Not routing state, so
+    # writes do not bump the version.
+    _CONFIG_COLS = "id, model, spec, first_run, last_run, runs, ready, failed, last_result, last_error"
+
+    @staticmethod
+    def _config(row: tuple) -> ConfigRecord:
+        i, m, spec, first, last, runs, ready, failed, result, err = row
+        return ConfigRecord(id=i, model=m, spec=ModelSpec.model_validate_json(spec), first_run=first,
+                            last_run=last, runs=runs, ready=ready, failed=failed, last_result=result,
+                            last_error=err)
+
+    def record_config_run(self, spec: ModelSpec, now: float) -> int:
+        """Count one launch of `spec` in its model's history (one row per distinct config); returns
+        the row id. Keeps the CONFIGS_KEEP most recently run rows of the model."""
+        stored = spec.model_copy(update={"replicas": 0}).model_dump_json()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO model_configs(model, key, spec, first_run, last_run, runs) VALUES(?,?,?,?,?,1) "
+                "ON CONFLICT(model, key) DO UPDATE SET last_run=excluded.last_run, runs=runs+1",
+                (spec.name, config_key(spec), stored, now, now))
+            cid = self._conn.execute("SELECT id FROM model_configs WHERE model=? AND key=?",
+                                     (spec.name, config_key(spec))).fetchone()[0]
+            self._conn.execute(
+                "DELETE FROM model_configs WHERE model=? AND id NOT IN ("
+                " SELECT id FROM model_configs WHERE model=? ORDER BY last_run DESC, id DESC LIMIT ?)",
+                (spec.name, spec.name, CONFIGS_KEEP))
+        return cid
+
+    def note_config_result(self, config_id: int | None, ok: bool, error: str | None = None) -> None:
+        """Record how one launch of a config went: became ready, or failed with `error`."""
+        if config_id is None:
+            return
+        if ok:
+            self._write("UPDATE model_configs SET ready=ready+1, last_result='ready' WHERE id=?",
+                        (config_id,), bump=False)
+        else:
+            self._write("UPDATE model_configs SET failed=failed+1, last_result='failed', last_error=? "
+                        "WHERE id=?", (error, config_id), bump=False)
+
+    def list_configs(self, model: str) -> list[ConfigRecord]:
+        """Newest run first."""
+        return [self._config(r) for r in self._read(
+            f"SELECT {self._CONFIG_COLS} FROM model_configs WHERE model=? ORDER BY last_run DESC, id DESC",
+            (model,))]
+
+    def get_config(self, model: str, config_id: int) -> ConfigRecord | None:
+        rows = self._read(f"SELECT {self._CONFIG_COLS} FROM model_configs WHERE model=? AND id=?",
+                          (model, config_id))
+        return self._config(rows[0]) if rows else None
+
+    def delete_config(self, model: str, config_id: int) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute("DELETE FROM model_configs WHERE model=? AND id=?", (model, config_id))
+        return bool(cur.rowcount)
 
     # control state: coordinator in-memory state that must survive a restart. Routing does not
     # depend on it, so writes do not bump the version.

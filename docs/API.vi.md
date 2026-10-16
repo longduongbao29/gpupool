@@ -159,6 +159,9 @@ Tất cả nằm dưới `/api`, dùng admin key.
 | DELETE | `/api/models/{name}` | drain replica và xóa spec |
 | GET | `/api/models/{name}/scaling` | trạng thái autoscaler |
 | POST | `/api/models/{name}/plan` | chạy thử việc đặt một replica |
+| GET | `/api/models/{name}/configs` | lịch sử config: các cấu hình model đã từng được launch |
+| POST | `/api/models/{name}/configs/{id}/run` | đặt lại một cấu hình cũ làm cấu hình của model và start nó |
+| DELETE | `/api/models/{name}/configs/{id}` | xóa một mục khỏi lịch sử config |
 
 ### `PUT /api/models/{name}`
 
@@ -213,7 +216,32 @@ Không có body. Đặt `replicas = 0` (phát `model_stopped`); reconciler drain
 ### `DELETE /api/models/{name}`
 
 Drain mọi replica đang hoạt động rồi xóa spec. Trả `{"ok": true}`. 404 nếu không tồn tại. File trong thư
-viện được giữ lại (sau đó có thể xóa khỏi thư viện).
+viện được giữ lại (sau đó có thể xóa khỏi thư viện). Lịch sử config của model cũng bị xóa theo.
+
+### Lịch sử config: `/api/models/{name}/configs`
+
+Mỗi lần launch một replica, coordinator ghi lại cấu hình dùng để launch: toàn bộ `ModelSpec` trừ `replicas` (công tắc
+bật/tắt). Các lần launch cùng cấu hình dùng chung một mục, mục đó đếm số lần và nhớ kết quả. Mỗi model giữ 20 mục chạy
+gần nhất. Web UI hiển thị chúng ở nút **History** trên card model.
+
+`GET /api/models/{name}/configs` trả các mục, mục chạy gần nhất trước:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `id` | id của mục, dùng cho các route bên dưới |
+| `spec` | `ModelSpec` đã launch (`replicas` lưu là 0) |
+| `file` | tên file thư viện khi source là `coordinator://`, nếu không là null |
+| `first_run`, `last_run` | thời gian unix của lần launch đầu tiên và mới nhất với cấu hình này |
+| `runs`, `ready`, `failed` | số replica đã launch với nó, bao nhiêu lên ready, bao nhiêu lỗi (lỗi launch hoặc model bị crash; mất server không tính) |
+| `last_result` | `ready` / `failed`, kết quả mới nhất, hoặc null khi lần launch đầu đang chạy |
+| `last_error` | lỗi của lần thất bại mới nhất, hoặc null |
+| `current` | true khi trùng với cấu hình hiện tại của model |
+
+`POST /api/models/{name}/configs/{id}/run` (body tùy chọn `{"replicas": n}`) lưu cấu hình đó làm cấu hình của model
+và start nó, như `PUT` rồi `start`: replica đang chạy được thay bằng replica dùng cấu hình này. Số replica lấy từ body,
+nếu không có thì số hiện tại của model, nếu không nữa thì 1. Kiểm tra giống `PUT` (file phải vẫn là mục thư viện
+ready, pin phải chỉ tới server đã đăng ký, kiểm tra draft), nếu không trả 422. Trả `ModelSpec`.
+`DELETE /api/models/{name}/configs/{id}` xóa một mục. Cả hai trả 404 khi model hoặc mục không tồn tại.
 
 ### `GET /api/models/{name}/scaling`
 
@@ -503,7 +531,7 @@ Mục trong `models[]`:
 | `error` | lý do của `failed`, hoặc lỗi của replica mới nhất khi đang `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | khối **tự hiệu chỉnh VRAM**, `{"factor": 1.04, "samples": 3}`, hoặc `null` cho tới khi một replica của model được đo. Xem bên dưới |
-| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) cộng `outstanding` (số request đang chạy) và `stage` (`{text, since}` khi đang launch: kiểm tra hoặc tải file model kèm tiến độ, khởi động RPC server, nạp model kèm dòng log mới nhất của llama-server; null khi không launch). Liệt kê replica còn sống và replica lỗi mới nhất |
+| `replicas[]` | các trường của `ReplicaRecord` (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: mục lịch sử config của nó) cộng `outstanding` (số request đang chạy) và `stage` (`{text, since}` khi đang launch: kiểm tra hoặc tải file model kèm tiến độ, khởi động RPC server, nạp model kèm dòng log mới nhất của llama-server; null khi không launch). Liệt kê replica còn sống và replica lỗi mới nhất |
 
 **`calibration`.** Khi một replica chuyển sang ready, coordinator hỏi agent của head xem llama.cpp thực sự
 đã cấp phát bao nhiêu (`GET /engines/{engine_id}/memory`, mục 10), so với ước lượng (trừ phần context

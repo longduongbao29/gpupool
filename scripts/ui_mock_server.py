@@ -89,6 +89,27 @@ def _server(node_id: str, ip: str, gpus: list[dict], alive: bool, ram_total: int
 
 SERVERS: dict[str, dict] = {}
 MODELS: dict[str, dict] = {}
+CONFIGS: dict[str, list[dict]] = {}  # model -> config history entries, newest run first
+
+
+def _record_config(m: dict, result: str | None = "ready", error: str | None = None) -> None:
+    """Config history (GET /api/models/{name}/configs): one entry per distinct spec, replica count aside."""
+    spec = {k: v for k, v in m["spec"].items() if k != "replicas"}
+    hist = CONFIGS.setdefault(spec["name"], [])
+    hit = next((c for c in hist if c["spec"] == spec), None)
+    if hit is None:
+        hit = {"id": max((c["id"] for cs in CONFIGS.values() for c in cs), default=0) + 1, "spec": spec,
+               "first_run": time.time(), "runs": 0, "ready": 0, "failed": 0, "last_result": None, "last_error": None}
+        hist.append(hit)
+    hit.update(last_run=time.time(), runs=hit["runs"] + 1, last_result=result)
+    if result == "ready":
+        hit["ready"] += 1
+    elif result == "failed":
+        hit["failed"] += 1
+        hit["last_error"] = error
+    hist.sort(key=lambda c: -c["last_run"])
+
+
 LIBRARY: dict[str, dict] = {}
 SETTINGS = {"public_url": "http://127.0.0.1:8090", "cluster_token": "tok_mock_123", "api_keys_set": True}
 
@@ -101,6 +122,7 @@ def reset() -> None:
     REBAL.update(in_progress=None, done=False, next_run_ts=T0 + 600)
     SERVERS.clear()
     MODELS.clear()
+    CONFIGS.clear()
     LIBRARY.clear()
     SERVERS["CTG-Server-1"] = _server("CTG-Server-1", "10.0.0.5", [
         _gpu(0, "NVIDIA H100 80GB", 81920, 0.0), _gpu(1, "NVIDIA H100 80GB", 81920, 1.3),
@@ -132,6 +154,14 @@ def reset() -> None:
         "kv_cache_type": "q8_0", "speculative": "ngram", "draft": None, "draft_n_max": 4},
         "file": "qwen2.5-3b-q4.gguf", "state": "running", "error": None, "replicas": [], "_t": 0.0}
     _place(MODELS["chat-auto"], 2)
+    # config history of chat-auto: an earlier 32k-context config that ran out of memory, then the current one
+    big = MODELS["chat-auto"]
+    big["spec"] = {**big["spec"], "ctx_size": 32768, "kv_cache_type": "f16"}
+    _record_config(big, "failed", "RuntimeError: llama-server exited (code 1) | head log: "
+                   "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 9216.00 MiB on device 0: cudaMalloc failed: out of memory")
+    big["spec"] = {**big["spec"], "ctx_size": 8192, "kv_cache_type": "q8_0"}
+    CONFIGS["chat-auto"][0]["last_run"] -= 3600
+    _record_config(big)
     MODELS["chat-demand"] = {"spec": {"name": "chat-demand", "source": "coordinator://qwen2.5-3b-q4.gguf", "ctx_size": 4096, "parallel": 2,
         "replicas": 1, "pin_devices": [], "priority": 30, "preemptible": False, "spread": "gpu", "min_replicas": 0, "max_replicas": 2,
         "autoscale": {"target_busy": 0.7, "up_after_s": 30, "down_after_s": 300}, "idle_unload_s": 600},
@@ -660,7 +690,39 @@ def start_model(name: str, body: dict | None = None) -> dict:
     m = _model(name)
     m["spec"]["replicas"] = int((body or {}).get("replicas", 1))
     m["state"], m["error"], m["_t"], m["_manual"] = "starting", None, time.time(), True
+    _record_config(m)
     return m["spec"]
+
+
+@app.get("/api/models/{name}/configs", dependencies=[api])
+def list_configs(name: str) -> list[dict]:
+    m = _model(name)
+    cur = {k: v for k, v in m["spec"].items() if k != "replicas"}
+    return [{**c, "spec": {**c["spec"], "replicas": 0}, "file": c["spec"].get("source", "").removeprefix("coordinator://") or None,
+             "current": c["spec"] == cur} for c in CONFIGS.get(name, [])]
+
+
+@app.post("/api/models/{name}/configs/{config_id}/run", dependencies=[api])
+def run_config(name: str, config_id: int, body: dict | None = None) -> dict:
+    m = _model(name)
+    c = next((c for c in CONFIGS.get(name, []) if c["id"] == config_id), None)
+    if c is None:
+        raise HTTPException(404, f"no config {config_id} in the history of model {name}")
+    n = int((body or {}).get("replicas") or m["spec"].get("replicas") or 1)
+    m["spec"] = {**c["spec"], "replicas": n}
+    m["state"], m["error"], m["_t"], m["_manual"] = "starting", None, time.time(), True
+    _record_config(m)
+    return m["spec"]
+
+
+@app.delete("/api/models/{name}/configs/{config_id}", dependencies=[api])
+def delete_config(name: str, config_id: int) -> dict:
+    _model(name)
+    hist = CONFIGS.get(name, [])
+    if not any(c["id"] == config_id for c in hist):
+        raise HTTPException(404, f"no config {config_id} in the history of model {name}")
+    CONFIGS[name] = [c for c in hist if c["id"] != config_id]
+    return {"ok": True}
 
 
 @app.post("/api/models/{name}/stop", dependencies=[api])
@@ -675,6 +737,7 @@ def stop_model(name: str) -> dict:
 def del_model(name: str) -> dict:
     _model(name)
     del MODELS[name]
+    CONFIGS.pop(name, None)
     return {"ok": True}
 
 
