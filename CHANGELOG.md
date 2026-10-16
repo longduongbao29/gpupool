@@ -8,6 +8,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-10-16
+
+Re-release of 0.9.9. The `v0.9.9` tag was placed on the 0.9.8 commit, so the published 0.9.9 images carry 0.9.8 code
+(failed replicas still listed on cards, a busy port still reported as a launch failure). 0.9.10 contains every 0.9.9
+change listed below; use it instead of 0.9.9.
+
 ## [0.9.9] - 2026-10-16
 
 ### Changed
