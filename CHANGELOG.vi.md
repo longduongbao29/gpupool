@@ -8,6 +8,14 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.7] - 2026-10-16
+
+### Sửa lỗi
+
+- Xóa replica lỗi trên card model giờ chỉ cần bấm một lần. Card chỉ hiển thị lần lỗi mới nhất, nên trước đây xóa nó
+  lại làm lộ bản ghi lỗi cũ hơn và phải bấm hai ba lần; `DELETE /api/models/{name}/replicas/{id}` giờ xóa luôn các bản
+  ghi failed và stopped cũ hơn của model.
+
 ## [0.9.6] - 2026-10-13
 
 ### Đã sửa

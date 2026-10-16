@@ -492,13 +492,16 @@ def make_api_router(*, store, reconciler, poller, balancer, library, cfg: Coordi
 
     @router.delete("/models/{name}/replicas/{replica_id}")
     async def delete_replica(name: str, replica_id: str) -> dict:
-        """Forget a failed or stopped replica (its record only: it holds no engine or port)."""
+        """Forget a failed or stopped replica (its record only: it holds no engine or port), along
+        with the model's older terminal records. The card lists only the newest failure, so
+        leaving the older ones would surface the next one and make one delete look ignored."""
         rec = store.get_replica(replica_id)
         if rec is None or rec.model != name:
             raise HTTPException(404, f"no replica {replica_id} of model {name}")
         if not store.delete_replica(replica_id, set(TERMINAL_STATES)):
             raise HTTPException(409, f"replica {replica_id} is {rec.state}; only a failed or stopped "
                                      "replica can be deleted (stop the model to remove a live one)")
+        store.delete_terminal_replicas_before(name, rec.created_at, rec.replica_id)
         return {"ok": True}
 
     @router.post("/models/{name}/plan")
