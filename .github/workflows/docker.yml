@@ -142,7 +142,7 @@ jobs:
           docker run --rm --entrypoint gpupool "$img" --help
 
   # The "-all" agent image: llama.cpp + vLLM + SGLang in one container (WITH_ENGINES=1, see
-  # docker/agent.Dockerfile). Tens of GB of wheels, so it is built for releases and on demand
+  # docker/agent.Dockerfile). ~11 GB of engine environments, so it is built for releases and on demand
   # (workflow_dispatch) only, never per PR: the `agent` job already checks the same Dockerfile with
   # the engines step skipped. Tagged <version>-all / latest-all.
   agent-all:

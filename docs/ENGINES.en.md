@@ -29,7 +29,7 @@ The `gpupool-agent` image comes in two flavours:
 | Tag | Engines | Size |
 | --- | --- | --- |
 | `gpupool-agent:<version>` | llama.cpp | ~2 GB |
-| `gpupool-agent:<version>-all` | llama.cpp, vLLM, SGLang | tens of GB |
+| `gpupool-agent:<version>-all` | llama.cpp, vLLM, SGLang | ~18 GB (~6 GB to download) |
 
 The `-all` image installs vLLM and SGLang in two virtualenvs (`/opt/engines/vllm`, `/opt/engines/sglang`: they pin
 different versions of shared packages) and sets `GPUPOOL_VLLM_CMD` / `GPUPOOL_SGLANG_CMD` to them, so the agent offers
