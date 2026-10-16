@@ -937,3 +937,19 @@ async def test_delete_replica_only_removes_terminal_ones(env):
     assert (await c.delete("/api/models/other/replicas/m-bad")).status_code == 404
     assert (await c.delete("/api/models/m/replicas/m-bad")).status_code == 200
     assert store.get_replica("m-bad") is None and store.get_replica("m-live") is not None
+
+
+async def test_delete_replica_also_forgets_older_failures(env):
+    c, store, rec, _, clock, _ = env
+    store.put_model(SPEC.model_copy(update={"replicas": 1}))
+    put_replica(store, "m-old1", state="failed", now=1.0)
+    put_replica(store, "m-old2", state="stopped", now=2.0)
+    put_replica(store, "m-new", state="failed", now=3.0)
+    put_replica(store, "m-newer", state="failed", now=4.0)
+    put_replica(store, "o-old", model="other", state="failed", now=1.0)
+    assert [r["replica_id"] for r in model_state((await c.get("/api/state")).json())["replicas"]] == ["m-newer"]
+    assert (await c.delete("/api/models/m/replicas/m-new")).status_code == 200
+    assert [r.replica_id for r in store.list_replicas(model="m")] == ["m-newer"]
+    assert store.get_replica("o-old") is not None
+    assert (await c.delete("/api/models/m/replicas/m-newer")).status_code == 200
+    assert model_state((await c.get("/api/state")).json())["replicas"] == []

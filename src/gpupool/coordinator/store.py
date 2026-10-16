@@ -367,6 +367,18 @@ class Store:
                 self._version += 1
             return bool(cur.rowcount)
 
+    def delete_terminal_replicas_before(self, model: str, created_at: float, replica_id: str) -> int:
+        """Delete the model's terminal replicas (state 'stopped' or 'failed') at or older than
+        (created_at, replica_id). Returns the number of rows deleted."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM replicas WHERE model=? AND state IN ('stopped', 'failed')"
+                " AND (created_at < ? OR (created_at = ? AND replica_id <= ?))",
+                (model, created_at, created_at, replica_id))
+            if cur.rowcount:
+                self._version += 1
+            return cur.rowcount
+
     def prune_replicas(self, keep_per_model: int) -> int:
         """Delete terminal replicas (state 'stopped' or 'failed') of each model beyond the
         newest `keep_per_model` (order: created_at, replica_id). Never deletes any other state."""

@@ -8,6 +8,12 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Removing a failed replica from a model card now takes one click. The card lists only the newest failure, so deleting it
+  used to reveal the next older failed record and needed two or three clicks; `DELETE /api/models/{name}/replicas/{id}`
+  now also forgets the model's older failed and stopped records.
+
 ## [0.9.6] - 2026-10-13
 
 ### Fixed
