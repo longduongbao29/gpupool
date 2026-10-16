@@ -221,6 +221,8 @@ function app() {
     // add server modal
     addSrv: { open: false, url: "", name: "gpu-node-1", busy: false },
     delSrv: null, // server object pending delete confirmation
+    // config history of one deployment (the settings each launch used)
+    hist: { open: false, name: "", items: [], loading: false, busy: false, err: "", show: {} },
     // add model modal
     addMdl: { open: false, tab: "hf", repo: "", files: [], file: "", path: "", busy: false, listing: false, err: "", noGguf: false, browse: emptyBrowse() },
     // conversion (Hugging Face -> GGUF)
@@ -1647,6 +1649,77 @@ function app() {
         await this.api("DELETE", "/api/models/" + encodeURIComponent(m.spec.name));
         await this.refresh();
       } catch (e) { this.fail(e); }
+    },
+    // ----- config history: every configuration a deployment was launched with, and how it went -----
+    openHist: async function (m) {
+      this.hist = { open: true, name: m.spec.name, items: [], loading: true, busy: false, err: "", show: {} };
+      await this.loadHist();
+    },
+    loadHist: async function () {
+      var name = this.hist.name;
+      try {
+        var items = await this.api("GET", "/api/models/" + encodeURIComponent(name) + "/configs");
+        if (this.hist.name === name) { this.hist.items = items; this.hist.err = ""; }
+      } catch (e) { if (this.hist.name === name) this.hist.err = (e && e.message) || String(e); }
+      this.hist.loading = false;
+    },
+    histModel: function () {
+      var n = this.hist.name;
+      return ((this.st && this.st.models) || []).find(function (m) { return m.spec.name === n; }) || null;
+    },
+    histVal: function (k, v) {
+      if (v == null || v === "") return this.dash;
+      if (Array.isArray(v)) return v.length ? v.join(", ") : (k === "pin_devices" ? "all GPUs" : this.dash);
+      if (typeof v === "string" && v.indexOf("coordinator://") === 0) return v.slice(14);
+      return String(v);
+    },
+    HIST_LABELS: { source: "file", ctx_size: "context", parallel: "parallel", kv_cache_type: "KV cache", flash_attn: "flash attention",
+      speculative: "speculative", draft: "draft", draft_n_max: "draft tokens", ubatch: "ubatch", batch: "batch", kv_unified: "unified KV",
+      reasoning: "reasoning", reasoning_effort: "reasoning effort", reasoning_budget: "reasoning budget", pin_devices: "allowed GPUs",
+      priority: "priority", preemptible: "preemptible", spread: "spread", min_replicas: "min replicas", max_replicas: "max replicas",
+      autoscale: "autoscale", idle_unload_s: "idle unload (s)" },
+    histLabel: function (k) { return this.HIST_LABELS[k] || k.replace(/_/g, " "); },
+    histSummary: function (c) {
+      var s = c.spec, bits = [this.histVal("source", s.source), "ctx " + s.ctx_size, "parallel " + s.parallel, "KV " + s.kv_cache_type];
+      if (s.speculative && s.speculative !== "none") bits.push("speculative " + s.speculative + (s.draft ? " (" + this.histVal("draft", s.draft) + ")" : ""));
+      bits.push((s.pin_devices || []).length ? "GPUs " + s.pin_devices.join(", ") : "all GPUs");
+      if (s.min_replicas != null || s.max_replicas != null) bits.push("replicas " + this.histVal("", s.min_replicas) + "–" + this.histVal("", s.max_replicas));
+      return bits.join(" · ");
+    },
+    // Settings where this config differs from the deployment's current one: "context 4096 (now 8192)".
+    histDiff: function (c) {
+      var m = this.histModel(), self = this;
+      if (!m) return [];
+      var cur = m.spec, keys = Object.keys(Object.assign({}, c.spec, cur));
+      return keys.filter(function (k) { return k !== "name" && k !== "replicas" && JSON.stringify(c.spec[k]) !== JSON.stringify(cur[k]); })
+        .map(function (k) { return self.histLabel(k) + " " + self.histVal(k, c.spec[k]) + " (now " + self.histVal(k, cur[k]) + ")"; });
+    },
+    histWhen: function (c) {
+      var n = c.runs + (c.runs === 1 ? " launch" : " launches");
+      return "last run " + this.ago(c.last_run) + " · " + n + ", " + c.ready + " ready, " + c.failed + " failed";
+    },
+    histRun: async function (c) {
+      var m = this.histModel();
+      var diff = this.histDiff(c);
+      if (!(await this.confirmBox("Run this configuration?\n\nIt becomes the settings of \"" + this.hist.name + "\"" +
+          (m && m.spec.replicas ? " and its running replicas are replaced (requests in flight finish first)." : " and the deployment starts.") +
+          (diff.length ? "\n\nChanges: " + diff.join("; ") : ""), { ok: "Run" }))) return;
+      this.hist.busy = true;
+      try {
+        await this.api("POST", "/api/models/" + encodeURIComponent(this.hist.name) + "/configs/" + c.id + "/run");
+        this.toast("Running the earlier configuration of " + this.hist.name, "ok");
+        this.hist.open = false;
+        await this.refresh();
+      } catch (e) { this.fail(e); }
+      this.hist.busy = false;
+    },
+    histDelete: async function (c) {
+      this.hist.busy = true;
+      try {
+        await this.api("DELETE", "/api/models/" + encodeURIComponent(this.hist.name) + "/configs/" + c.id);
+        await this.loadHist();
+      } catch (e) { this.fail(e); }
+      this.hist.busy = false;
     },
     openForm: function (m, file) {
       if (m) {

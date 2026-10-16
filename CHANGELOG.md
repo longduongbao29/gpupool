@@ -8,6 +8,17 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-10-16
+
+### Added
+
+- **Config history** for each deployment. Every configuration a model is launched with is recorded (all settings
+  except the replica count), together with how its launches went: how many became ready or failed, and the latest
+  error. The new **History** button on a model card lists the 20 most recently run configurations, shows how each
+  differs from the current settings, and **Run this config** makes an earlier one the deployment's settings again and
+  starts it (running replicas with other settings are drained and relaunched). New routes:
+  `GET /api/models/{name}/configs`, `POST /api/models/{name}/configs/{id}/run`, `DELETE /api/models/{name}/configs/{id}`.
+
 ## [0.9.7] - 2026-10-16
 
 ### Fixed

@@ -1161,3 +1161,21 @@ def test_overview_pool_picture_is_live_and_respects_reduced_motion():
     # the packets and the sweep stop when the system asks for less motion
     rm = css[css.index("@media (prefers-reduced-motion: reduce) {\n  .pf-pkt"):]
     assert ".pf-model::after" in rm[:200] and "animation: none" in rm[:300]
+
+
+def test_mock_config_history_contract(client):
+    keys = {"id", "spec", "file", "first_run", "last_run", "runs", "ready", "failed", "last_result", "last_error", "current"}
+    hist = client.get("/api/models/chat-auto/configs", headers=HEAD).json()
+    assert len(hist) == 2 and all(set(c) == keys for c in hist)
+    cur, old = hist
+    assert cur["current"] and not old["current"] and old["last_result"] == "failed" and old["last_error"]
+    r = client.post(f"/api/models/chat-auto/configs/{old['id']}/run", headers=HEAD)
+    assert r.status_code == 200 and r.json()["ctx_size"] == old["spec"]["ctx_size"]
+    assert [c["current"] for c in client.get("/api/models/chat-auto/configs", headers=HEAD).json()] == [True, False]
+    assert client.delete(f"/api/models/chat-auto/configs/{old['id']}", headers=HEAD).status_code == 200
+    assert client.post(f"/api/models/chat-auto/configs/{old['id']}/run", headers=HEAD).status_code == 404
+
+
+def test_ui_has_config_history():
+    js, html = (UI / "app.js").read_text(), (UI / "index.html").read_text()
+    assert "/configs" in js and "/run" in js and "openHist(m)" in html and "histRun(c)" in html

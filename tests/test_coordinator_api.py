@@ -953,3 +953,47 @@ async def test_delete_replica_also_forgets_older_failures(env):
     assert store.get_replica("o-old") is not None
     assert (await c.delete("/api/models/m/replicas/m-newer")).status_code == 200
     assert model_state((await c.get("/api/state")).json())["replicas"] == []
+
+
+async def test_config_history_lists_reruns_and_deletes(env):
+    c, store, rec, _, clock, lib = env
+    register(store, clock, node("a"))
+    assert (await c.put("/api/models/m", json={"file": "x.gguf", "ctx_size": 4096})).status_code == 200
+    old = store.record_config_run(store.get_model("m"), 1.0)
+    store.note_config_result(old, False, "out of memory")
+    assert (await c.put("/api/models/m", json={"file": "x.gguf", "ctx_size": 2048})).status_code == 200
+    new = store.record_config_run(store.get_model("m"), 2.0)
+    store.note_config_result(new, True)
+
+    r = (await c.get("/api/models/m/configs")).json()
+    assert [(e["id"], e["current"], e["last_result"]) for e in r] == [(new, True, "ready"), (old, False, "failed")]
+    assert r[1]["file"] == "x.gguf" and r[1]["spec"]["ctx_size"] == 4096 and r[1]["last_error"] == "out of memory"
+    assert (await c.get("/api/models/nope/configs")).status_code == 404
+
+    # running an earlier config makes it the settings again, starts the model and replaces the
+    # replicas running another config
+    rr = put_replica(store, "m-new", state="ready", now=2.0)
+    rr.config_id = new
+    store.put_replica(rr)
+    rr = put_replica(store, "m-old", state="ready", now=2.0, head_port=9001)
+    rr.config_id = old
+    store.put_replica(rr)
+    r = await c.post(f"/api/models/m/configs/{old}/run", json={"replicas": 2})
+    assert r.status_code == 200
+    assert store.get_replica("m-new").state == "draining" and store.get_replica("m-old").state == "ready"
+    spec = store.get_model("m")
+    assert (spec.ctx_size, spec.replicas) == (4096, 2)
+    assert [e["current"] for e in (await c.get("/api/models/m/configs")).json()] == [False, True]
+    assert (await c.post(f"/api/models/m/configs/{old}/run")).json()["replicas"] == 2  # keeps the count
+    assert (await c.post("/api/models/m/configs/999/run")).status_code == 404
+
+    # a config whose file left the library cannot run
+    store.record_config_run(spec.model_copy(update={"source": "coordinator://big.gguf"}), 3.0)
+    gone = store.list_configs("m")[0].id
+    r = await c.post(f"/api/models/m/configs/{gone}/run")
+    assert r.status_code == 422 and "big.gguf" in r.json()["detail"]
+    assert store.get_model("m").source == "coordinator://x.gguf"
+
+    assert (await c.delete(f"/api/models/m/configs/{old}")).status_code == 200
+    assert (await c.delete(f"/api/models/m/configs/{old}")).status_code == 404
+    assert old not in [e["id"] for e in (await c.get("/api/models/m/configs")).json()]

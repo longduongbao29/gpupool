@@ -242,3 +242,30 @@ def test_calibration_resets_when_the_estimator_changes(tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod, "ESTIMATOR_VERSION", store_mod.ESTIMATOR_VERSION + 1)
     s = store_mod.Store(db)
     assert s.get_calibration("m") is None and s.mem_factor("m") == 1.0
+
+
+def test_config_history_dedupes_counts_and_prunes(store):
+    from gpupool.common.models import ModelSpec
+    from gpupool.coordinator.store import CONFIGS_KEEP
+    s = store
+    spec = ModelSpec(name="m", source="coordinator://m.gguf", replicas=1)
+    a = s.record_config_run(spec, 1.0)
+    assert s.record_config_run(spec.model_copy(update={"replicas": 3}), 2.0) == a  # the count is not config
+    b = s.record_config_run(spec.model_copy(update={"ctx_size": 8192}), 3.0)
+    assert b != a
+    s.note_config_result(a, True)
+    s.note_config_result(b, False, "out of memory")
+    s.note_config_result(None, True)  # replicas from before the history: ignored
+    ca, cb = s.get_config("m", a), s.get_config("m", b)
+    assert (ca.runs, ca.ready, ca.last_result, ca.first_run, ca.last_run) == (2, 1, "ready", 1.0, 2.0)
+    assert (cb.failed, cb.last_error) == (1, "out of memory")
+    assert [c.id for c in s.list_configs("m")] == [b, a]
+    for i in range(CONFIGS_KEEP):
+        s.record_config_run(spec.model_copy(update={"ctx_size": 1000 + i}), 10.0 + i)
+    ids = [c.id for c in s.list_configs("m")]
+    assert len(ids) == CONFIGS_KEEP and a not in ids and b not in ids
+    assert s.get_config("other", ids[0]) is None and not s.delete_config("other", ids[0])
+    assert s.delete_config("m", ids[0]) and len(s.list_configs("m")) == CONFIGS_KEEP - 1
+    s.put_model(spec)
+    s.delete_model("m")
+    assert s.list_configs("m") == []

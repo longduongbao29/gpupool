@@ -2392,3 +2392,29 @@ async def test_launch_retries_stop_after_max_failures_until_retry_now(mock_healt
     await settle(rec)
     assert len(store.list_replicas()) == rec.MAX_LAUNCH_FAILURES + 1
     await rec.shutdown()
+
+
+async def test_launches_are_recorded_in_the_config_history(mock_health):
+    rec, store, clock = make_reconciler()
+    beat(store, clock, node("a"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    r = store.list_replicas()[0]
+    [c] = store.list_configs("m")
+    assert r.state == "ready" and r.config_id == c.id
+    assert (c.runs, c.ready, c.failed, c.last_result) == (1, 1, 0, "ready")
+    assert c.spec.replicas == 0 and c.spec.ctx_size == SPEC.ctx_size
+    await rec.shutdown()
+
+
+async def test_failed_launch_is_noted_on_its_config(mock_health):
+    client = FakeClient()
+    client.fail_start_on = "-head"
+    rec, store, clock = make_reconciler(planner=make_planner(rpc=True), client=client)
+    beat(store, clock, node("a"), node("b"))
+    store.put_model(SPEC)
+    await rec.tick()
+    await settle(rec)
+    [c] = store.list_configs("m")
+    assert (c.runs, c.ready, c.failed, c.last_result) == (1, 0, 1, "failed") and "boom" in c.last_error

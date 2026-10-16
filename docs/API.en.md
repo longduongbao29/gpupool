@@ -160,6 +160,9 @@ All under `/api`, admin key.
 | DELETE | `/api/models/{name}` | drain replicas and delete the spec |
 | GET | `/api/models/{name}/scaling` | autoscaler view |
 | POST | `/api/models/{name}/plan` | dry-run placement of one replica |
+| GET | `/api/models/{name}/configs` | config history: the configurations the model was launched with |
+| POST | `/api/models/{name}/configs/{id}/run` | make an earlier configuration the settings again and start it |
+| DELETE | `/api/models/{name}/configs/{id}` | remove one entry from the config history |
 
 ### `PUT /api/models/{name}`
 
@@ -214,7 +217,34 @@ No body. Sets `replicas = 0` (emits `model_stopped`); the reconciler drains the 
 ### `DELETE /api/models/{name}`
 
 Drains every active replica, then deletes the spec. Returns `{"ok": true}`. 404 if unknown. The library
-file is kept (but can then be deleted from the library).
+file is kept (but can then be deleted from the library). The model's config history goes with it.
+
+### Config history: `/api/models/{name}/configs`
+
+Every time a replica is launched, the coordinator records the configuration it was launched with: the whole
+`ModelSpec` except `replicas` (the on/off switch). Launches with the same settings share one entry, which counts
+them and remembers how they went. The 20 most recently run entries per model are kept. The web UI shows them under
+**History** on the model card.
+
+`GET /api/models/{name}/configs` returns the entries, most recently run first:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | entry id, used by the routes below |
+| `spec` | the `ModelSpec` launched (`replicas` stored as 0) |
+| `file` | library file name when the source is `coordinator://`, else null |
+| `first_run`, `last_run` | unix times of the first and the newest launch with it |
+| `runs`, `ready`, `failed` | replicas launched with it, how many became ready, how many failed (a launch error or a crash of the model; a lost server does not count) |
+| `last_result` | `ready` / `failed`, the newest outcome, or null while the first launch is under way |
+| `last_error` | the newest failure's error, or null |
+| `current` | true when it equals the model's current settings |
+
+`POST /api/models/{name}/configs/{id}/run` (optional body `{"replicas": n}`) stores that configuration as the
+model's settings and starts it, like `PUT` followed by `start`: running replicas are replaced by ones with these
+settings. The count is the body's, else the model's current count, else 1. The same checks as `PUT` apply (the file
+must still be a ready library item, pins must name registered servers, draft checks), 422 otherwise. Returns the
+`ModelSpec`. `DELETE /api/models/{name}/configs/{id}` removes one entry. Both answer 404 for an unknown model or
+entry.
 
 ### `GET /api/models/{name}/scaling`
 
@@ -505,7 +535,7 @@ Everything the web UI shows, in one call (admin key).
 | `error` | reason for `failed`, or the newest replica error while `starting` |
 | `scaling` | `{"min", "max", "desired", "avg_busy", "unloaded"}` |
 | `calibration` | the **VRAM self-calibration** block, `{"factor": 1.04, "samples": 3}`, or `null` until a replica of the model was measured. See below |
-| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`) plus `outstanding` (requests in flight) and `stage` (`{text, since}` while a launch is under way: checking or downloading the model file with progress, starting RPC servers, loading with llama-server's latest log line; null otherwise). Lists live replicas and the newest failed one |
+| `replicas[]` | `ReplicaRecord` fields (`replica_id`, `model`, `placement`, `state`, `created_at`, `updated_at`, `error`, `config_id`: its config history entry) plus `outstanding` (requests in flight) and `stage` (`{text, since}` while a launch is under way: checking or downloading the model file with progress, starting RPC servers, loading with llama-server's latest log line; null otherwise). Lists live replicas and the newest failed one |
 
 **`calibration`.** After a replica becomes ready, the coordinator asks the head's agent for what
 llama.cpp really allocated (`GET /engines/{engine_id}/memory`, section 10), compares it with the estimate
