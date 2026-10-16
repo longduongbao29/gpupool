@@ -8,6 +8,14 @@ Mọi thay đổi đáng chú ý của gpupool được ghi ở đây. Định d
 
 ## [Chưa phát hành]
 
+## [0.9.9] - 2026-10-16
+
+### Sửa lỗi
+
+- Tag Docker image `latest` giờ luôn trỏ tới bản phát hành mới nhất. Các bản build phát hành kết thúc theo thứ tự bất
+  kỳ, nên push một tag cũ cùng lúc với tag mới (v0.9.7 và v0.9.8) đã đưa `latest` về bản cũ; giờ bản build chỉ gắn
+  `latest` khi tag của nó là tag `v*` cao nhất.
+
 ## [0.9.8] - 2026-10-16
 
 ### Thêm mới

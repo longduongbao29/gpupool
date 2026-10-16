@@ -8,6 +8,14 @@ All notable changes to gpupool are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-10-16
+
+### Fixed
+
+- The `latest` Docker image tag now always points to the newest release. Release builds finish in any order, so
+  pushing an older tag together with a newer one (v0.9.7 and v0.9.8) moved `latest` back to the older version; a
+  release build now tags `latest` only when its tag is the highest `v*` tag.
+
 ## [0.9.8] - 2026-10-16
 
 ### Added
